@@ -61,7 +61,24 @@ struct Job {
 #[serde(default)]
 pub struct RenderMetadata {
     pub comment: String,
+    pub stabilization_hash: String,
 }
+
+/// Hash of the stabilization settings, written to the rendered file and used to detect outdated renders
+pub fn stabilization_settings_hash(v: &serde_json::Value) -> String {
+    format!("{:08x}", crc32fast::hash(serde_json::to_string(v).unwrap_or_default().as_bytes()))
+}
+pub fn stabilization_hash_from_file(url: &str) -> Option<String> {
+    let md = rendering::FfmpegProcessor::get_file_metadata(url).ok()?;
+    if let Some(v) = md.get("gyroflow_stabilization_hash") {
+        return Some(v.trim().to_owned());
+    }
+    // The mp4/mov muxer only writes known tags, the hash is also included in the comment
+    let comment = md.get("comment")?;
+    let pos = comment.find(STABILIZATION_HASH_COMMENT)?;
+    Some(comment[pos + STABILIZATION_HASH_COMMENT.len()..].lines().next()?.trim().to_owned())
+}
+const STABILIZATION_HASH_COMMENT: &str = "Gyroflow stabilization hash: ";
 
 #[derive(Default, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -118,7 +135,12 @@ impl RenderOptions {
     }
     pub fn get_metadata_dict(&self) -> ffmpeg_next::Dictionary<'_> {
         let mut metadata = ffmpeg_next::Dictionary::new();
-        metadata.set("comment", format!("Original filename: {}\n{}", self.input_filename, self.metadata.comment).trim());
+        let mut comment = format!("Original filename: {}\n{}", self.input_filename, self.metadata.comment).trim().to_string();
+        if !self.metadata.stabilization_hash.is_empty() {
+            metadata.set("gyroflow_stabilization_hash", &self.metadata.stabilization_hash);
+            comment.push_str(&format!("\n{}{}", STABILIZATION_HASH_COMMENT, self.metadata.stabilization_hash));
+        }
+        metadata.set("comment", &comment);
         metadata
     }
     pub fn update_from_json(&mut self, obj: &serde_json::Value) {
@@ -143,6 +165,7 @@ impl RenderOptions {
 
             if let Some(v) = obj.get("metadata").and_then(|x| x.as_object())  {
                 if let Some(s) = v.get("comment").and_then(|x| x.as_str()) { self.metadata.comment = s.to_string(); }
+                if let Some(s) = v.get("stabilization_hash").and_then(|x| x.as_str()) { self.metadata.stabilization_hash = s.to_string(); }
             }
 
             // Backwards compatibility
