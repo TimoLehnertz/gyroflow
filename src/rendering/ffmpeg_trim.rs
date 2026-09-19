@@ -103,7 +103,7 @@ pub fn render_trim_only<F>(stab: &StabilizationManager, progress: F, input_file:
         let include = match medium {
             media::Type::Video => video_ost_index < 0, // Limit to first video stream
             media::Type::Audio => render_options.audio,
-            media::Type::Data | media::Type::Subtitle => true,
+            media::Type::Data => render_options.preserve_other_tracks,
             _ => false
         };
         if !include { continue; }
@@ -117,8 +117,12 @@ pub fn render_trim_only<F>(stab: &StabilizationManager, progress: F, input_file:
 
         let mut ost = octx.add_stream(encoder::find(codec::Id::None))?;
         ost.set_parameters(stream.parameters());
-        // We need to set codec_tag to 0 lest we run into incompatible codec tag issues when muxing into a different container format.
-        unsafe { (*ost.parameters().as_mut_ptr()).codec_tag = 0; }
+        if medium != media::Type::Data {
+            // We need to set codec_tag to 0 lest we run into incompatible codec tag issues when muxing into a different container format.
+            // Data streams (e.g. GoPro/Sony metadata tracks) are often carried by a container-specific tag with no formal codec id,
+            // so resetting their tag makes the muxer unable to find one at all ("Could not find tag for codec none in stream").
+            unsafe { (*ost.parameters().as_mut_ptr()).codec_tag = 0; }
+        }
         ost.set_time_base(stream.time_base());
         ost.set_avg_frame_rate(stream.avg_frame_rate());
         if medium == media::Type::Video {
