@@ -128,6 +128,8 @@ pub struct MediaLibrary {
     get_item_name: qt_method!(fn(&self, item_id: u32) -> QString),
     get_trim_start: qt_method!(fn(&self, item_id: u32) -> f64),
     get_trim_end: qt_method!(fn(&self, item_id: u32) -> f64),
+    is_item_url: qt_method!(fn(&self, item_id: u32, url: QString) -> bool),
+    find_by_url: qt_method!(fn(&self, url: QString) -> u32),
 
     add_section: qt_method!(fn(&mut self, video_id: u32, trim_start: f64, trim_end: f64) -> u32),
     set_section_trim: qt_method!(fn(&mut self, item_id: u32, trim_start: f64, trim_end: f64)),
@@ -706,6 +708,16 @@ impl MediaLibrary {
     pub fn get_trim_start(&self, item_id: u32) -> f64 { self.section(item_id).map(|(_, s)| s.trim_start).unwrap_or(0.0) }
     pub fn get_trim_end  (&self, item_id: u32) -> f64 { self.section(item_id).map(|(_, s)| s.trim_end)  .unwrap_or(1.0) }
 
+    pub fn is_item_url(&self, item_id: u32, url: QString) -> bool {
+        let url = Self::to_url(&url.to_string(), false);
+        !url.is_empty() && self.item_settings(item_id).map(|(x, _, _, _)| x == url).unwrap_or_default()
+    }
+    pub fn find_by_url(&self, url: QString) -> u32 {
+        let url = Self::to_url(&url.to_string(), false);
+        if url.is_empty() { return 0; }
+        self.all_videos().find(|v| v.url == url).map(|v| v.id).unwrap_or_default()
+    }
+
     // ---------------------------------------------------------------------------------------------
     // ----------------------------------------- Sections ------------------------------------------
     // ---------------------------------------------------------------------------------------------
@@ -716,7 +728,7 @@ impl MediaLibrary {
         if let Some(v) = self.video_mut(video_id) {
             // Inherit from the last created section, or from the video itself if it's the first one
             let settings = v.sections.last().map(|s| s.settings.clone()).unwrap_or_else(|| v.settings.clone());
-            let num = v.sections.len() + 2; // the video itself counts as the first part
+            let num = v.sections.len() + 1;
             let output_path = Self::filename_with_index(&Self::default_output_filename(&v.filename, &suffix), num);
             v.expanded = true;
             v.sections.push(Section {
@@ -761,15 +773,30 @@ impl MediaLibrary {
                 }
             }
         }
+        // The trim range of a section is edited in the timeline of the main view
+        let new_trim = self.section(item_id).and_then(|(v, _)| {
+            let ranges = data.get("trim_ranges_ms")?.as_array()?;
+            let range = ranges.first()?.as_array()?;
+            let duration_ms = if v.duration_ms > 0.0 { v.duration_ms } else { return None; };
+            Some((range.first()?.as_f64()? / duration_ms, range.get(1)?.as_f64()? / duration_ms))
+        });
+
         let data = data.to_string();
         if let Some(v) = self.video_mut(item_id) {
             v.settings = Some(data);
         } else if let Some(s) = self.section_mut(item_id) {
             s.settings = Some(data);
+            if let Some((start, end)) = new_trim {
+                if end > start {
+                    s.trim_start = start;
+                    s.trim_end = end;
+                }
+            }
         } else {
             return;
         }
         self.update_stabilized_row(item_id);
+        if new_trim.is_some() { self.rebuild(); }
     }
 
     /// Project data of the item, used to load it in the main view

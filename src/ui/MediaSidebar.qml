@@ -102,8 +102,17 @@ ResizablePanel {
             const jobId = render_queue.add_file(media_library.get_item_url(id), "", JSON.stringify(ad));
             media_library.set_item_job(id, jobId);
         }
+        // The queue is started when the files are loaded and the settings are applied, in onProcessing_done
         root.isStabilizing = true;
-        render_queue.start();
+    }
+
+    // A new section starts with the trim range of the main view if this video is loaded there, otherwise with the whole video
+    function addSection(videoId: int, fromItemId: int): void {
+        root.saveCurrentSettings();
+        const isLoaded = media_library.current_item == fromItemId && window.videoArea.vid.loaded;
+        const ranges = isLoaded? window.videoArea.timeline.getTrimRanges() : [[0.0, 1.0]];
+        const newId = media_library.add_section(videoId, ranges[0][0], ranges[0][1]);
+        if (newId > 0) root.loadItem(newId);
     }
 
     function removeItem(itemId: int): void {
@@ -145,9 +154,21 @@ ResizablePanel {
             media_library.set_job_error(job_id, window.getReadableError(qsTr(text).arg(arg)) || text);
         }
         function onQueue_finished(): void {
-            if (root.isStabilizing) {
+            if (root.isStabilizing && media_library.active_job_count() == 0) {
                 root.isStabilizing = false;
                 media_library.refresh_outputs();
+            }
+        }
+    }
+
+    // The main view can also be loaded from outside of the sidebar, in that case follow the loaded file
+    Connections {
+        target: window.videoArea;
+        function onLoadedFileUrlChanged(): void {
+            const url = window.videoArea.loadedFileUrl.toString();
+            if (!media_library.is_item_url(media_library.current_item, url)) {
+                root.saveCurrentSettings();
+                media_library.set_current_item(media_library.find_by_url(url));
             }
         }
     }
@@ -329,13 +350,7 @@ ResizablePanel {
                     iconName: "plus";
                     text: qsTr("Add section");
                     enabled: !dlg.isFolder;
-                    onTriggered: {
-                        const videoId = dlg.isSection? parent_id : item_id;
-                        const isLoaded = media_library.current_item == item_id && window.videoArea.vid.loaded;
-                        const ranges = isLoaded? window.videoArea.timeline.getTrimRanges() : [[0.0, 1.0]];
-                        const newId = media_library.add_section(videoId, ranges[0][0], ranges[0][1]);
-                        if (newId > 0) root.loadItem(newId);
-                    }
+                    onTriggered: root.addSection(dlg.isSection? parent_id : item_id, item_id);
                 }
                 Action {
                     iconName: "play";
@@ -449,6 +464,18 @@ ResizablePanel {
                         anchors.right: parent.right;
                         anchors.verticalCenter: parent.verticalCenter;
                         spacing: 3 * dpiScale;
+                        LinkButton {
+                            visible: !dlg.isFolder;
+                            width: 20 * dpiScale;
+                            height: 20 * dpiScale;
+                            anchors.verticalCenter: parent.verticalCenter;
+                            leftPadding: 0; rightPadding: 0;
+                            icon.width: 10 * dpiScale;
+                            icon.height: 10 * dpiScale;
+                            iconName: "plus";
+                            tooltip: qsTr("Add a section of this video");
+                            onClicked: root.addSection(dlg.isSection? parent_id : item_id, item_id);
+                        }
                         QQC.BusyIndicator {
                             visible: scanning;
                             height: 16 * dpiScale;
