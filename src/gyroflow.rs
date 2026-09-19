@@ -12,6 +12,7 @@ use std::cell::RefCell;
 pub use gyroflow_core as core;
 pub mod util;
 pub mod controller;
+pub mod media_library;
 pub mod rendering;
 pub mod external_sdk;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -165,6 +166,9 @@ fn entry() {
     let rq = RefCell::new(rendering::render_queue::RenderQueue::new(ctl.borrow().stabilizer.clone()));
     let rqpinned = unsafe { QObjectPinned::new(&rq) };
 
+    let ml = RefCell::new(media_library::MediaLibrary::new(ctl.borrow().stabilizer.clone()));
+    let mlpinned = unsafe { QObjectPinned::new(&ml) };
+
     let fs = RefCell::new(controller::Filesystem::default());
     let fspinned = unsafe { QObjectPinned::new(&fs) };
 
@@ -188,6 +192,7 @@ fn entry() {
     engine.set_object_property("ui_tools".into(), ui_tools_pinned);
     engine.set_object_property("settings".into(), settings_pinned);
     engine.set_object_property("render_queue".into(), rqpinned);
+    engine.set_object_property("media_library".into(), mlpinned);
     engine.set_object_property("filesystem".into(), fspinned);
     {
         let mut ui = ui_tools.borrow_mut();

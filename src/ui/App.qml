@@ -19,14 +19,15 @@ Rectangle {
     property QtObject controller: main_controller;
 
     property bool isLandscape: width > height;
+    property real mediaPanelWidth: mediaPanel.visible? mediaPanel.width : 0;
     onIsLandscapeChanged: {
         if (isLandscape) {
             // Landscape layout
             leftPanel.y = 0;
-            rightPanel.x = Qt.binding(() => (window.isMobileLayout? 0 : leftPanel.width) + videoAreaCol.width);
+            rightPanel.x = Qt.binding(() => window.mediaPanelWidth + (window.isMobileLayout? 0 : leftPanel.width) + videoAreaCol.width);
             rightPanel.y = 0;
-            videoAreaCol.x = Qt.binding(() => (videoArea.fullScreen || window.isMobileLayout? 0 : leftPanel.width));
-            videoAreaCol.width = Qt.binding(() => mainLayout.width - (videoArea.fullScreen? 0 : (window.isMobileLayout? 0 : leftPanel.width) + rightPanel.width));
+            videoAreaCol.x = Qt.binding(() => (videoArea.fullScreen? 0 : window.mediaPanelWidth + (window.isMobileLayout? 0 : leftPanel.width)));
+            videoAreaCol.width = Qt.binding(() => mainLayout.width - (videoArea.fullScreen? 0 : window.mediaPanelWidth + (window.isMobileLayout? 0 : leftPanel.width) + rightPanel.width));
             videoAreaCol.height = Qt.binding(() => mainLayout.height);
             leftPanel.fixedWidth = 0;
             rightPanel.fixedWidth = 0;
@@ -143,12 +144,21 @@ Rectangle {
         width: parent.width;
         height: parent.height - y;
 
+        MediaSidebar {
+            id: mediaPanel;
+            visible: !videoArea.fullScreen && !isMobileLayout && window.isLandscape;
+            maxWidth: parent.width - leftPanel.width - rightPanel.width - 50 * dpiScale;
+            implicitWidth: settings.value("mediaPanelSize", defaultWidth);
+            onWidthChanged: settings.setValue("mediaPanelSize", width);
+        }
+
         SidePanel {
             id: leftPanel;
             direction: SidePanel.HandleRight;
             topPadding: gflogo.height;
+            x: window.mediaPanelWidth;
             visible: !videoArea.fullScreen && !isMobileLayout;
-            maxWidth: parent.width - rightPanel.width - 50 * dpiScale;
+            maxWidth: parent.width - window.mediaPanelWidth - rightPanel.width - 50 * dpiScale;
             implicitWidth: settings.value("leftPanelSize", defaultWidth);
             onWidthChanged: settings.setValue("leftPanelSize", width);
             Column {
@@ -186,8 +196,8 @@ Rectangle {
         Column {
             id: videoAreaCol;
             y: 0;
-            x: videoArea.fullScreen? 0 : leftPanel.width;
-            width: parent? parent.width - (videoArea.fullScreen? 0 : leftPanel.width + rightPanel.width) : 0;
+            x: videoArea.fullScreen? 0 : window.mediaPanelWidth + leftPanel.width;
+            width: parent? parent.width - (videoArea.fullScreen? 0 : window.mediaPanelWidth + leftPanel.width + rightPanel.width) : 0;
             height: parent? parent.height : 0;
             VideoArea {
                 id: videoArea;
@@ -487,9 +497,9 @@ Rectangle {
         SidePanel {
             id: rightPanel;
             visible: !videoArea.fullScreen;
-            x: leftPanel.width + videoAreaCol.width;
+            x: window.mediaPanelWidth + leftPanel.width + videoAreaCol.width;
             direction: SidePanel.HandleLeft;
-            maxWidth: parent.width - leftPanel.width - 50 * dpiScale;
+            maxWidth: parent.width - window.mediaPanelWidth - leftPanel.width - 50 * dpiScale;
             implicitWidth: settings.value("rightPanelSize", defaultWidth);
             onWidthChanged: settings.setValue("rightPanelSize", width);
             col.visible: !isMobileLayout;

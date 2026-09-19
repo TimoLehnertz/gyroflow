@@ -606,6 +606,18 @@ impl<'a> FfmpegProcessor<'a> {
         self.video.on_encoder_initialized = Some(Box::new(cb));
     }
 
+    pub fn get_file_metadata(url: &str) -> Result<std::collections::HashMap<String, String>, ffmpeg_next::Error> {
+        let mut file = FfmpegPathWrapper::new(url, false).map_err(|_| ffmpeg_next::Error::ProtocolNotFound)?;
+        let mut dict = Dictionary::new();
+        if file.path.starts_with("fd:") {
+            dict.set("fd", &file.path[3..]);
+            file.path = "fd:".into();
+        }
+
+        let context = format::input_with_dictionary(&file.path, dict)?;
+        Ok(context.metadata().iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+    }
+
     pub fn get_video_info(url: &str) -> Result<VideoInfo, ffmpeg_next::Error> {
         let mut file = FfmpegPathWrapper::new(url, false).map_err(|_| ffmpeg_next::Error::ProtocolNotFound)?;
         let mut dict = Dictionary::new();
