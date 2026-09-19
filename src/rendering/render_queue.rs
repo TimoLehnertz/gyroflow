@@ -88,9 +88,13 @@ pub struct RenderOptions {
     pub export_trims_separately: bool,
     pub audio_codec: String,
     pub interpolation: String,
+    pub disable_stabilization: bool,
 }
 impl RenderOptions {
     pub fn settings_string(&self, fps: f64) -> String {
+        if self.disable_stabilization {
+            return format!("{:.3}fps | {}", fps, util::tr("RenderQueue", "Trim only, no stabilization"));
+        }
         let codec_info = match self.codec.as_ref() {
             "H.264/AVC" | "H.265/HEVC" | "AV1" => format!("{} {:.0} Mbps", self.codec, self.bitrate),
             "DNxHD" => self.codec_options.clone(),
@@ -140,6 +144,7 @@ impl RenderOptions {
             if let Some(v) = obj.get("export_trims_separately").and_then(|x| x.as_bool()) { self.export_trims_separately = v; }
             if let Some(v) = obj.get("audio_codec")            .and_then(|x| x.as_str())  { self.audio_codec = v.to_string(); }
             if let Some(v) = obj.get("interpolation")          .and_then(|x| x.as_str())  { self.interpolation = v.to_string(); }
+            if let Some(v) = obj.get("disable_stabilization")  .and_then(|x| x.as_bool()) { self.disable_stabilization = v; }
 
             if let Some(v) = obj.get("metadata").and_then(|x| x.as_object())  {
                 if let Some(s) = v.get("comment").and_then(|x| x.as_str()) { self.metadata.comment = s.to_string(); }
@@ -950,8 +955,10 @@ impl RenderQueue {
             }
 
             core::run_threaded(move || {
-                Self::do_autosync(stab.clone(), processing, &input_file, err2, proc_height);
-                stab.recompute_blocking();
+                if !render_options.disable_stabilization {
+                    Self::do_autosync(stab.clone(), processing, &input_file, err2, proc_height);
+                    stab.recompute_blocking();
+                }
 
                 if let Some((opt, path, fields)) = export_metadata {
                     let result = || -> Result<(), core::GyroflowCoreError> {
@@ -1077,6 +1084,13 @@ impl RenderQueue {
                 let original_gpu_decode = stab.gpu_decoding.load(SeqCst);
                 'ranges: for range in ranges_to_render {
                     if cancel_flag.load(SeqCst) { break; }
+                    if render_options.disable_stabilization {
+                        if let Err(e) = rendering::render_trim_only(&stab, progress.clone(), &input_file, &render_options, range, cancel_flag.clone(), pause_flag.clone()) {
+                            err(("An error occured: %1".to_string(), e.to_string()));
+                            break 'ranges;
+                        }
+                        continue;
+                    }
                     let mut i = 0;
                     loop {
                         let result = rendering::render(stab.clone(), progress.clone(), &input_file, &render_options, i, range, cancel_flag.clone(), pause_flag.clone(), encoder_initialized.clone());
@@ -1134,11 +1148,15 @@ impl RenderQueue {
             "EXR Sequence"  => "_%05d.exr",
             "PNG Sequence"  => "_%05d.png",
             _ => ".mp4"
-        });
+        }).to_owned();
         if ext == ".mp4" && render_options.preserve_other_tracks {
-            ext = ".mov";
+            ext = ".mov".to_owned();
         }
         if let Some(pos) = filename.rfind('.') {
+            // Trim-only export copies the streams, so keep the original container
+            if render_options.disable_stabilization {
+                ext = filename[pos..].to_owned();
+            }
             filename = filename[..pos].to_owned();
         }
 

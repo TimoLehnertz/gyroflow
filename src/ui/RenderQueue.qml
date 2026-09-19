@@ -21,6 +21,10 @@ Item {
     Ease on anchors.bottomMargin { }
     Ease on anchors.topMargin { }
 
+    Component.onCompleted: {
+        QT_TR_NOOP("Trim only, no stabilization"); // Used in render_queue.rs
+    }
+
     MouseArea {
         anchors.fill: parent;
         preventStealing: true;

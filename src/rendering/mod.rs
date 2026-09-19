@@ -2,6 +2,7 @@
 // Copyright © 2021-2022 Adrian <adrian.eddy at gmail>
 
 mod ffmpeg_audio;
+mod ffmpeg_trim;
 mod ffmpeg_video;
 mod ffmpeg_video_converter;
 mod audio_resampler;
@@ -18,6 +19,7 @@ pub mod ffmpeg_android;
 
 pub use self::video_processor::VideoProcessor;
 pub use self::ffmpeg_processor::{ FfmpegProcessor, FFmpegError };
+pub use self::ffmpeg_trim::render_trim_only;
 use render_queue::RenderOptions;
 use crate::core::{ StabilizationManager, stabilization::* };
 use ffmpeg_next::{ format::Pixel, frame::Video, codec, Error, ffi };
