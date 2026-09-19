@@ -76,6 +76,7 @@ struct Video {
     lens_profile: String,
     lens_warning: bool,
     scanning: bool,
+    scan_queued: bool,
     settings: Option<String>,
     output_path: String,
     output_hash: Option<String>,
@@ -502,7 +503,10 @@ impl MediaLibrary {
     // ---------------------------------------------------------------------------------------------
 
     fn scan_pending(&mut self) {
-        let urls = self.all_videos().filter(|v| v.scanning).map(|v| (v.id, v.url.clone())).collect::<Vec<_>>();
+        let urls = self.all_videos_mut().filter(|v| v.scanning && !v.scan_queued).map(|v| {
+            v.scan_queued = true;
+            (v.id, v.url.clone())
+        }).collect::<Vec<_>>();
         if urls.is_empty() { return; }
 
         self.pending_scans.fetch_add(urls.len(), SeqCst);
@@ -956,7 +960,7 @@ impl MediaLibrary {
     /// The output path can be either absolute, or relative to the export folder (which defaults to the input folder)
     fn resolve_output(&self, input_url: &str, output_path: &str) -> (String, String) {
         let path = self.output_path_or_default(input_url, output_path);
-        let is_absolute = path.starts_with('/') || path.contains("://") || (path.len() > 2 && (&path[1..3] == ":/" || &path[1..3] == ":\\"));
+        let is_absolute = path.starts_with('/') || path.contains("://") || path.get(1..3).map_or(false, |x| x == ":/" || x == ":\\");
         if is_absolute {
             let url = if path.contains("://") { path } else { filesystem::path_to_url(&path) };
             return (filesystem::get_folder(&url), filesystem::get_filename(&url));

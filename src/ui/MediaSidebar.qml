@@ -43,6 +43,7 @@ ResizablePanel {
     function loadItem(itemId: int): void {
         if (itemId <= 0 || itemId == media_library.current_item) return;
         root.saveCurrentSettings();
+        root.updatingOutput = true;
         media_library.set_current_item(itemId);
 
         const data = media_library.get_project_data(itemId);
@@ -55,11 +56,26 @@ ResizablePanel {
     }
 
     // Keeps the output path in the bottom bar in sync with the item loaded in the main view
+    property bool updatingOutput: false;
     function updateOutputFile(): void {
         const id = media_library.current_item;
-        if (id <= 0 || !window.outputFile) return;
+        if (id <= 0 || !window.outputFile) { root.updatingOutput = false; return; }
+        root.updatingOutput = true;
         window.outputFile.setFolder(media_library.get_output_folder(id));
         window.outputFile.setFilename(media_library.get_output_filename(id));
+        root.updatingOutput = false;
+    }
+    // The output path can also be changed in the bottom bar, store it in the library then
+    function pushOutputToItem(): void {
+        const id = media_library.current_item;
+        if (root.updatingOutput || id <= 0) return;
+        if (!media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString())) return;
+        media_library.set_output_url(id, window.outputFile.folderUrl.toString(), window.outputFile.filename);
+    }
+    Connections {
+        target: window.outputFile;
+        function onFilenameChanged():  void { root.pushOutputToItem(); }
+        function onFolderUrlChanged(): void { root.pushOutputToItem(); }
     }
     function updateOutputField(): void {
         const id = media_library.current_item;
