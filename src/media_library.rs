@@ -50,7 +50,9 @@ struct JobState {
     job_id: u32,
     status: String,
     progress: f64,
-    error: String
+    error: String,
+    /// Hash of the stabilization settings this job was queued with
+    hash: String
 }
 
 #[derive(Default, Clone, Debug)]
@@ -299,6 +301,7 @@ impl MediaLibrary {
                 display_output_path: QString::from(filesystem::display_url(&f.url)),
                 expanded: f.expanded,
                 has_children: !f.videos.is_empty(),
+                selected: Self::is_folder_selected(f),
                 ..Default::default()
             });
             if f.expanded {
@@ -665,8 +668,14 @@ impl MediaLibrary {
         }
         self.update_selection_rows();
     }
+    fn is_folder_selected(f: &Folder) -> bool {
+        !f.videos.is_empty() && f.videos.iter().all(|v| v.selected)
+    }
     fn update_selection_rows(&mut self) {
         let mut states = Vec::new();
+        for f in &self.folders {
+            states.push((f.id, Self::is_folder_selected(f)));
+        }
         for v in self.all_videos() {
             states.push((v.id, v.selected));
             for s in &v.sections { states.push((s.id, s.selected)); }
@@ -1060,7 +1069,13 @@ impl MediaLibrary {
     }
 
     pub fn set_item_job(&mut self, item_id: u32, job_id: u32) {
-        let job = JobState { job_id, status: if job_id > 0 { "queued".into() } else { String::new() }, progress: 0.0, error: String::new() };
+        let job = JobState {
+            job_id,
+            status: if job_id > 0 { "queued".into() } else { String::new() },
+            progress: 0.0,
+            error: String::new(),
+            hash: self.settings_hash(item_id).to_string()
+        };
         if let Some(v) = self.video_mut(item_id) {
             v.job = job.clone();
         } else if let Some(s) = self.section_mut(item_id) {
@@ -1121,8 +1136,8 @@ impl MediaLibrary {
             x.job_status = QString::from(status);
         });
         if finished {
-            // The rendered file now contains the hash of the settings it was rendered with
-            let hash = self.settings_hash(item_id).to_string();
+            // The rendered file contains the hash of the settings it was rendered with
+            let hash = self.job_mut(job_id).map(|x| x.hash.clone()).unwrap_or_default();
             if let Some(v) = self.video_mut(item_id) {
                 v.output_hash = Some(hash);
             } else if let Some(s) = self.section_mut(item_id) {
