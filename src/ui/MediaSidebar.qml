@@ -88,8 +88,9 @@ ResizablePanel {
         }
         const additional = window.getAdditionalProjectData();
         for (const id of ids) {
-            if (media_library.get_item_job(id) > 0) continue; // Already in the queue
-
+            const status = media_library.get_item_job_status(id);
+            if (status == "queued" || status == "rendering") continue; // Already in the queue
+            if (status) root.cancelItem(id); // Stabilize it again
             let ad = JSON.parse(JSON.stringify(additional));
             ad.output = ad.output || ({ });
             // Every video is rendered in its own resolution
@@ -146,9 +147,9 @@ ResizablePanel {
         function onError(job_id: real, text: string, arg: string, callback: string): void {
             if (!media_library.is_library_job(job_id)) return;
             if (text.startsWith("file_exists:")) {
-                // The item was explicitly selected for stabilization, so overwrite the existing file
+                // The item was explicitly selected for stabilization, so overwrite the existing file.
+                // The queue is started in onProcessing_done, after the settings of the item are applied
                 render_queue.reset_job(job_id);
-                if (root.isStabilizing) render_queue.start();
                 return;
             }
             media_library.set_job_error(job_id, window.getReadableError(qsTr(text).arg(arg)) || text);

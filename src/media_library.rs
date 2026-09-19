@@ -149,6 +149,7 @@ pub struct MediaLibrary {
     get_render_items: qt_method!(fn(&self, selected_only: bool) -> QVariantList),
     set_item_job: qt_method!(fn(&mut self, item_id: u32, job_id: u32)),
     get_item_job: qt_method!(fn(&self, item_id: u32) -> u32),
+    get_item_job_status: qt_method!(fn(&self, item_id: u32) -> QString),
     is_library_job: qt_method!(fn(&self, job_id: u32) -> bool),
     update_job_progress: qt_method!(fn(&mut self, job_id: u32, progress: f64, finished: bool)),
     set_job_error: qt_method!(fn(&mut self, job_id: u32, err: QString)),
@@ -773,6 +774,23 @@ impl MediaLibrary {
                 }
             }
         }
+        // A lens profile loaded manually in the main view clears the warning of that video
+        let lens_name = data.get("calibration_data").and_then(|x| x.get("name")).and_then(|x| x.as_str()).unwrap_or_default().to_owned();
+        let video_id = if self.video(item_id).is_some() { item_id } else { self.section(item_id).map(|(v, _)| v.id).unwrap_or_default() };
+        if !lens_name.is_empty() {
+            if let Some(v) = self.video_mut(video_id) {
+                if v.lens_warning {
+                    v.lens_warning = false;
+                    v.lens_profile = lens_name.clone();
+                }
+            }
+            let (profile, warning) = self.video(video_id).map(|v| (v.lens_profile.clone(), v.lens_warning)).unwrap_or_default();
+            self.patch_row(video_id, |x| {
+                x.lens_profile = QString::from(profile);
+                x.lens_warning = warning;
+            });
+        }
+
         // The trim range of a section is edited in the timeline of the main view
         let new_trim = self.section(item_id).and_then(|(v, _)| {
             let ranges = data.get("trim_ranges_ms")?.as_array()?;
@@ -1055,6 +1073,9 @@ impl MediaLibrary {
     }
     pub fn get_item_job(&self, item_id: u32) -> u32 {
         self.item_settings(item_id).map(|(_, _, _, job)| job.job_id).unwrap_or_default()
+    }
+    pub fn get_item_job_status(&self, item_id: u32) -> QString {
+        self.item_settings(item_id).map(|(_, _, _, job)| QString::from(job.status.as_str())).unwrap_or_default()
     }
     pub fn is_library_job(&self, job_id: u32) -> bool {
         job_id > 0 && self.all_videos().any(|v| v.job.job_id == job_id || v.sections.iter().any(|s| s.job.job_id == job_id))
