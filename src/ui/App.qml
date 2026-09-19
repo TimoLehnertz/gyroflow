@@ -96,6 +96,8 @@ Rectangle {
     property alias advanced: advanced.item;
     property alias renderBtn: renderBtn;
 
+    readonly property bool stabilizationEnabled: !exportSettings.item || exportSettings.item.stabilizationEnabled;
+
     readonly property bool wasModified: window.videoArea.vid.loaded;
     property bool isDialogOpened: false;
 
@@ -171,12 +173,12 @@ Rectangle {
                     onSelectFileRequest: fileDialog.open2();
                 }
             } }
-            Hr { id: vidInfoHr; }
-            ItemLoader { id: lensProfile; sourceComponent: Component {
+            Hr { id: vidInfoHr; visible: window.stabilizationEnabled; }
+            ItemLoader { id: lensProfile; visible: status == Loader.Ready && window.stabilizationEnabled; sourceComponent: Component {
                 Menu.LensProfile { }
             } }
-            Hr { id: lensProfileHr; }
-            ItemLoader { id: motionData; sourceComponent: Component {
+            Hr { id: lensProfileHr; visible: window.stabilizationEnabled; }
+            ItemLoader { id: motionData; visible: status == Loader.Ready && window.stabilizationEnabled; sourceComponent: Component {
                 Menu.MotionData { }
             } }
         }
@@ -300,7 +302,7 @@ Rectangle {
                                 ]);
                                 return;
                             }
-                            if (!controller.lens_loaded && !allowLens) {
+                            if (window.stabilizationEnabled && !controller.lens_loaded && !allowLens) {
                                 messageBox(Modal.Warning, qsTr("Lens profile is not loaded, your result will be incorrect. Are you sure you want to render this file?"), [
                                     { text: qsTr("Yes"), clicked: () => { allowLens = true; renderBtn.render(); }},
                                     { text: qsTr("No"), accent: true },
@@ -308,7 +310,7 @@ Rectangle {
                                 return;
                             }
                             const usesQuats = ((motionData.item.hasQuaternions && motionData.item.integrationMethod === 0) || motionData.item.hasAccurateTimestamps) && motionData.item.filename == vidInfo.item.filename;
-                            if (!usesQuats && controller.offsets_model.rowCount() == 0 && !allowSync) {
+                            if (window.stabilizationEnabled && !usesQuats && controller.offsets_model.rowCount() == 0 && !allowSync) {
                                 messageBox(Modal.Warning, qsTr("There are no sync points present, your result will be incorrect. Are you sure you want to render this file?"), [
                                     { text: qsTr("Yes"), clicked: () => { allowSync = true; renderBtn.render(); }},
                                     { text: qsTr("No"), accent: true },
@@ -505,10 +507,10 @@ Rectangle {
                 TabColumn { id: exportTab; parentHeight: rightPanel.height; inner.spacing: 10 * dpiScale; }
             }
 
-            ItemLoader { id: sync; sourceComponent: Component { Menu.Synchronization { } } }
-            Hr { id: syncHr; }
-            ItemLoader { id: stab; sourceComponent: Component { Menu.Stabilization { } } }
-            Hr { id: stabHr; }
+            ItemLoader { id: sync; visible: status == Loader.Ready && window.stabilizationEnabled; sourceComponent: Component { Menu.Synchronization { } } }
+            Hr { id: syncHr; visible: window.stabilizationEnabled; }
+            ItemLoader { id: stab; visible: status == Loader.Ready && window.stabilizationEnabled; sourceComponent: Component { Menu.Stabilization { } } }
+            Hr { id: stabHr; visible: window.stabilizationEnabled; }
             ItemLoader { id: exportSettings; sourceComponent: Component { Menu.Export { showBtn: !window.isMobileLayout; } } }
             Hr { id: exportHr; visible: !isMobileLayout; }
             ItemLoader { id: advanced; sourceComponent: Component { Menu.Advanced { } } }

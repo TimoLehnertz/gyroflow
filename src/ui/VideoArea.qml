@@ -1059,6 +1059,8 @@ Item {
                     id: fovOverviewBtn;
                     iconName: "fov-overview";
                     checked: false;
+                    visible: window.stabilizationEnabled;
+                    onVisibleChanged: if (!visible) checked = false;
                     onCheckedChanged: { controller.fov_overview = checked; vid.forceRedraw(); }
                     tooltip: qsTr("Toggle stabilization overview");
                     TapHandler {
@@ -1070,6 +1072,8 @@ Item {
                 SmallLinkButton {
                     id: stabEnabledBtn;
                     iconName: "gyroflow";
+                    visible: window.stabilizationEnabled;
+                    onVisibleChanged: if (!visible) checked = false;
                     onCheckedChanged: { controller.stab_enabled = checked; vid.forceRedraw(); vid.fovChanged(); }
                     tooltip: qsTr("Toggle stabilization");
                 }

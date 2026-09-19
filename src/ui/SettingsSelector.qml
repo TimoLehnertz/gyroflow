@@ -61,6 +61,7 @@ Modal {
         "Export settings|output": {
             "Codec":       ["codec", "codec_options", "bitrate", "use_gpu"],
             "Audio":       ["audio"],
+            "Stabilize the video": ["disable_stabilization"],
             "Output size": ["output_width", "output_height"],
             "Output path": ["output_folder", "output_filename"],
             "Advanced":    ["encoder_options", "metadata", "keyframe_distance", "preserve_other_tracks", "pad_with_black", "export_trims_separately", "audio_codec", "interpolation"],
@@ -133,6 +134,7 @@ Modal {
         QT_TR_NOOP("Export settings");
             QT_TR_NOOP("Codec");
             QT_TR_NOOP("Audio");
+            QT_TR_NOOP("Stabilize the video");
             QT_TR_NOOP("Output path");
             QT_TR_NOOP("Output size");
             QT_TR_NOOP("Advanced");

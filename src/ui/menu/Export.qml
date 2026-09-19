@@ -102,6 +102,7 @@ MenuItem {
     property alias defaultWidth: outputWidth.defaultValue;
     property alias defaultHeight: outputHeight.defaultValue;
 
+    property alias stabilizationEnabled: stabilizeVideo.checked;
     property alias outCodec: codec.currentText;
     property alias outBitrate: bitrate.value;
     property alias defaultBitrate: bitrate.defaultValue;
@@ -115,6 +116,16 @@ MenuItem {
     property real originalHeight: outHeight;
 
     property bool canExport: !resolutionWarning.visible && !resolutionWarning2.visible;
+
+    // When the stabilization is disabled, the streams are copied as they are, so keep the original container
+    function currentExtension(): string {
+        if (!root.stabilizationEnabled) {
+            const fname = filesystem.get_filename(window.videoArea.loadedFileUrl);
+            const pos = fname.lastIndexOf(".");
+            if (pos > 0) return fname.substring(pos);
+        }
+        return exportFormats[codec.currentIndex].extension;
+    }
 
     function getExportOptions(): var {
         let encoderOpts = encoderOptions.text.replace("-qscale:v", "-qscale")
@@ -139,7 +150,8 @@ MenuItem {
             pad_with_black:        padWithBlack.checked,
             export_trims_separately: exportTrimsSeparately.checked,
             audio_codec:           audioCodec.currentText,
-            interpolation:         interpolationMethod.currentText
+            interpolation:         interpolationMethod.currentText,
+            disable_stabilization: !stabilizeVideo.checked
         };
     }
 
@@ -245,16 +257,28 @@ MenuItem {
             if (output.hasOwnProperty("export_trims_separately")) exportTrimsSeparately.checked = output.export_trims_separately;
             if (output.hasOwnProperty("audio_codec"))           Util.setComboValue(audioCodec, output.audio_codec);
             if (output.hasOwnProperty("interpolation"))         Util.setComboValue(interpolationMethod, output.interpolation);
+            if (output.hasOwnProperty("disable_stabilization")) stabilizeVideo.checked      = !output.disable_stabilization;
             if (output.hasOwnProperty("metadata")) {
                 metadataComment.text = output.metadata.comment || "";
             }
         }
     }
 
+    CheckBox {
+        id: stabilizeVideo;
+        text: qsTr("Stabilize the video");
+        checked: true;
+        width: parent.width;
+        tooltip: qsTr("When unchecked, the video is not stabilized at all and only the trim range is applied.\nThe streams are copied without re-encoding, which is much faster, but the trim range is not frame accurate,\nbecause the output starts at the closest keyframe before the trim start.");
+        Component.onCompleted: contentItem.wrapMode = Text.WordWrap;
+        onCheckedChanged: if (window.videoArea && window.videoArea.vid.loaded) codec.updateExtension(root.currentExtension());
+    }
+
     ComboBox {
         id: codec;
         model: exportFormats.map(x => x.name);
         width: parent.width;
+        visible: root.stabilizationEnabled;
         currentIndex: 1;
         function updateExtension(ext: string): void {
             window.outputFile.setFilename(window.outputFile.filename.replace(/(_%[0-9d]+)?\.[a-z0-9]+$/i, ext));
@@ -284,14 +308,14 @@ MenuItem {
             if (!audio.enabled2) audio.checked = false;
 
             updateGpuStatus();
-            updateExtension(format.extension);
+            updateExtension(root.currentExtension());
         }
     }
     ComboBox {
         id: codecOptions;
         model: exportFormats[codec.currentIndex].variants;
         width: parent.width;
-        visible: model.length > 0;
+        visible: model.length > 0 && root.stabilizationEnabled;
         onVisibleChanged: if (!visible) { root.outCodecOptions = ""; } else { root.outCodecOptions = currentText; }
         onCurrentTextChanged: root.outCodecOptions = currentText;
         onModelChanged: {
@@ -303,6 +327,7 @@ MenuItem {
     Label {
         position: Label.LeftPosition;
         text: qsTr("Output size");
+        visible: root.stabilizationEnabled;
         Item {
             width: parent.width;
             height: outputWidth.height;
@@ -454,21 +479,21 @@ MenuItem {
         id: resolutionWarning;
         type: InfoMessage.Error;
         property var maxSize: exportFormats[codec.currentIndex].max_size;
-        show: maxSize && (outWidth > maxSize[0] || outHeight > maxSize[1]);
+        show: root.stabilizationEnabled && maxSize && (outWidth > maxSize[0] || outHeight > maxSize[1]);
         text: qsTr("This resolution is not supported by the selected codec.") + "\n" +
               qsTr("Maximum supported resolution is %1.").arg(maxSize? maxSize.join("x") : "");
     }
     InfoMessageSmall {
         id: resolutionWarning2;
         type: InfoMessage.Error;
-        show: (outWidth % 2) != 0 || (outHeight % 2) != 0;
+        show: root.stabilizationEnabled && ((outWidth % 2) != 0 || (outHeight % 2) != 0);
         text: qsTr("Resolution must be divisible by 2.");
     }
 
     Label {
         position: Label.LeftPosition;
         text: qsTr("Bitrate");
-        visible: outCodec === "H.264/AVC" || outCodec === "H.265/HEVC" || outCodec === "AV1";
+        visible: root.stabilizationEnabled && (outCodec === "H.264/AVC" || outCodec === "H.265/HEVC" || outCodec === "AV1");
 
         NumberField {
             id: bitrate;
@@ -488,6 +513,7 @@ MenuItem {
         id: gpu;
         text: qsTr("Use GPU encoding");
         checked: true;
+        visible: root.stabilizationEnabled;
         onCheckedChanged: {
             if (!preventSave)
                 settings.setValue("exportGpu-" + codec.currentIndex, checked? 1 : 0);
