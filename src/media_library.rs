@@ -1100,6 +1100,7 @@ impl MediaLibrary {
         job_id > 0 && self.all_videos().any(|v| v.job.job_id == job_id || v.sections.iter().any(|s| s.job.job_id == job_id))
     }
     fn item_id_for_job(&self, job_id: u32) -> u32 {
+        if job_id == 0 { return 0; }
         for v in self.all_videos() {
             if v.job.job_id == job_id { return v.id; }
             for s in &v.sections {
@@ -1109,6 +1110,7 @@ impl MediaLibrary {
         0
     }
     fn job_mut(&mut self, job_id: u32) -> Option<&mut JobState> {
+        if job_id == 0 { return None; }
         for v in self.standalone.iter_mut().chain(self.folders.iter_mut().flat_map(|f| f.videos.iter_mut())) {
             if v.job.job_id == job_id { return Some(&mut v.job); }
             if let Some(s) = v.sections.iter_mut().find(|s| s.job.job_id == job_id) {
