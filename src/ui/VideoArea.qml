@@ -467,6 +467,7 @@ Item {
     }
     function loadMultipleFiles(urls: list<url>, skip_detection: bool): void {
         if (urls.length == 1) {
+            if (!isCalibrator) media_library.add_files([urls[0].toString()]);
             root.loadFile(urls[0], skip_detection);
         } else if (urls.length > 1) {
             const urlsCopy = [...urls];
@@ -474,9 +475,8 @@ Item {
                 return root.loadFile(urlsCopy[0], true);
             }
             const dlg = messageBox(Modal.Question, qsTr("You have opened multiple files. What do you want to do?"), [
-                { text: qsTr("Add to render queue"), clicked: () => {
-                    queue.item.dt.loadFiles(urlsCopy);
-                    queue.item.shown = true;
+                { text: qsTr("Add to the file list"), accent: true, clicked: () => {
+                    media_library.add_files(urlsCopy.map(x => x.toString()));
                 } },
                 { text: qsTr("Merge them into one video"), clicked: () => {
                     dlg.btnsRow.children[0].enabled = false;

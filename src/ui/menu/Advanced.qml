@@ -391,7 +391,7 @@ MenuItem {
             id: defaultSuffix;
             text: "_stabilized";
             width: parent.width;
-            onTextChanged: render_queue.default_suffix = text;
+            onTextChanged: { render_queue.default_suffix = text; media_library.default_suffix = text; }
         }
     }
     CheckBox {

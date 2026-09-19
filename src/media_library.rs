@@ -110,6 +110,7 @@ pub struct MediaLibrary {
 
     add_folder: qt_method!(fn(&mut self, url: QString)),
     add_files: qt_method!(fn(&mut self, urls: QStringList)),
+    add_dropped: qt_method!(fn(&mut self, urls: QStringList)),
     remove_item: qt_method!(fn(&mut self, item_id: u32) -> QVariantList),
     clear: qt_method!(fn(&mut self)),
     has_folder: qt_method!(fn(&self, url: QString) -> bool),
@@ -132,7 +133,7 @@ pub struct MediaLibrary {
     set_section_trim: qt_method!(fn(&mut self, item_id: u32, trim_start: f64, trim_end: f64)),
 
     save_settings: qt_method!(fn(&mut self, item_id: u32, data: QString)),
-    get_settings: qt_method!(fn(&self, item_id: u32) -> QString),
+    get_project_data: qt_method!(fn(&self, item_id: u32) -> QString),
     get_settings_for_job: qt_method!(fn(&self, job_id: u32) -> QString),
     apply_stabilization_to_all: qt_method!(fn(&mut self, data: QString, except_item_id: u32) -> usize),
     settings_hash: qt_method!(fn(&self, item_id: u32) -> QString),
@@ -380,23 +381,32 @@ impl MediaLibrary {
         false
     }
 
+    fn to_url(url: &str, is_folder: bool) -> String {
+        if url.contains("://") {
+            filesystem::normalize_url(url, is_folder)
+        } else {
+            filesystem::normalize_url(&filesystem::path_to_url(url), is_folder)
+        }
+    }
+
     pub fn has_folder(&self, url: QString) -> bool {
-        let url = filesystem::normalize_url(&url.to_string(), true);
+        let url = Self::to_url(&url.to_string(), true);
         self.folders.iter().any(|f| f.url == url)
     }
 
     pub fn add_folder(&mut self, url: QString) {
-        let url = filesystem::normalize_url(&url.to_string(), true);
+        let url = Self::to_url(&url.to_string(), true);
         if url.is_empty() || self.folders.iter().any(|f| f.url == url) { return; }
 
         let mut videos = Vec::new();
         for (filename, file_url) in filesystem::list_folder(&url) {
-            if Self::is_video_file(&filename) {
+            if Self::is_video_file(&filename) && !self.all_videos().any(|v| v.url == file_url) {
                 videos.push(self.new_video(file_url, filename));
             }
         }
         let id = self.new_id();
-        let mut name = filesystem::get_filename(&url);
+        let path = filesystem::url_to_path(&url);
+        let mut name = path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or_default().to_string();
         if name.is_empty() { name = filesystem::display_url(&url); }
         self.folders.push(Folder { id, url, name, expanded: true, videos });
         self.rebuild();
@@ -405,7 +415,7 @@ impl MediaLibrary {
 
     pub fn add_files(&mut self, urls: QStringList) {
         for url in urls.into_iter() {
-            let url = filesystem::normalize_url(&url.to_string(), false);
+            let url = Self::to_url(&url.to_string(), false);
             let filename = filesystem::get_filename(&url);
             if url.is_empty() || !Self::is_video_file(&filename) { continue; }
             if self.all_videos().any(|v| v.url == url) { continue; }
@@ -414,6 +424,23 @@ impl MediaLibrary {
         }
         self.rebuild();
         self.scan_pending();
+    }
+
+    /// Adds dropped urls, folders are added as input folders and files as standalone videos
+    pub fn add_dropped(&mut self, urls: QStringList) {
+        let mut files = Vec::new();
+        for url in urls.into_iter() {
+            let url_str = url.to_string();
+            let path = filesystem::url_to_path(&Self::to_url(&url_str, false));
+            if !path.is_empty() && std::path::Path::new(&path).is_dir() {
+                self.add_folder(QString::from(url_str));
+            } else {
+                files.push(url.clone());
+            }
+        }
+        if !files.is_empty() {
+            self.add_files(QStringList::from_iter(files));
+        }
     }
 
     fn new_video(&mut self, url: String, filename: String) -> Video {
@@ -720,10 +747,21 @@ impl MediaLibrary {
     // ----------------------------------------- Settings ------------------------------------------
     // ---------------------------------------------------------------------------------------------
 
-    /// Stores the full project data of the item, as exported from the main view
+    /// Stores the project data of the item, as exported from the main view
     pub fn save_settings(&mut self, item_id: u32, data: QString) {
+        let mut data = match serde_json::from_str::<serde_json::Value>(&data.to_string()) {
+            Ok(v) if v.is_object() => v,
+            _ => return
+        };
+        if let serde_json::Value::Object(ref mut obj) = data {
+            // The motion data itself is always loaded from the video file
+            if let Some(serde_json::Value::Object(gyro)) = obj.get_mut("gyro_source") {
+                for k in ["file_metadata", "raw_imu", "quaternions", "smoothed_quaternions", "gravity_vectors", "image_orientations"] {
+                    gyro.remove(k);
+                }
+            }
+        }
         let data = data.to_string();
-        if data.is_empty() { return; }
         if let Some(v) = self.video_mut(item_id) {
             v.settings = Some(data);
         } else if let Some(s) = self.section_mut(item_id) {
@@ -733,17 +771,48 @@ impl MediaLibrary {
         }
         self.update_stabilized_row(item_id);
     }
-    pub fn get_settings(&self, item_id: u32) -> QString {
-        self.item_settings(item_id).and_then(|(_, s, _, _)| s.clone()).map(QString::from).unwrap_or_default()
+
+    /// Project data of the item, used to load it in the main view
+    pub fn get_project_data(&self, item_id: u32) -> QString {
+        self.build_project_data(item_id, false).map(QString::from).unwrap_or_default()
     }
+    /// Settings of the rendered item, applied to the already loaded render job (ie. without the video and gyro data)
     pub fn get_settings_for_job(&self, job_id: u32) -> QString {
-        for v in self.all_videos() {
-            if v.job.job_id == job_id { return v.settings.clone().map(QString::from).unwrap_or_default(); }
-            for s in &v.sections {
-                if s.job.job_id == job_id { return s.settings.clone().map(QString::from).unwrap_or_default(); }
+        let item_id = self.item_id_for_job(job_id);
+        self.build_project_data(item_id, true).map(QString::from).unwrap_or_default()
+    }
+
+    fn build_project_data(&self, item_id: u32, as_preset: bool) -> Option<String> {
+        let (url, settings, _, _) = self.item_settings(item_id)?;
+        let url = url.to_owned();
+        let section = self.section(item_id).map(|(v, s)| (v.duration_ms, s.trim_start, s.trim_end));
+        let parsed = settings.as_ref().and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok()).filter(|x| x.is_object());
+        if parsed.is_none() && section.is_none() {
+            return None; // Nothing was configured for this video, load it as a plain video file
+        }
+        let mut obj = parsed.unwrap_or_else(|| serde_json::json!({ "title": "Gyroflow data file", "version": 4 }));
+        if let serde_json::Value::Object(ref mut o) = obj {
+            o.remove("output"); // The output path is managed by the media library
+            if as_preset {
+                o.remove("videofile");
+                o.remove("videofile_bookmark");
+                if let Some(serde_json::Value::Object(gyro)) = o.get_mut("gyro_source") {
+                    gyro.remove("filepath");
+                    gyro.remove("filepath_bookmark");
+                }
+            } else {
+                o.insert("videofile".into(), serde_json::Value::String(url));
+            }
+            if let Some((duration_ms, start, end)) = section {
+                if duration_ms > 0.0 {
+                    o.insert("trim_ranges_ms".into(), serde_json::json!([[start * duration_ms, end * duration_ms]]));
+                } else {
+                    o.remove("trim_ranges_ms");
+                    o.insert("trim_ranges".into(), serde_json::json!([[start, end]]));
+                }
             }
         }
-        QString::default()
+        Some(obj.to_string())
     }
 
     /// Applies the stabilization settings (and only those) to all videos and sections in the library
