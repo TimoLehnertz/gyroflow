@@ -207,10 +207,10 @@ Item {
         onActivated: videoArea.fullScreen = (videoArea.fullScreen + 1) % 3;
     }
 
-    // Toggle render queue
+    // Toggle the media list, which is also the render queue
     Shortcut {
         sequence: "q";
-        onActivated: videoArea.queue.shown = !videoArea.queue.shown;
+        onActivated: if (!videoArea.isCalibrator) window.mediaPanelShown = !window.mediaPanelShown;
     }
 
     // Add to render queue

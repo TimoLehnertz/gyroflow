@@ -19,6 +19,8 @@ Rectangle {
     property QtObject controller: main_controller;
 
     property bool isLandscape: width > height;
+    property bool mediaPanelShown: +settings.value("mediaPanelShown", 1) > 0;
+    onMediaPanelShownChanged: settings.setValue("mediaPanelShown", mediaPanelShown? 1 : 0);
     property real mediaPanelWidth: mediaPanel.visible? mediaPanel.width : 0;
     onIsLandscapeChanged: {
         if (isLandscape) {
@@ -144,7 +146,7 @@ Rectangle {
 
         MediaSidebar {
             id: mediaPanel;
-            visible: !videoArea.fullScreen && !isMobileLayout && window.isLandscape;
+            visible: window.mediaPanelShown && !videoArea.fullScreen && !isMobileLayout && window.isLandscape;
             maxWidth: parent.width - leftPanel.width - rightPanel.width - 50 * dpiScale;
             implicitWidth: settings.value("mediaPanelSize", defaultWidth);
             onWidthChanged: settings.setValue("mediaPanelSize", width);
@@ -239,7 +241,7 @@ Rectangle {
                     spacing: 5 * dpiScale;
                     anchors.verticalCenter: (isMobileLayout? undefined : parent.verticalCenter);
                     anchors.horizontalCenter: (isMobileLayout? parent.horizontalCenter : undefined);
-                    anchors.horizontalCenterOffset: (queueBtn.width + spacing) / 2;
+                    anchors.horizontalCenterOffset: queueBtn.visible? (queueBtn.width + spacing) / 2 : 0;
                     SplitButton {
                         id: renderBtn;
                         btn.accent: true;
@@ -399,7 +401,7 @@ Rectangle {
                                     }
 
                                     if (+settings.value("showQueueWhenAdding", "1"))
-                                        videoArea.queue.shown = true;
+                                        window.mediaPanelShown = true;
                                 } else {
                                     // Export now
                                     render_queue.main_job_id = job_id;
@@ -478,6 +480,7 @@ Rectangle {
                     }
                     LinkButton {
                         id: queueBtn;
+                        visible: !isMobileLayout && window.isLandscape;
                         leftPadding: 10 * dpiScale;
                         rightPadding: 10 * dpiScale;
                         icon.width: 25 * dpiScale;
@@ -485,8 +488,8 @@ Rectangle {
                         // textColor: styleTextColor;
                         anchors.verticalCenter: parent.verticalCenter;
                         iconName: "queue";
-                        tooltip: qsTr("Render queue");
-                        onClicked: videoArea.queue.shown = !videoArea.queue.shown;
+                        tooltip: window.mediaPanelShown? qsTr("Hide the media list") : qsTr("Show the media list");
+                        onClicked: window.mediaPanelShown = !window.mediaPanelShown;
                     }
                 }
             }

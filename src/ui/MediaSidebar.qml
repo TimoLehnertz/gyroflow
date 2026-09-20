@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright © 2025 Adrian <adrian.eddy at gmail>
 
+import QtQml
 import QtQuick
 import QtQuick.Controls as QQC
 import QtQuick.Controls.impl as QQCI
 import QtQuick.Dialogs as QQD
 
 import "components/"
+import "Util.js" as Util;
 
 ResizablePanel {
     id: root;
@@ -19,6 +21,8 @@ ResizablePanel {
     property int currentItemId: media_library.current_item;
     property int selectedCount: 0;
     property bool isStabilizing: false;
+    // Jobs queued from here, the user already decided to (re-)stabilize these items, so their output is always overwritten
+    property var ownJobs: ({ });
 
     Connections {
         target: media_library;
@@ -118,6 +122,7 @@ ResizablePanel {
 
             const jobId = render_queue.add_file(media_library.get_item_url(id), "", JSON.stringify(ad));
             media_library.set_item_job(id, jobId);
+            root.ownJobs[jobId] = true;
         }
         // The queue is started when the files are loaded and the settings are applied, in onProcessing_done
         root.isStabilizing = true;
@@ -143,6 +148,77 @@ ResizablePanel {
             media_library.set_item_job(itemId, 0);
         }
     }
+    function resetItem(itemId: int): void {
+        const jobId = media_library.get_item_job(itemId);
+        if (jobId > 0) {
+            render_queue.reset_job(jobId);
+            media_library.set_item_job(itemId, jobId);
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // ------------------------------------- Render queue --------------------------------------
+    // -----------------------------------------------------------------------------------------
+
+    // This sidebar is the only queue UI, so every job of the render queue is represented by an item here,
+    // no matter if it was queued from here, from the export panel or restored from the previous session.
+    Instantiator {
+        model: render_queue.queue;
+        delegate: QtObject {
+            property string errorString: error_string;
+            onErrorStringChanged: root.updateJobState(job_id, errorString);
+            // The job is not fully set up yet when the row is added, so register it in the next event loop iteration
+            Component.onCompleted: root.scheduleJobRegistration(job_id, input_file, output_folder, output_filename);
+            Component.onDestruction: root.unregisterJob(job_id);
+        }
+    }
+    property var jobsToRegister: [];
+    function scheduleJobRegistration(jobId: int, inputFile: string, outputFolder: string, outputFilename: string): void {
+        root.jobsToRegister.push([jobId, inputFile, outputFolder, outputFilename]);
+        registerTimer.start();
+    }
+    Timer {
+        id: registerTimer;
+        interval: 1;
+        onTriggered: {
+            const jobs = root.jobsToRegister;
+            root.jobsToRegister = [];
+            for (const job of jobs) root.registerJob(job[0], job[1], job[2], job[3]);
+        }
+    }
+    function registerJob(jobId: int, inputFile: string, outputFolder: string, outputFilename: string): void {
+        if (jobId <= 0 || media_library.is_library_job(jobId)) return;
+        let itemId = media_library.is_item_url(media_library.current_item, inputFile)? media_library.current_item : media_library.find_by_url(inputFile);
+        if (itemId <= 0) {
+            media_library.add_files([inputFile]);
+            itemId = media_library.find_by_url(inputFile);
+        }
+        if (itemId <= 0) return;
+        // The job was configured elsewhere, take its settings and output path as the ones of the item
+        const data = render_queue.get_gyroflow_data(jobId);
+        if (data && data.includes("\"stabilization\"")) media_library.save_settings(itemId, data);
+        media_library.set_output_url(itemId, outputFolder, outputFilename);
+        media_library.set_item_job(itemId, jobId);
+    }
+    function renameJobOutput(itemId: int, jobId: int, filename: string, folder: string, start: bool): void {
+        const newName = window.renameOutput(filename, folder);
+        render_queue.set_job_output_filename(jobId, newName, start);
+        if (itemId > 0) media_library.set_output_url(itemId, folder, newName);
+    }
+    function unregisterJob(jobId: int): void {
+        delete root.ownJobs[jobId];
+        const itemId = media_library.get_item_for_job(jobId);
+        if (itemId > 0) media_library.set_item_job(itemId, 0);
+    }
+    // The error string of a queue item can be an error, a question (convert_format, file_exists) or just an informational note
+    function updateJobState(jobId: int, errorString: string): void {
+        if (jobId == render_queue.main_job_id && errorString == "uses_cpu") {
+            window.videoArea.videoLoader.infoMessage.type = InfoMessage.Warning;
+            window.videoArea.videoLoader.infoMessage.text = window.getReadableError(errorString);
+            window.videoArea.videoLoader.infoMessage.show = true;
+        }
+        media_library.set_job_error_string(jobId, errorString);
+    }
 
     Connections {
         target: render_queue;
@@ -155,6 +231,9 @@ ResizablePanel {
             }
             if (root.isStabilizing) render_queue.start();
         }
+        function onProcessing_progress(job_id: real, progress: real): void {
+            media_library.set_job_processing(job_id, progress);
+        }
         function onRender_progress(job_id: real, progress: real, frame: int, total_frames: int, finished: bool, start_time: real, is_conversion: bool): void {
             if (media_library.is_library_job(job_id)) {
                 media_library.update_job_progress(job_id, progress, finished && total_frames > 0);
@@ -164,8 +243,9 @@ ResizablePanel {
             if (!media_library.is_library_job(job_id)) return;
             if (text.startsWith("file_exists:")) {
                 // The item was explicitly selected for stabilization, so overwrite the existing file.
-                // The queue is started in onProcessing_done, after the settings of the item are applied
-                render_queue.reset_job(job_id);
+                // The queue is started in onProcessing_done, after the settings of the item are applied.
+                // Other jobs ask in the message area of the item, according to the default overwrite action.
+                if (root.ownJobs[job_id]) render_queue.reset_job(job_id);
                 return;
             }
             media_library.set_job_error(job_id, window.getReadableError(qsTr(text).arg(arg)) || text);
@@ -175,6 +255,28 @@ ResizablePanel {
                 root.isStabilizing = false;
                 media_library.refresh_outputs();
             }
+        }
+        function onQueue_changed():  void { render_queue.save_render_queue(); }
+        function onStatus_changed(): void { render_queue.save_render_queue(); }
+        function onRequest_close(): void {
+            main_window.closeConfirmed = true;
+            Qt.callLater(Qt.quit);
+        }
+    }
+
+    // Unfinished jobs of the previous session are added back to the queue and show up in the list above
+    Timer {
+        interval: 100;
+        running: window.exportSettings != null && window.sync != null;
+        onTriggered: {
+            Qt.callLater(() => {
+                if (render_queue.restore_render_queue(window.getAdditionalProjectDataJson())) {
+                    messageBox(Modal.Info, qsTr("You have unfinished tasks in the render queue."), [
+                        { text: qsTr("Show the media list"), accent: true, clicked: function() { window.mediaPanelShown = true; } },
+                        { text: qsTr("Ok") }
+                    ]);
+                }
+            });
         }
     }
 
@@ -334,11 +436,16 @@ ResizablePanel {
             radius: 5 * dpiScale;
             property bool isFolder:  kind == "folder";
             property bool isSection: kind == "section";
-            property bool isRendering: job_status == "rendering";
-            property bool isQueued:    job_status == "queued";
-            property bool isJobError:  job_status == "error";
+            property bool isRendering:  job_status == "rendering";
+            property bool isProcessing: job_status == "processing";
+            property bool isQueued:     job_status == "queued";
+            property bool isJobError:   job_status == "error";
+            property bool isQuestion:   job_status == "question";
+            property bool isJobDone:    job_status == "done";
+            property bool isBusy: dlg.isRendering || dlg.isProcessing;
 
             color: isJobError? "#30ed7676"
+                 : isQuestion? "#30" + styleAccentColor.toString().substring(1)
                  : stabilized_state == 1? "#3070e574"
                  : stabilized_state == 2? "#30f6a00b"
                  : selected? "#20ffffff" : "transparent";
@@ -372,11 +479,50 @@ ResizablePanel {
                 Action {
                     iconName: "play";
                     text: qsTr("Stabilize");
-                    enabled: !dlg.isFolder && !dlg.isRendering;
+                    enabled: !dlg.isFolder && !dlg.isBusy;
                     onTriggered: {
                         media_library.select_only(item_id);
                         root.stabilizeSelected();
                     }
+                }
+                Action {
+                    iconName: "play";
+                    text: qsTr("Render now");
+                    enabled: job_id > 0 && !dlg.isBusy && !dlg.isJobDone;
+                    onTriggered: render_queue.render_job(job_id);
+                }
+                Action {
+                    iconName: "pencil";
+                    text: qsTr("Edit render settings");
+                    enabled: job_id > 0 && !dlg.isBusy;
+                    onTriggered: {
+                        const data = render_queue.get_gyroflow_data(job_id);
+                        if (data) window.videoArea.loadGyroflowData(JSON.parse(data), job_id);
+                    }
+                }
+                Action {
+                    iconName: "arrow-up";
+                    text: qsTr("Move up in the queue");
+                    enabled: job_id > 0;
+                    onTriggered: render_queue.move_item(job_id, -1);
+                }
+                Action {
+                    iconName: "arrow-down";
+                    text: qsTr("Move down in the queue");
+                    enabled: job_id > 0;
+                    onTriggered: render_queue.move_item(job_id, 1);
+                }
+                Action {
+                    iconName: dlg.isBusy? "close" : "spinner";
+                    text: dlg.isBusy? qsTr("Stop") : qsTr("Reset status");
+                    enabled: job_id > 0 && (dlg.isBusy || dlg.isJobError || dlg.isQuestion || dlg.isJobDone);
+                    onTriggered: root.resetItem(item_id);
+                }
+                Action {
+                    iconName: "play";
+                    text: qsTr("Open rendered file");
+                    enabled: !dlg.isFolder && stabilized_state > 0 && Qt.platform.os != "ios";
+                    onTriggered: filesystem.open_file_externally(filesystem.get_file_url(media_library.get_output_folder(item_id), media_library.get_output_filename(item_id), false));
                 }
                 Action {
                     iconName: "folder";
@@ -386,13 +532,13 @@ ResizablePanel {
                 Action {
                     iconName: "close";
                     text: qsTr("Remove from the queue");
-                    enabled: (dlg.isQueued || dlg.isJobError) && !dlg.isRendering;
+                    enabled: job_id > 0 && !dlg.isBusy;
                     onTriggered: root.cancelItem(item_id);
                 }
                 Action {
                     iconName: "bin";
                     text: dlg.isFolder? qsTr("Remove folder") : dlg.isSection? qsTr("Delete section") : qsTr("Remove video");
-                    enabled: !dlg.isRendering;
+                    enabled: !dlg.isBusy;
                     onTriggered: root.removeItem(item_id);
                 }
             }
@@ -520,21 +666,32 @@ ResizablePanel {
                             anchors.verticalCenter: parent.verticalCenter;
                             leftPadding: 0;
                             font.pixelSize: 11 * dpiScale;
-                            color: dlg.isJobError? "#ed7676" : stabilized_state == 2? "#f6a00b" : styleTextColor;
-                            text: dlg.isJobError?   qsTr("Error")
-                                : dlg.isRendering?  (job_progress * 100).toFixed(0) + "%"
-                                : dlg.isQueued?     qsTr("Queued")
-                                : job_status == "done"? qsTr("Done")
+                            color: dlg.isJobError? "#ed7676" : dlg.isQuestion? styleAccentColor : stabilized_state == 2? "#f6a00b" : styleTextColor;
+                            text: dlg.isJobError?    qsTr("Error")
+                                : dlg.isQuestion?    qsTr("Action needed")
+                                : dlg.isProcessing?  qsTr("Synchronizing")
+                                : dlg.isRendering?   (job_progress * 100).toFixed(0) + "%"
+                                : dlg.isQueued?      qsTr("Queued")
+                                : dlg.isJobDone?     qsTr("Done")
                                 : stabilized_state == 2? qsTr("Changed")
                                 : stabilized_state == 1? qsTr("Stabilized") : "";
                         }
                     }
                 }
                 QQC.ProgressBar {
-                    visible: dlg.isRendering;
+                    visible: dlg.isBusy;
                     width: parent.width;
                     height: 4 * dpiScale;
                     value: job_progress;
+                }
+                BasicText {
+                    visible: text.length > 0;
+                    width: parent.width;
+                    leftPadding: 24 * dpiScale;
+                    font.pixelSize: 10 * dpiScale;
+                    opacity: 0.7;
+                    wrapMode: Text.WordWrap;
+                    text: job_message? window.getReadableError(job_message) : "";
                 }
                 BasicText {
                     visible: !dlg.isFolder && (dlg.isSection || duration_ms > 0);
@@ -549,6 +706,85 @@ ResizablePanel {
                         if (!dlg.isSection && created_at > 0) parts.push(new Date(created_at * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat));
                         if (dlg.isSection) parts.push((trim_start * 100).toFixed(0) + "% - " + (trim_end * 100).toFixed(0) + "%");
                         return parts.join("  |  ");
+                    }
+                }
+
+                // Errors of the render queue and the questions it asks (pixel format conversion, existing output file)
+                Loader {
+                    width: parent.width;
+                    active: dlg.isJobError || dlg.isQuestion;
+                    sourceComponent: Component {
+                        Column {
+                            topPadding: 3 * dpiScale;
+                            spacing: 4 * dpiScale;
+                            BasicText {
+                                id: messageText;
+                                width: parent.width;
+                                leftPadding: 24 * dpiScale;
+                                font.pixelSize: 10 * dpiScale;
+                                wrapMode: Text.WordWrap;
+                                textFormat: Text.RichText;
+                            }
+                            Flow {
+                                width: parent.width - 24 * dpiScale;
+                                x: 24 * dpiScale;
+                                spacing: 4 * dpiScale;
+                                visible: btns.model.length > 0;
+                                property string errorString: error_string;
+                                onErrorStringChanged: {
+                                    const readable = window.getReadableError(errorString).replace(/\n/g, "<br>");
+                                    messageText.text = readable? readable : qsTr("Missing required components.");
+
+                                    if (errorString.startsWith("convert_format:")) {
+                                        const params = errorString.split(":")[1].split(";");
+                                        const candidate = params[2];
+                                        const supported = params[1].split(",");
+                                        let buttons = supported.map(f => ({
+                                            text: f,
+                                            accent: f.toLowerCase() == candidate,
+                                            clicked: () => { render_queue.set_pixel_format(job_id, f); }
+                                        }));
+                                        buttons.push({
+                                            text: qsTr("Render using CPU"),
+                                            accent: candidate == '',
+                                            clicked: () => { render_queue.set_pixel_format(job_id, "cpu"); }
+                                        });
+                                        btns.model = buttons;
+                                    } else if (errorString.startsWith("file_exists:")) {
+                                        // The output of the items queued from here is always overwritten, it's already handled in onError
+                                        if (root.ownJobs[job_id]) { btns.model = []; return; }
+                                        const data = JSON.parse(errorString.substring(12));
+                                        switch (render_queue.overwrite_mode) {
+                                            case 1: Qt.callLater(() => render_queue.reset_job(job_id)); btns.model = []; break; // Overwrite
+                                            case 2: Qt.callLater(() => root.renameJobOutput(item_id, job_id, data.filename, data.folder, false)); btns.model = []; break; // Rename
+                                            case 3: Qt.callLater(() => render_queue.set_error_string(job_id, qsTr("Output file already exists."))); btns.model = []; break; // Skip
+                                            default:
+                                                btns.model = [
+                                                    { text: qsTr("Yes"),    clicked: () => { render_queue.reset_job(job_id); }, accent: true },
+                                                    { text: qsTr("Rename"), clicked: () => { root.renameJobOutput(item_id, job_id, data.filename, data.folder, true); } },
+                                                    { text: qsTr("No"),     clicked: () => { render_queue.set_error_string(job_id, qsTr("Output file already exists.")); btns.model = []; } },
+                                                ];
+                                            break;
+                                        }
+                                    } else {
+                                        btns.model = [];
+                                    }
+                                }
+                                Repeater {
+                                    id: btns;
+                                    model: [];
+                                    Button {
+                                        text: modelData.text;
+                                        height: 22 * dpiScale;
+                                        accent: modelData.accent || false;
+                                        leftPadding: 8 * dpiScale;
+                                        rightPadding: 8 * dpiScale;
+                                        font.pixelSize: 11 * dpiScale;
+                                        onClicked: modelData.clicked();
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -644,24 +880,194 @@ ResizablePanel {
             enabled: root.selectedCount > 0;
             onClicked: root.stabilizeSelected();
         }
-        Item {
+
+        // -------------------------------------- Render queue --------------------------------------
+
+        Hr { width: parent.width; visible: queueCol.visible; }
+
+        Column {
+            id: queueCol;
             width: parent.width;
-            height: visible? 20 * dpiScale : 0;
-            visible: render_queue.status == "active" || render_queue.status == "paused";
+            spacing: 3 * dpiScale;
+            visible: render_queue.total_frames > 0 || render_queue.status != "stopped";
+
+            property real progress: Math.max(0, Math.min(1, render_queue.current_frame / Math.max(1, render_queue.total_frames)));
+            onProgressChanged: {
+                const times = Util.calculateTimesAndFps(progress, render_queue.current_frame, render_queue.start_timestamp, render_queue.end_timestamp);
+                if (times !== false && progress < 1.0) {
+                    queueTime.elapsed = times[0];
+                    queueTime.remaining = times[1];
+                    if (times.length > 2) queueTime.fps = times[2];
+                    window.reportProgress(progress, "queue");
+                } else {
+                    window.reportProgress(-1, "queue");
+                    queueTime.remaining = "---";
+                }
+            }
+
             BasicText {
-                anchors.verticalCenter: parent.verticalCenter;
+                width: parent.width;
                 leftPadding: 2 * dpiScale;
                 font.pixelSize: 11 * dpiScale;
-                text: qsTr("Rendering: %1").arg("<b>" + (Math.max(0, Math.min(1, render_queue.current_frame / Math.max(1, render_queue.total_frames))) * 100).toFixed(1) + "%</b>");
+                textFormat: Text.RichText;
+                text: qsTr("Queue: %1").arg(`<b>${(queueCol.progress*100).toFixed(1)}%</b> <small>(${render_queue.current_frame}/${render_queue.total_frames}${queueTime.fpsText})</small>`);
+            }
+            QQC.ProgressBar {
+                width: parent.width;
+                height: 4 * dpiScale;
+                value: queueCol.progress;
+            }
+            BasicText {
+                id: queueTime;
+                width: parent.width;
+                leftPadding: 2 * dpiScale;
+                font.pixelSize: 10 * dpiScale;
+                opacity: 0.7;
+                property string elapsed: "---";
+                property string remaining: "---";
+                property real fps: 0;
+                property string fpsText: queueCol.progress > 0? qsTr(" @ %1fps").arg(fps.toFixed(1)) : "";
+                text: qsTr("Elapsed: %1. Remaining: %2").arg(elapsed).arg(render_queue.status == "active"? remaining : "---");
+            }
+
+            Item { width: 1; height: 2 * dpiScale; }
+
+            Button {
+                width: parent.width;
+                height: 30 * dpiScale;
+                accent: true;
+                property var statuses: ({
+                    "stopped": [qsTr("Start exporting"), "play",  styleAccentColor, "start"],
+                    "paused":  [qsTr("Resume"),          "play",  "#70e574",        "start"],
+                    "active":  [qsTr("Pause"),           "pause", "#f6a00b",        "pause"],
+                })
+                text:        statuses[render_queue.status][0];
+                iconName:    statuses[render_queue.status][1];
+                accentColor: statuses[render_queue.status][2];
+                icon.width: 13 * dpiScale;
+                icon.height: 13 * dpiScale;
+                font.pixelSize: 12 * dpiScale;
+                Behavior on accentColor { ColorAnimation { duration: 700; easing.type: Easing.OutExpo; } }
+                onClicked: render_queue[statuses[render_queue.status][3]]();
+            }
+        }
+
+        Item {
+            width: parent.width;
+            height: 24 * dpiScale;
+            LinkButton {
+                id: whenDoneBtn;
+                visible: !isMobile;
+                anchors.left: parent.left;
+                anchors.verticalCenter: parent.verticalCenter;
+                leftPadding: 2 * dpiScale; rightPadding: 2 * dpiScale;
+                font.pixelSize: 10 * dpiScale;
+                property int currentOption: 0;
+                property var options: [
+                    QT_TRANSLATE_NOOP("Popup", "Do nothing"),
+                    QT_TRANSLATE_NOOP("Popup", "Shut down the computer"),
+                    QT_TRANSLATE_NOOP("Popup", "Restart the computer"),
+                    QT_TRANSLATE_NOOP("Popup", "Sleep"),
+                    QT_TRANSLATE_NOOP("Popup", "Hibernate"),
+                    QT_TRANSLATE_NOOP("Popup", "Logout"),
+                    QT_TRANSLATE_NOOP("Popup", "Close Gyroflow")
+                ];
+                text: qsTr("When done: %1").arg(qsTranslate("Popup", options[currentOption])).trim();
+                onClicked: if (whenDonePopup.visible) { whenDonePopup.close(); } else { whenDonePopup.open(); }
+                onCurrentOptionChanged: render_queue.when_done = currentOption;
+                Popup {
+                    id: whenDonePopup;
+                    model: whenDoneBtn.options;
+                    currentIndex: whenDoneBtn.currentOption;
+                    width: maxItemWidth + 10 * dpiScale;
+                    y: -height;
+                    itemHeight: 25 * dpiScale;
+                    font.pixelSize: 11 * dpiScale;
+                    onClicked: i => whenDoneBtn.currentOption = i;
+                }
             }
             LinkButton {
+                id: queueSettings;
                 anchors.right: parent.right;
                 anchors.verticalCenter: parent.verticalCenter;
-                height: 20 * dpiScale;
-                leftPadding: 5 * dpiScale; rightPadding: 5 * dpiScale;
-                font.pixelSize: 11 * dpiScale;
-                text: render_queue.status == "paused"? qsTr("Resume") : qsTr("Pause");
-                onClicked: render_queue.status == "paused"? render_queue.start() : render_queue.pause();
+                leftPadding: 2 * dpiScale; rightPadding: 2 * dpiScale;
+                font.pixelSize: 10 * dpiScale;
+                text: qsTr("Queue settings");
+                onClicked: if (queueSettingsMenu.visible) { queueSettingsMenu.dismiss(); } else { queueSettingsMenu.popup(queueSettings, 0, -queueSettingsMenu.height); }
+
+                function setParallelRenders(v: int, menuItem: Menu): void {
+                    v = Math.min(6, Math.max(v, 1));
+
+                    render_queue.parallel_renders = v;
+
+                    for (let i = 0; i < menuItem.count; ++i) {
+                        if (menuItem.itemAt(i) instanceof QQC.MenuItem) { menuItem.actionAt(i).checked = i == v - 1; }
+                    }
+                    settings.setValue("parallelRenders", v);
+                }
+                function setOverwriteAction(v: int, menuItem: Menu): void {
+                    v = Math.min(3, Math.max(v, 0));
+
+                    render_queue.overwrite_mode = v;
+
+                    for (let i = 0, j = 0; i < menuItem.count; ++i) {
+                        if (menuItem.itemAt(i) instanceof QQC.MenuItem) { menuItem.actionAt(i).checked = j == v; j++;  }
+                    }
+                    settings.setValue("defaultOverwriteAction", v);
+                }
+                function setExportMode(v: int, menuItem: Menu): void {
+                    v = Math.min(4, Math.max(v, 0));
+
+                    render_queue.export_project = v;
+
+                    for (let i = 0; i < menuItem.count; ++i) {
+                        if (menuItem.itemAt(i) instanceof QQC.MenuItem) { menuItem.actionAt(i).checked = i == v; }
+                    }
+                    settings.setValue("exportMode", v);
+                }
+
+                Menu {
+                    id: queueSettingsMenu;
+                    Menu {
+                        id: parallelRendersMenu;
+                        title: qsTr("Number of parallel renders");
+                        Action { text: "1"; onTriggered: queueSettings.setParallelRenders(1, parallelRendersMenu);  }
+                        Action { text: "2"; onTriggered: queueSettings.setParallelRenders(2, parallelRendersMenu);  }
+                        Action { text: "3"; onTriggered: queueSettings.setParallelRenders(3, parallelRendersMenu);  }
+                        Action { text: "4"; onTriggered: queueSettings.setParallelRenders(4, parallelRendersMenu);  }
+                        Action { text: "5"; onTriggered: queueSettings.setParallelRenders(5, parallelRendersMenu);  }
+                        Action { text: "6"; onTriggered: queueSettings.setParallelRenders(6, parallelRendersMenu);  }
+                        Component.onCompleted: queueSettings.setParallelRenders(+settings.value("parallelRenders", 1), parallelRendersMenu);
+                    }
+                    Menu {
+                        id: overwriteActionMenu;
+                        title: qsTr("Default overwrite action");
+                        Action { text: qsTr("Ask");            onTriggered: queueSettings.setOverwriteAction(0, overwriteActionMenu); }
+                        QQC.MenuSeparator { verticalPadding: 5 * dpiScale; }
+                        Action { text: qsTr("Overwrite file"); onTriggered: queueSettings.setOverwriteAction(1, overwriteActionMenu); }
+                        Action { text: qsTr("Rename file");    onTriggered: queueSettings.setOverwriteAction(2, overwriteActionMenu); }
+                        Action { text: qsTr("Skip file");      onTriggered: queueSettings.setOverwriteAction(3, overwriteActionMenu); }
+                        Component.onCompleted: queueSettings.setOverwriteAction(+settings.value("defaultOverwriteAction", 0), overwriteActionMenu);
+                    }
+                    Menu {
+                        id: exportModeMenu;
+                        title: qsTr("Export mode");
+                        Action { text: qsTr("Stabilized video");                               onTriggered: queueSettings.setExportMode(0, exportModeMenu); }
+                        Action { text: qsTr("Project file");                                   onTriggered: queueSettings.setExportMode(1, exportModeMenu); }
+                        Action { text: qsTr("Project file (including gyro data)");             onTriggered: queueSettings.setExportMode(2, exportModeMenu); }
+                        Action { text: qsTr("Project file (including processed gyro data)");   onTriggered: queueSettings.setExportMode(3, exportModeMenu); }
+                        Action { text: qsTr("Stabilized video + Project file with gyro data"); onTriggered: queueSettings.setExportMode(4, exportModeMenu); }
+                        Component.onCompleted: queueSettings.setExportMode(+settings.value("exportMode", 0), exportModeMenu);
+                    }
+                    QQC.MenuSeparator { verticalPadding: 5 * dpiScale; }
+                    Action { checked: settings.value("showQueueWhenAdding", true); text: qsTr("Show the media list when adding an item"); onTriggered: { checked = !checked; settings.setValue("showQueueWhenAdding", checked); } }
+                    Action { text: qsTr("Clear render queue"); onTriggered: {
+                        messageBox(Modal.Warning, qsTr("Are you sure you want to remove all items from the render queue?"), [
+                            { text: qsTr("Yes"), clicked: () => { render_queue.clear(); media_library.clear_job_statuses(); } },
+                            { text: qsTr("No"), accent: true },
+                        ]);
+                    } }
+                }
             }
         }
     }
