@@ -25,6 +25,12 @@ jobs:
     env:
       BUILD_APP_STORE_BUNDLE: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
       IS_MANUAL_DISPATCH: ${{ github.event_name == 'workflow_dispatch' }}
+      MACOS_CERTIFICATES: ${{ secrets.MACOS_CERTIFICATES }}
+      MACOS_ITCONNECT_KEY: ${{ secrets.MACOS_ITCONNECT_KEY }}
+      MACOS_ACCOUNT_PASS: ${{ secrets.MACOS_ACCOUNT_PASS }}
+      ANDROID_RELEASE_KEYSTORE: ${{ secrets.ANDROID_RELEASE_KEYSTORE }}
+      MS_STORE_SIGNING_KEY: ${{ secrets.MS_STORE_SIGNING_KEY }}
+      MS_STORE_SIGNING_PASS: ${{ secrets.MS_STORE_SIGNING_PASS }}
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -60,13 +66,13 @@ jobs:
           rm -r -force ${{ github.workspace }}/target/release/build/qml-video-rs* -ErrorAction SilentlyContinue
 
       - name: Install Mac certificates
-        if: ${{ (matrix.targets.os == 'macos-13' || matrix.targets.os == 'macos-14' || matrix.targets.os == 'macos-15' || matrix.targets.os == 'macos-26') && secrets.MACOS_CERTIFICATES != '' }}
+        if: ${{ (matrix.targets.os == 'macos-13' || matrix.targets.os == 'macos-14' || matrix.targets.os == 'macos-15' || matrix.targets.os == 'macos-26') && env.MACOS_CERTIFICATES != '' }}
         uses: apple-actions/import-codesign-certs@v3
         with:
           p12-file-base64: ${{ secrets.MACOS_CERTIFICATES }}
           p12-password: ${{ secrets.MACOS_CERTIFICATE_PWD }}
       - name: Download Provisioning Profiles
-        if: ${{ matrix.targets.type == 'ios' && secrets.MACOS_ITCONNECT_KEY != '' }}
+        if: ${{ matrix.targets.type == 'ios' && env.MACOS_ITCONNECT_KEY != '' }}
         id: provisioning
         uses: apple-actions/download-provisioning-profiles@v3
         with:
@@ -76,7 +82,7 @@ jobs:
           api-key-id: ${{ secrets.MACOS_ITCONNECT_KEY_ID }}
           api-private-key: ${{ secrets.MACOS_ITCONNECT_KEY }}
       - name: Download Provisioning Profiles
-        if: ${{ matrix.targets.type == 'macstore' && secrets.MACOS_ITCONNECT_KEY != '' }}
+        if: ${{ matrix.targets.type == 'macstore' && env.MACOS_ITCONNECT_KEY != '' }}
         id: provisioning_mac
         uses: apple-actions/download-provisioning-profiles@v3
         with:
@@ -87,7 +93,7 @@ jobs:
           api-private-key: ${{ secrets.MACOS_ITCONNECT_KEY }}
 
       - name: Save keystore to file
-        if: ${{ matrix.targets.os == 'windows-2022' && (secrets.ANDROID_RELEASE_KEYSTORE != '' || secrets.MS_STORE_SIGNING_KEY != '') }}
+        if: ${{ matrix.targets.os == 'windows-2022' && (env.ANDROID_RELEASE_KEYSTORE != '' || env.MS_STORE_SIGNING_KEY != '') }}
         run: |
           echo "${{ secrets.ANDROID_RELEASE_KEYSTORE }}" > ${{ github.workspace }}/android_release.keystore.b64
           echo "${{ secrets.MS_STORE_SIGNING_KEY }}" > ${{ github.workspace }}/_deployment/windows/msix_signing_key.pfx.b64
@@ -103,13 +109,13 @@ jobs:
         run: |
           just install-deps
           just deploy universal
-          if [ -n "${{ secrets.MACOS_ACCOUNT_PASS }}" ]; then
+          if [ -n "$MACOS_ACCOUNT_PASS" ]; then
             xcrun notarytool submit --wait --apple-id ${{ secrets.MACOS_ACCOUNT_USER }} --team-id ${{ secrets.MACOS_TEAM }} --password ${{ secrets.MACOS_ACCOUNT_PASS }} ${{ github.workspace }}/_deployment/_binaries/Gyroflow-mac-universal.dmg
             xcrun stapler staple --verbose ${{ github.workspace }}/_deployment/_binaries/Gyroflow-mac-universal.dmg
           fi
 
       - name: Build Gyroflow (macOS App Store)
-        if: ${{ matrix.targets.type == 'macstore' && secrets.MACOS_ITCONNECT_KEY != '' && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') }}
+        if: ${{ matrix.targets.type == 'macstore' && env.MACOS_ITCONNECT_KEY != '' && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') }}
         env:
           SIGNING_FINGERPRINT: ${{ secrets.MACOS_CERTIFICATE_FINGERPRINT }}
           # For Mac App Store
@@ -149,7 +155,7 @@ jobs:
           if (("$Env:BUILD_APP_STORE_BUNDLE" -eq "true") -and $Env:MS_STORE_SIGNING_PASS) { just bundle }
 
       - name: Build Gyroflow (Android)
-        if: ${{ matrix.targets.type == 'android' && secrets.ANDROID_RELEASE_KEYSTORE != '' }}
+        if: ${{ matrix.targets.type == 'android' && env.ANDROID_RELEASE_KEYSTORE != '' }}
         env:
           KEY_STORE_PATH: ${{ github.workspace }}/android_release.keystore
           KEY_STORE_ALIAS: ${{ secrets.ANDROID_RELEASE_KEYSTORE_ALIAS }}
@@ -162,7 +168,7 @@ jobs:
           just android deploy
 
       - name: Build Gyroflow (iOS)
-        if: ${{ matrix.targets.type == 'ios' && secrets.MACOS_ITCONNECT_KEY != '' }}
+        if: ${{ matrix.targets.type == 'ios' && env.MACOS_ITCONNECT_KEY != '' }}
         env:
           SIGN_KEY: 58FE9D9FF561BF9910031999A8211A23858D1920
           PROVISIONING_PROFILE: /Users/runner/Library/MobileDevice/Provisioning Profiles/${{ matrix.targets.type == 'ios' && fromJSON(steps.provisioning.outputs.profiles)[0].udid || '' }}.mobileprovision
@@ -192,6 +198,9 @@ jobs:
     runs-on: macos-15
     permissions:
       contents: write
+    env:
+      MACOS_ACCOUNT_PASS: ${{ secrets.MACOS_ACCOUNT_PASS }}
+      ANDROID_SERVICE_ACCOUNT_JSON: ${{ secrets.ANDROID_SERVICE_ACCOUNT_JSON }}
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -202,14 +211,14 @@ jobs:
       - run: rm -rf ./Gyroflow-debug-symbols*
 
       - name: Upload to App Store
-        if: secrets.MACOS_ACCOUNT_PASS != ''
+        if: env.MACOS_ACCOUNT_PASS != ''
         run: |
           xcrun altool --upload-app -f ./Gyroflow-ios/Gyroflow.ipa -t iOS -u ${{ secrets.MACOS_ACCOUNT_USER }} -p ${{ secrets.MACOS_ACCOUNT_PASS }}
           xcrun altool --upload-app -f ./Gyroflow-macstore/Gyroflow.pkg -t macos -u ${{ secrets.MACOS_ACCOUNT_USER }} -p ${{ secrets.MACOS_ACCOUNT_PASS }}
 
       - name: Upload to Google Play
         uses: r0adkll/upload-google-play@v1
-        if: secrets.ANDROID_SERVICE_ACCOUNT_JSON != ''
+        if: env.ANDROID_SERVICE_ACCOUNT_JSON != ''
         with:
           serviceAccountJsonPlainText: ${{ secrets.ANDROID_SERVICE_ACCOUNT_JSON }}
           packageName: xyz.gyroflow
