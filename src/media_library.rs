@@ -3,7 +3,7 @@
 
 use qmetaobject::*;
 
-use crate::{ core, rendering, util };
+use crate::{ core, marker_import, rendering, util };
 use crate::core::StabilizationManager;
 use core::filesystem;
 use std::sync::Arc;
@@ -37,6 +37,7 @@ pub struct MediaItem {
     pub trim_end: f64,
     pub lens_profile: QString,
     pub lens_warning: bool,
+    pub marker_unmatched: bool,
     pub scanning: bool,
     pub stabilized_state: i32,
     pub job_status: QString, // "" | queued | processing | rendering | done | error | question
@@ -83,6 +84,8 @@ struct Video {
     duration_ms: f64,
     lens_profile: String,
     lens_warning: bool,
+    marker_unmatched: bool,
+    timeline_markers: Vec<marker_import::TimelineMarker>,
     scanning: bool,
     scan_queued: bool,
     settings: Option<String>,
@@ -143,6 +146,10 @@ pub struct MediaLibrary {
     find_by_url: qt_method!(fn(&self, url: QString) -> u32),
     get_item_index: qt_method!(fn(&self, item_id: u32) -> i32),
 
+    load_markers: qt_method!(fn(&mut self, url: QString) -> QString),
+    preview_markers: qt_method!(fn(&self, offset_seconds: f64) -> QString),
+    import_markers: qt_method!(fn(&mut self, offset_seconds: f64) -> QString),
+    get_timeline_markers: qt_method!(fn(&self, item_id: u32) -> QString),
     add_section: qt_method!(fn(&mut self, video_id: u32, trim_start: f64, trim_end: f64) -> u32),
     set_section_trim: qt_method!(fn(&mut self, item_id: u32, trim_start: f64, trim_end: f64)),
 
@@ -194,6 +201,8 @@ pub struct MediaLibrary {
 
     next_id: u32,
     pending_scans: Arc<AtomicUsize>,
+    markers: Vec<marker_import::Marker>,
+    marker_file_loaded: bool,
 
     stabilizer: Arc<StabilizationManager>,
 }
@@ -216,6 +225,7 @@ impl MediaLibrary {
         let search = self.search_text.to_string().to_lowercase();
         if search.is_empty() { return true; }
         if v.filename.to_lowercase().contains(&search) { return true; }
+        if v.timeline_markers.iter().any(|m| m.name.to_lowercase().contains(&search)) { return true; }
         if self.output_filename_of(&v.url, &v.output_path).to_lowercase().contains(&search) { return true; }
         v.sections.iter().any(|s| {
             s.name.to_lowercase().contains(&search) || self.output_filename_of(&v.url, &s.output_path).to_lowercase().contains(&search)
@@ -253,6 +263,7 @@ impl MediaLibrary {
             trim_end: 1.0,
             lens_profile: QString::from(v.lens_profile.as_str()),
             lens_warning: v.lens_warning,
+            marker_unmatched: v.marker_unmatched,
             scanning: v.scanning,
             stabilized_state: self.stabilized_state(&v.settings, &v.output_hash),
             job_status: QString::from(v.job.status.as_str()),
@@ -283,6 +294,7 @@ impl MediaLibrary {
             trim_end: s.trim_end,
             lens_profile: QString::from(v.lens_profile.as_str()),
             lens_warning: v.lens_warning,
+            marker_unmatched: false,
             scanning: false,
             stabilized_state: self.stabilized_state(&s.settings, &s.output_hash),
             job_status: QString::from(s.job.status.as_str()),
@@ -813,29 +825,159 @@ impl MediaLibrary {
     // ----------------------------------------- Sections ------------------------------------------
     // ---------------------------------------------------------------------------------------------
 
-    pub fn add_section(&mut self, video_id: u32, trim_start: f64, trim_end: f64) -> u32 {
-        let id = self.new_id();
-        let suffix = self.default_suffix.to_string();
-        if let Some(v) = self.video_mut(video_id) {
-            // Inherit from the last created section, or from the video itself if it's the first one
-            let settings = v.sections.last().map(|s| s.settings.clone()).unwrap_or_else(|| v.settings.clone());
-            let num = v.sections.len() + 1;
-            let output_path = Self::filename_with_index(&Self::default_output_filename(&v.filename, &suffix), num);
-            v.expanded = true;
-            v.sections.push(Section {
-                id,
-                name: format!("Section {num}"),
-                trim_start,
-                trim_end,
-                settings,
-                output_path,
-                ..Default::default()
-            });
-        } else {
-            return 0;
+    fn marker_error(message: String) -> QString {
+        QString::from(serde_json::json!({ "error": message }).to_string())
+    }
+
+    fn marker_videos(&self) -> Vec<marker_import::VideoSpan> {
+        self.all_videos().map(|v| marker_import::VideoSpan {
+            id: v.id, start: v.created_at as f64, duration_ms: v.duration_ms,
+        }).collect()
+    }
+
+    fn marker_plan(&self, offset_seconds: f64) -> Result<marker_import::ImportPlan, String> {
+        if !self.marker_file_loaded {
+            return Err("Choose a markers.json file first.".into());
+        }
+        marker_import::plan_parsed(&self.markers, &self.marker_videos(), offset_seconds)
+    }
+
+    fn marker_preview_json(&self, plan: &marker_import::ImportPlan) -> String {
+        let matched: std::collections::HashSet<u32> = plan.sections.iter().map(|s| s.video_id).collect();
+        let mut videos = Vec::new();
+        let mut untouched = Vec::new();
+        for v in self.all_videos() {
+            let sections: Vec<serde_json::Value> = plan.sections.iter().filter(|s| s.video_id == v.id).map(|s| {
+                let label = s.name.as_deref().filter(|n| !n.trim().is_empty())
+                    .or(s.path.as_deref())
+                    .unwrap_or("");
+                serde_json::json!({
+                    "start": s.start, "end": s.end,
+                    "name": s.name.clone().unwrap_or_default(),
+                    "path": s.path.clone().unwrap_or_default(),
+                    "label": label,
+                })
+            }).collect();
+            if sections.is_empty() {
+                untouched.push(v.filename.clone());
+            } else {
+                videos.push(serde_json::json!({
+                    "id": v.id, "name": v.filename, "sections": sections,
+                }));
+            }
+        }
+        serde_json::json!({
+            "videos": videos,
+            "unmatched": plan.unmatched,
+            "untouched": untouched,
+            "sections": plan.sections.len(),
+            "matched": matched.len(),
+        }).to_string()
+    }
+
+    /// Read and validate a markers.json file. Preview and import then use the cached markers.
+    pub fn load_markers(&mut self, url: QString) -> QString {
+        self.markers.clear();
+        self.marker_file_loaded = false;
+        let path = filesystem::url_to_path(&Self::to_url(&url.to_string(), false));
+        let json = match std::fs::read_to_string(&path) {
+            Ok(json) => json,
+            Err(e) => return Self::marker_error(format!("Could not read markers file: {e}")),
+        };
+        match marker_import::parse(&json) {
+            Ok(markers) => {
+                let ins = markers.iter().filter(|m| matches!(m, marker_import::Marker::In { .. })).count();
+                let outs = markers.iter().filter(|m| matches!(m, marker_import::Marker::Out { .. })).count();
+                self.markers = markers;
+                self.marker_file_loaded = true;
+                QString::from(serde_json::json!({
+                    "name": filesystem::get_filename(&url.to_string()),
+                    "count": self.markers.len(), "ins": ins, "outs": outs,
+                }).to_string())
+            }
+            Err(e) => Self::marker_error(e),
+        }
+    }
+
+    /// Match cached markers against the current videos without changing the sidebar.
+    pub fn preview_markers(&self, offset_seconds: f64) -> QString {
+        match self.marker_plan(offset_seconds) {
+            Ok(plan) => QString::from(self.marker_preview_json(&plan)),
+            Err(e) => Self::marker_error(e),
+        }
+    }
+
+    /// Apply cached markers to the library. Returns a JSON summary for the UI.
+    pub fn import_markers(&mut self, offset_seconds: f64) -> QString {
+        if self.scanning { return Self::marker_error("Wait for video scanning to finish before importing markers.".into()); }
+        let plan = match self.marker_plan(offset_seconds) {
+            Ok(plan) => plan,
+            Err(e) => return Self::marker_error(e),
+        };
+        let mut summary: serde_json::Value = serde_json::from_str(&self.marker_preview_json(&plan)).unwrap_or_else(|_| serde_json::json!({}));
+        let matched = plan.sections.iter().map(|s| s.video_id).collect::<std::collections::HashSet<_>>();
+        for v in self.all_videos_mut() {
+            v.marker_unmatched = !matched.contains(&v.id);
+            v.timeline_markers.clear();
+        }
+        for (id, marker) in plan.timeline {
+            if let Some(v) = self.video_mut(id) { v.timeline_markers.push(marker); }
+        }
+        let mut queue_ids = Vec::new();
+        for section in plan.sections {
+            let id = self.create_section(section.video_id, section.start, section.end, section.name, section.path);
+            if id > 0 { queue_ids.push(id); }
         }
         self.rebuild();
         self.refresh_outputs();
+        summary["queue_ids"] = serde_json::json!(queue_ids);
+        QString::from(summary.to_string())
+    }
+
+    pub fn get_timeline_markers(&self, item_id: u32) -> QString {
+        let video = self.video(item_id).or_else(|| self.section(item_id).map(|(v, _)| v));
+        QString::from(serde_json::to_string(&video.map(|v| &v.timeline_markers).cloned().unwrap_or_default()).unwrap_or_else(|_| "[]".into()))
+    }
+
+    fn create_section(&mut self, video_id: u32, trim_start: f64, trim_end: f64, name: Option<String>, path: Option<String>) -> u32 {
+        let id = self.new_id();
+        let suffix = self.default_suffix.to_string();
+        if let Some(v) = self.video_mut(video_id) {
+            let settings = v.sections.last().map(|s| s.settings.clone()).unwrap_or_else(|| v.settings.clone());
+            let num = v.sections.len() + 1;
+            let default_path = Self::filename_with_index(&Self::default_output_filename(&v.filename, &suffix), num);
+            let named_path = name.as_ref().filter(|n| !n.trim().is_empty()).map(|name| {
+                let mut filename = name.trim().replace(['/', '\\'], "_");
+                if std::path::Path::new(&filename).extension().is_none() {
+                    if let Some(ext) = std::path::Path::new(&v.filename).extension().and_then(|x| x.to_str()) {
+                        filename.push('.');
+                        filename.push_str(ext);
+                    }
+                }
+                filename
+            });
+            v.expanded = true;
+            v.sections.push(Section {
+                id,
+                name: name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| format!("Section {num}")),
+                trim_start,
+                trim_end,
+                settings,
+                output_path: path.or(named_path).unwrap_or(default_path),
+                ..Default::default()
+            });
+            id
+        } else {
+            0
+        }
+    }
+
+    pub fn add_section(&mut self, video_id: u32, trim_start: f64, trim_end: f64) -> u32 {
+        let id = self.create_section(video_id, trim_start, trim_end, None, None);
+        if id > 0 {
+            self.rebuild();
+            self.refresh_outputs();
+        }
         id
     }
     pub fn set_section_trim(&mut self, item_id: u32, trim_start: f64, trim_end: f64) {

@@ -30,6 +30,7 @@ ResizablePanel {
     property alias queueModal: queueModalLoader;
     // Jobs queued from here, the user already decided to (re-)stabilize these items, so their output is always overwritten
     property var ownJobs: ({ });
+    property var lastImport: null;
 
     Connections {
         target: media_library;
@@ -42,6 +43,7 @@ ResizablePanel {
         root.queuedSelectedCount = media_library.get_queued_selection().length;
         root.currentJobId       = media_library.current_item > 0? media_library.get_item_job(media_library.current_item) : 0;
         root.updateOutputFile();
+        window.videoArea.timeline.importedMarkers = JSON.parse(media_library.get_timeline_markers(media_library.current_item));
     }
 
     // -----------------------------------------------------------------------------------------
@@ -98,6 +100,26 @@ ResizablePanel {
     Connections {
         target: window.outputFile;
         function onPathEdited(path: string): void { root.pushOutputToItem(path); }
+    }
+
+    function openImportMarkers(): void {
+        root.saveCurrentSettings();
+        importModalLoader.active = true;
+        if (importModalLoader.item) importModalLoader.item.open();
+    }
+    function applyImportedMarkers(offsetHours: real, queue: bool): void {
+        const result = JSON.parse(media_library.import_markers(offsetHours * 3600));
+        if (result.error) {
+            messageBox(Modal.Error, result.error, [ { text: qsTr("Ok") } ]);
+            return;
+        }
+        result.queued = queue;
+        root.lastImport = result;
+        if (queue) {
+            for (const id of result.queue_ids || []) root.queueItem(id);
+        }
+        root.refreshState();
+        showNotification(Modal.Success, qsTr("Created %1 sections.").arg("<b>" + (result.sections || 0) + "</b>"));
     }
 
     function applyStabilizationToAll(): void {
@@ -440,6 +462,15 @@ ResizablePanel {
                     width: 32 * dpiScale;
                     height: 32 * dpiScale;
                     leftPadding: 0; rightPadding: 0;
+                    iconName: "file-empty";
+                    tooltip: qsTr("Import markers.json");
+                    enabled: !media_library.scanning && media_library.items.rowCount() > 0;
+                    onClicked: root.openImportMarkers();
+                }
+                LinkButton {
+                    width: 32 * dpiScale;
+                    height: 32 * dpiScale;
+                    leftPadding: 0; rightPadding: 0;
                     iconName: "bin";
                     textColor: "#f67575";
                     tooltip: qsTr("Remove all");
@@ -449,6 +480,7 @@ ResizablePanel {
                                 const ids = media_library.get_render_items(false);
                                 for (const id of ids) root.cancelItem(id);
                                 media_library.clear();
+                                root.lastImport = null;
                             } },
                             { text: qsTr("No") }
                         ]);
@@ -551,6 +583,7 @@ ResizablePanel {
             property bool isInQueue: job_id > 0;
 
             color: selected?     "#33ffffff"
+                 : marker_unmatched && !dlg.isSection && !dlg.isFolder? "#30f6a00b"
                  : isJobError?   "#30ed7676"
                  : isQuestion?   "#30" + styleAccentColor.toString().substring(1)
                  : stabilized_state == 1? "#3070e574"
@@ -734,6 +767,17 @@ ResizablePanel {
                             iconName: "plus";
                             tooltip: qsTr("Add a section of this video");
                             onClicked: root.addSection(dlg.isSection? parent_id : item_id, item_id);
+                        }
+                        QQCI.IconImage {
+                            visible: marker_unmatched && !dlg.isSection && !dlg.isFolder;
+                            name: "warning";
+                            source: "qrc:/resources/icons/svg/warning.svg";
+                            color: "#f6a00b";
+                            height: 14 * dpiScale;
+                            width: height;
+                            anchors.verticalCenter: parent.verticalCenter;
+                            ToolTip { visible: !isMobile && unmatchedMouse.containsMouse; text: qsTr("No imported section matched this video."); }
+                            MouseArea { id: unmatchedMouse; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton; }
                         }
                         QQC.BusyIndicator {
                             visible: scanning;
@@ -1235,6 +1279,20 @@ ResizablePanel {
             }
         }
         onLoaded: item.shown = true;
+    }
+
+    Loader {
+        id: importModalLoader;
+        active: false;
+        parent: window;
+        anchors.fill: parent;
+        z: 101;
+        sourceComponent: Component {
+            ImportMarkersModal {
+                onAccepted: (offsetHours, queue) => root.applyImportedMarkers(offsetHours, queue);
+            }
+        }
+        onLoaded: item.open();
     }
 
     Component.onCompleted: {

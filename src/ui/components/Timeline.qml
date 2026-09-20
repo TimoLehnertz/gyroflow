@@ -10,6 +10,7 @@ import Gyroflow
 Item {
     id: root;
     property var trimRanges: [];
+    property var importedMarkers: [];
     property var prevTrimRanges: [];
     property bool trimActive: trimRanges.length > 0;
     property bool restrictTrim: true;
@@ -294,6 +295,39 @@ Item {
         width: parent.width - x - (root.fullScreen || window.isMobileLayout? 10 : 33) * dpiScale;
         height: parent.height - y - (root.fullScreen || window.isMobileLayout? (root.editingSyncPoint || offsetsRepeater.count > 0? 30 : 0) : 30) * dpiScale - parent.additionalHeight;
 
+        Repeater {
+            model: root.importedMarkers;
+            delegate: Item {
+                required property var modelData;
+                x: (root.mapToVisibleArea(modelData.position) * inner.width) - width / 2;
+                y: (root.fullScreen || window.isMobileLayout? 0 : 35) * dpiScale;
+                width: 12 * dpiScale;
+                height: inner.height - y;
+                z: 10;
+                visible: modelData.position >= root.visibleAreaLeft && modelData.position <= root.visibleAreaRight;
+                Rectangle {
+                    anchors.horizontalCenter: parent.horizontalCenter;
+                    width: 2 * dpiScale;
+                    height: parent.height;
+                    color: modelData.color || styleAccentColor;
+                    opacity: 0.85;
+                }
+                Rectangle {
+                    anchors.horizontalCenter: parent.horizontalCenter;
+                    width: 8 * dpiScale;
+                    height: 8 * dpiScale;
+                    radius: width / 2;
+                    color: modelData.color || styleAccentColor;
+                }
+                ToolTip { visible: !isMobile && markerMouse.containsMouse; text: modelData.name; }
+                MouseArea {
+                    id: markerMouse;
+                    anchors.fill: parent;
+                    hoverEnabled: true;
+                    onClicked: vid.setTimestamp(modelData.position * root.orgDurationMs);
+                }
+            }
+        }
         Rectangle {
             x: 0;
             y: (root.fullScreen || window.isMobileLayout? 0 : 35) * dpiScale;
