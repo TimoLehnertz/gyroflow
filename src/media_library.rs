@@ -39,9 +39,10 @@ pub struct MediaItem {
     pub lens_warning: bool,
     pub scanning: bool,
     pub stabilized_state: i32,
-    pub job_status: QString, // "" | queued | rendering | done | error
+    pub job_status: QString, // "" | queued | processing | rendering | done | error | question
     pub job_progress: f64,
     pub error_string: QString,
+    pub job_message: QString,
     pub job_id: u32,
 }
 
@@ -51,8 +52,13 @@ struct JobState {
     status: String,
     progress: f64,
     error: String,
+    /// Informational note about the job, which doesn't change its status
+    message: String,
     /// Hash of the stabilization settings this job was queued with
     hash: String
+}
+impl JobState {
+    fn is_active(&self) -> bool { self.status == "queued" || self.status == "processing" || self.status == "rendering" }
 }
 
 #[derive(Default, Clone, Debug)]
@@ -154,8 +160,11 @@ pub struct MediaLibrary {
     get_item_job: qt_method!(fn(&self, item_id: u32) -> u32),
     get_item_job_status: qt_method!(fn(&self, item_id: u32) -> QString),
     is_library_job: qt_method!(fn(&self, job_id: u32) -> bool),
+    get_item_for_job: qt_method!(fn(&self, job_id: u32) -> u32),
     update_job_progress: qt_method!(fn(&mut self, job_id: u32, progress: f64, finished: bool)),
+    set_job_processing: qt_method!(fn(&mut self, job_id: u32, progress: f64)),
     set_job_error: qt_method!(fn(&mut self, job_id: u32, err: QString)),
+    set_job_error_string: qt_method!(fn(&mut self, job_id: u32, error_string: QString)),
     clear_job_statuses: qt_method!(fn(&mut self)),
     active_job_count: qt_method!(fn(&self) -> usize),
 
@@ -242,6 +251,7 @@ impl MediaLibrary {
             job_status: QString::from(v.job.status.as_str()),
             job_progress: v.job.progress,
             error_string: QString::from(v.job.error.as_str()),
+            job_message: QString::from(v.job.message.as_str()),
             job_id: v.job.job_id,
         }
     }
@@ -271,6 +281,7 @@ impl MediaLibrary {
             job_status: QString::from(s.job.status.as_str()),
             job_progress: s.job.progress,
             error_string: QString::from(s.job.error.as_str()),
+            job_message: QString::from(s.job.message.as_str()),
             job_id: s.job.job_id,
         }
     }
@@ -1074,6 +1085,7 @@ impl MediaLibrary {
             status: if job_id > 0 { "queued".into() } else { String::new() },
             progress: 0.0,
             error: String::new(),
+            message: String::new(),
             hash: self.settings_hash(item_id).to_string()
         };
         if let Some(v) = self.video_mut(item_id) {
@@ -1088,6 +1100,7 @@ impl MediaLibrary {
             x.job_status = QString::from(job.status.as_str());
             x.job_progress = 0.0;
             x.error_string = QString::default();
+            x.job_message = QString::default();
         });
     }
     pub fn get_item_job(&self, item_id: u32) -> u32 {
@@ -1098,6 +1111,9 @@ impl MediaLibrary {
     }
     pub fn is_library_job(&self, job_id: u32) -> bool {
         job_id > 0 && self.all_videos().any(|v| v.job.job_id == job_id || v.sections.iter().any(|s| s.job.job_id == job_id))
+    }
+    pub fn get_item_for_job(&self, job_id: u32) -> u32 {
+        self.item_id_for_job(job_id)
     }
     fn item_id_for_job(&self, job_id: u32) -> u32 {
         if job_id == 0 { return 0; }
@@ -1125,7 +1141,7 @@ impl MediaLibrary {
         if item_id == 0 { return; }
         let mut is_error = false;
         if let Some(job) = self.job_mut(job_id) {
-            is_error = job.status == "error";
+            is_error = job.status == "error" || job.status == "question";
             if !is_error {
                 job.progress = progress;
                 job.status = if finished { "done".into() } else { "rendering".into() };
@@ -1148,6 +1164,24 @@ impl MediaLibrary {
             self.update_stabilized_row(item_id);
         }
     }
+    /// Progress of the loading and synchronization phase, before the rendering starts
+    pub fn set_job_processing(&mut self, job_id: u32, progress: f64) {
+        let item_id = self.item_id_for_job(job_id);
+        if item_id == 0 { return; }
+        let mut skip = true;
+        if let Some(job) = self.job_mut(job_id) {
+            skip = job.status == "error" || job.status == "question" || job.status == "done";
+            if !skip {
+                job.progress = progress;
+                job.status = "processing".into();
+            }
+        }
+        if skip { return; }
+        self.patch_row(item_id, |x| {
+            x.job_progress = progress;
+            x.job_status = QString::from("processing");
+        });
+    }
     pub fn set_job_error(&mut self, job_id: u32, err: QString) {
         let item_id = self.item_id_for_job(job_id);
         if item_id == 0 { return; }
@@ -1161,12 +1195,45 @@ impl MediaLibrary {
             x.error_string = QString::from(err.as_str());
         });
     }
+    /// The error string of the render queue item, which can be an error, a question (`convert_format:`, `file_exists:`)
+    /// or just an informational note (`uses_cpu`). An empty string clears the previous one.
+    pub fn set_job_error_string(&mut self, job_id: u32, error_string: QString) {
+        let item_id = self.item_id_for_job(job_id);
+        if item_id == 0 { return; }
+        let err = error_string.to_string();
+        let is_question = err.starts_with("convert_format:") || err.starts_with("file_exists:");
+
+        let job = match self.job_mut(job_id) {
+            Some(job) => {
+                if err == "uses_cpu" {
+                    job.message = err;
+                } else {
+                    job.message = String::new();
+                    job.error = err.clone();
+                    if is_question {
+                        job.status = "question".into();
+                    } else if !err.is_empty() {
+                        job.status = "error".into();
+                    } else if job.status == "error" || job.status == "question" {
+                        job.status = "queued".into();
+                    }
+                }
+                job.clone()
+            },
+            None => return
+        };
+        self.patch_row(item_id, |x| {
+            x.job_status = QString::from(job.status.as_str());
+            x.error_string = QString::from(job.error.as_str());
+            x.job_message = QString::from(job.message.as_str());
+        });
+    }
     pub fn clear_job_statuses(&mut self) {
         let mut ids = Vec::new();
         for v in self.all_videos_mut() {
-            if v.job.status != "rendering" { v.job = Default::default(); ids.push(v.id); }
+            if v.job.status != "rendering" && v.job.status != "processing" { v.job = Default::default(); ids.push(v.id); }
             for s in v.sections.iter_mut() {
-                if s.job.status != "rendering" { s.job = Default::default(); ids.push(s.id); }
+                if s.job.status != "rendering" && s.job.status != "processing" { s.job = Default::default(); ids.push(s.id); }
             }
         }
         for id in ids {
@@ -1175,13 +1242,13 @@ impl MediaLibrary {
                 x.job_status = QString::default();
                 x.job_progress = 0.0;
                 x.error_string = QString::default();
+                x.job_message = QString::default();
             });
         }
     }
     pub fn active_job_count(&self) -> usize {
         self.all_videos().map(|v| {
-            (if v.job.status == "queued" || v.job.status == "rendering" { 1 } else { 0 }) +
-            v.sections.iter().filter(|s| s.job.status == "queued" || s.job.status == "rendering").count()
+            (if v.job.is_active() { 1 } else { 0 }) + v.sections.iter().filter(|s| s.job.is_active()).count()
         }).sum()
     }
 }

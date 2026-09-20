@@ -20,7 +20,6 @@ Item {
     property alias videoLoader: videoLoader;
     property alias stabEnabledBtn: stabEnabledBtn;
     property alias fovOverviewBtn: fovOverviewBtn;
-    property alias queue: queue.item;
     property alias statistics: statistics;
     property alias infoMessages: infoMessages;
     property alias gridGuide: gridGuide;
@@ -871,8 +870,6 @@ Item {
         DropArea {
             id: da;
             anchors.fill: dropRect;
-            enabled: queue.item && !queue.item.shown && !queue.item.isDragging;
-
             onEntered: (drag) => {
                 if (!drag.urls.length) return;
                 const ext = drag.urls[0].toString().split(".").pop().toLowerCase();
@@ -1220,17 +1217,6 @@ Item {
         }
     }
     Loader {
-        id: queue;
-        asynchronous: true;
-        anchors.fill: vidParentParent;
-        anchors.margins: 10 * dpiScale;
-        sourceComponent: Component {
-            RenderQueue {
-                onShownChanged: if (statistics.item) statistics.item.shown &= !shown;
-            }
-        }
-    }
-    Loader {
         id: statistics;
         asynchronous: true;
         active: false;
@@ -1238,8 +1224,71 @@ Item {
         anchors.margins: 10 * dpiScale;
         onStatusChanged: if (status == Loader.Ready) statistics.item.shown = true;
         sourceComponent: Component {
-            Statistics {
-                onShownChanged: queue.item.shown &= !shown;
+            Statistics { }
+        }
+    }
+
+    // The queue itself is managed in the media sidebar, this is only about the job exported directly from here
+    Connections {
+        target: render_queue;
+        enabled: !root.isCalibrator;
+        function onError(job_id: real, text: string, arg: string, callback: string): void {
+            if (job_id == render_queue.main_job_id) {
+                const msg = window.getReadableError(qsTr(text).arg(arg));
+                if (msg) {
+                    messageBox(Modal.Error, msg, [ { "text": qsTr("Ok"), clicked: window[callback] } ]);
+                }
+            }
+        }
+        function onRender_progress(job_id: real, progress: real, frame: int, total_frames: int, finished: bool, start_time: real, is_conversion: bool): void {
+            if (job_id == render_queue.main_job_id) {
+                videoLoader.active = !finished;
+                videoLoader.currentFrame = frame;
+                videoLoader.totalFrames = total_frames;
+                videoLoader.additional = "";
+                videoLoader.text = videoLoader.active? (is_conversion? qsTr("Converting to %1 %2...").arg(window.advanced.r3dConvertFormat.currentText) : qsTr("Rendering %1...")) : "";
+                videoLoader.progress = videoLoader.active? progress : -1;
+                videoLoader.cancelable = true;
+                videoLoader.startTime = start_time;
+
+                if (total_frames > 0 && finished) {
+                    render_queue.main_job_id = 0;
+                    const folder = render_queue.get_job_output_folder(job_id);
+                    const filename = render_queue.get_job_output_filename(job_id);
+                    let options = [];
+                    if (Qt.platform.os != "ios" && !(window.exportSettings.exportTrimsSeparately.checked && timeline.trimRanges.length > 1)) {
+                        options.push({ text: qsTr("Open rendered file"), clicked: () => filesystem.open_file_externally(filesystem.get_file_url(folder, filename, false)) });
+                    }
+                    if (Qt.platform.os != "android" && Qt.platform.os != "ios") {
+                        options.push({ text: qsTr("Open file location"), clicked: () => filesystem.open_file_externally(folder) });
+                    }
+                    options.push({ text: qsTr("Ok") });
+
+                    messageBox(Modal.Success, qsTr("Rendering completed. The file was written to: %1.").arg("<br><b>" + filesystem.display_folder_filename(folder, filename) + "</b>"), options);
+                }
+            }
+        }
+        function onConvert_format(job_id: real, format: string, supported: string, candidate: string): void {
+            if (job_id == render_queue.main_job_id) {
+                let buttons = supported.split(",").map(f => ({
+                    text: f,
+                    accent: f.toLowerCase() == candidate,
+                    clicked: () => {
+                        render_queue.set_pixel_format(job_id, f);
+                        render_queue.render_job(job_id);
+                    }
+                }));
+                buttons.push({
+                    text: qsTr("Render using CPU"),
+                    accent: candidate == '',
+                    clicked: () => {
+                        render_queue.set_pixel_format(job_id, "cpu");
+                        render_queue.render_job(job_id);
+                    }
+                });
+                buttons.push({ text: qsTr("Cancel") });
+
+                messageBox(Modal.Question, qsTr("GPU accelerated encoder doesn't support this pixel format (%1).\nDo you want to convert to a different supported pixel format or keep the original one and render on the CPU?").arg(format), buttons);
             }
         }
     }

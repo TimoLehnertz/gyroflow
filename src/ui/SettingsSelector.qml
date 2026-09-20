@@ -135,6 +135,7 @@ Modal {
             QT_TR_NOOP("Codec");
             QT_TR_NOOP("Audio");
             QT_TR_NOOP("Stabilize the video");
+            QT_TR_NOOP("Trim only, no stabilization"); // Used in render_queue.rs
             QT_TR_NOOP("Output path");
             QT_TR_NOOP("Output size");
             QT_TR_NOOP("Advanced");
