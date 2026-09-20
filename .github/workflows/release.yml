@@ -21,6 +21,7 @@ jobs:
         ]
     name: Gyroflow for ${{ matrix.targets.type }}
     runs-on: ${{ matrix.targets.os }}
+    continue-on-error: ${{ matrix.targets.type != 'linux' && matrix.targets.type != 'windows' }}
     env:
       BUILD_APP_STORE_BUNDLE: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
       IS_MANUAL_DISPATCH: ${{ github.event_name == 'workflow_dispatch' }}
@@ -59,13 +60,13 @@ jobs:
           rm -r -force ${{ github.workspace }}/target/release/build/qml-video-rs* -ErrorAction SilentlyContinue
 
       - name: Install Mac certificates
-        if: ${{ matrix.targets.os == 'macos-13' || matrix.targets.os == 'macos-14' || matrix.targets.os == 'macos-15' || matrix.targets.os == 'macos-26' }}
+        if: ${{ (matrix.targets.os == 'macos-13' || matrix.targets.os == 'macos-14' || matrix.targets.os == 'macos-15' || matrix.targets.os == 'macos-26') && secrets.MACOS_CERTIFICATES != '' }}
         uses: apple-actions/import-codesign-certs@v3
         with:
           p12-file-base64: ${{ secrets.MACOS_CERTIFICATES }}
           p12-password: ${{ secrets.MACOS_CERTIFICATE_PWD }}
       - name: Download Provisioning Profiles
-        if: ${{ matrix.targets.type == 'ios' }}
+        if: ${{ matrix.targets.type == 'ios' && secrets.MACOS_ITCONNECT_KEY != '' }}
         id: provisioning
         uses: apple-actions/download-provisioning-profiles@v3
         with:
@@ -75,7 +76,7 @@ jobs:
           api-key-id: ${{ secrets.MACOS_ITCONNECT_KEY_ID }}
           api-private-key: ${{ secrets.MACOS_ITCONNECT_KEY }}
       - name: Download Provisioning Profiles
-        if: ${{ matrix.targets.type == 'macstore' }}
+        if: ${{ matrix.targets.type == 'macstore' && secrets.MACOS_ITCONNECT_KEY != '' }}
         id: provisioning_mac
         uses: apple-actions/download-provisioning-profiles@v3
         with:
@@ -86,7 +87,7 @@ jobs:
           api-private-key: ${{ secrets.MACOS_ITCONNECT_KEY }}
 
       - name: Save keystore to file
-        if: ${{ matrix.targets.os == 'windows-2022' }}
+        if: ${{ matrix.targets.os == 'windows-2022' && (secrets.ANDROID_RELEASE_KEYSTORE != '' || secrets.MS_STORE_SIGNING_KEY != '') }}
         run: |
           echo "${{ secrets.ANDROID_RELEASE_KEYSTORE }}" > ${{ github.workspace }}/android_release.keystore.b64
           echo "${{ secrets.MS_STORE_SIGNING_KEY }}" > ${{ github.workspace }}/_deployment/windows/msix_signing_key.pfx.b64
@@ -102,11 +103,13 @@ jobs:
         run: |
           just install-deps
           just deploy universal
-          xcrun notarytool submit --wait --apple-id ${{ secrets.MACOS_ACCOUNT_USER }} --team-id ${{ secrets.MACOS_TEAM }} --password ${{ secrets.MACOS_ACCOUNT_PASS }} ${{ github.workspace }}/_deployment/_binaries/Gyroflow-mac-universal.dmg
-          xcrun stapler staple --verbose ${{ github.workspace }}/_deployment/_binaries/Gyroflow-mac-universal.dmg
+          if [ -n "${{ secrets.MACOS_ACCOUNT_PASS }}" ]; then
+            xcrun notarytool submit --wait --apple-id ${{ secrets.MACOS_ACCOUNT_USER }} --team-id ${{ secrets.MACOS_TEAM }} --password ${{ secrets.MACOS_ACCOUNT_PASS }} ${{ github.workspace }}/_deployment/_binaries/Gyroflow-mac-universal.dmg
+            xcrun stapler staple --verbose ${{ github.workspace }}/_deployment/_binaries/Gyroflow-mac-universal.dmg
+          fi
 
       - name: Build Gyroflow (macOS App Store)
-        if: ${{ matrix.targets.type == 'macstore' && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') }}
+        if: ${{ matrix.targets.type == 'macstore' && secrets.MACOS_ITCONNECT_KEY != '' && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') }}
         env:
           SIGNING_FINGERPRINT: ${{ secrets.MACOS_CERTIFICATE_FINGERPRINT }}
           # For Mac App Store
@@ -133,7 +136,7 @@ jobs:
         run: |
           just install-deps
           just deploy
-          if ("$Env:BUILD_APP_STORE_BUNDLE" -eq "true") { just bundle }
+          if (("$Env:BUILD_APP_STORE_BUNDLE" -eq "true") -and $Env:MS_STORE_SIGNING_PASS) { just bundle }
 
       - name: Build Gyroflow (Windows arm64)
         if: ${{ matrix.targets.type == 'windows-arm' }}
@@ -143,10 +146,10 @@ jobs:
         run: |
           just install-deps
           just deploy
-          if ("$Env:BUILD_APP_STORE_BUNDLE" -eq "true") { just bundle }
+          if (("$Env:BUILD_APP_STORE_BUNDLE" -eq "true") -and $Env:MS_STORE_SIGNING_PASS) { just bundle }
 
       - name: Build Gyroflow (Android)
-        if: ${{ matrix.targets.type == 'android' }}
+        if: ${{ matrix.targets.type == 'android' && secrets.ANDROID_RELEASE_KEYSTORE != '' }}
         env:
           KEY_STORE_PATH: ${{ github.workspace }}/android_release.keystore
           KEY_STORE_ALIAS: ${{ secrets.ANDROID_RELEASE_KEYSTORE_ALIAS }}
@@ -159,7 +162,7 @@ jobs:
           just android deploy
 
       - name: Build Gyroflow (iOS)
-        if: ${{ matrix.targets.type == 'ios' }}
+        if: ${{ matrix.targets.type == 'ios' && secrets.MACOS_ITCONNECT_KEY != '' }}
         env:
           SIGN_KEY: 58FE9D9FF561BF9910031999A8211A23858D1920
           PROVISIONING_PROFILE: /Users/runner/Library/MobileDevice/Provisioning Profiles/${{ matrix.targets.type == 'ios' && fromJSON(steps.provisioning.outputs.profiles)[0].udid || '' }}.mobileprovision
@@ -177,6 +180,7 @@ jobs:
             ${{ github.workspace }}/target/${{ matrix.targets.type == 'windows' && 'x86_64-pc-windows-msvc' || 'aarch64-pc-windows-msvc' }}/deploy/*.pdb
       - name: Save Binaries
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: Gyroflow-${{ matrix.targets.type }}
           path: _deployment/_binaries/*.*
@@ -184,25 +188,28 @@ jobs:
   github_release:
     name: Create GitHub release
     needs: build
+    if: always() && startsWith(github.ref, 'refs/tags/')
     runs-on: macos-15
+    permissions:
+      contents: write
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
+        continue-on-error: true
 
       - run: find . -type f
 
-      - if: startsWith(github.ref, 'refs/tags/')
-        run: rm -rf ./Gyroflow-debug-symbols*
+      - run: rm -rf ./Gyroflow-debug-symbols*
 
       - name: Upload to App Store
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        if: secrets.MACOS_ACCOUNT_PASS != ''
         run: |
           xcrun altool --upload-app -f ./Gyroflow-ios/Gyroflow.ipa -t iOS -u ${{ secrets.MACOS_ACCOUNT_USER }} -p ${{ secrets.MACOS_ACCOUNT_PASS }}
           xcrun altool --upload-app -f ./Gyroflow-macstore/Gyroflow.pkg -t macos -u ${{ secrets.MACOS_ACCOUNT_USER }} -p ${{ secrets.MACOS_ACCOUNT_PASS }}
 
       - name: Upload to Google Play
         uses: r0adkll/upload-google-play@v1
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        if: secrets.ANDROID_SERVICE_ACCOUNT_JSON != ''
         with:
           serviceAccountJsonPlainText: ${{ secrets.ANDROID_SERVICE_ACCOUNT_JSON }}
           packageName: xyz.gyroflow
@@ -211,9 +218,23 @@ jobs:
 
       - name: Publish
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
         with:
-          prerelease: true
+          prerelease: false
+          fail_on_unmatched_files: false
+          body: |
+            Fork of Gyroflow with a media library for organizing, trimming, and batch-stabilizing footage.
+
+            ### Improvements
+            - Media sidebar for folders, videos, and sections, with queue status in the list
+            - Import markers.json with a live time-offset preview
+            - Option to disable stabilization and export trim-only
+            - Shift/Ctrl selection and a dedicated render queue modal
+            - Delete/Backspace and right-click remove the whole selection
+
+            ### Bug fixes
+            - Transparent window on NVIDIA + Wayland
+            - Trim-only export on files with data streams
+            - Busy indicators and "Render now" respecting parallel renders
           files: |
             ./Gyroflow-windows/Gyroflow-windows64.zip
             ./Gyroflow-windows-arm/Gyroflow-windows-arm64.zip
@@ -224,7 +245,7 @@ jobs:
   winget_release:
     name: Publish to WinGet
     needs: github_release
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') && vars.WINGET_ENABLED == 'true'
     runs-on: windows-latest
     # If this fails, go to gyroflow/winget-pkgs on GitHub and sync fork
     steps:
