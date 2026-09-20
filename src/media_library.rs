@@ -60,6 +60,7 @@ struct JobState {
 }
 impl JobState {
     fn is_active(&self) -> bool { self.status == "queued" || self.status == "processing" || self.status == "rendering" }
+    fn is_busy(&self) -> bool { self.status == "processing" || self.status == "rendering" }
 }
 
 #[derive(Default, Clone, Debug)]
@@ -124,6 +125,8 @@ pub struct MediaLibrary {
     add_files: qt_method!(fn(&mut self, urls: QStringList)),
     add_dropped: qt_method!(fn(&mut self, urls: QStringList)),
     remove_item: qt_method!(fn(&mut self, item_id: u32) -> QVariantList),
+    remove_selected: qt_method!(fn(&mut self) -> QVariantList),
+    get_removable_selection: qt_method!(fn(&self) -> QVariantList),
     clear: qt_method!(fn(&mut self)),
     has_folder: qt_method!(fn(&self, url: QString) -> bool),
 
@@ -493,29 +496,96 @@ impl MediaLibrary {
     }
 
     pub fn remove_item(&mut self, item_id: u32) -> QVariantList {
-        let mut job_ids = Vec::new();
-        let mut collect = |v: &Video| {
-            if v.job.job_id > 0 { job_ids.push(v.job.job_id); }
-            for s in &v.sections {
-                if s.job.job_id > 0 { job_ids.push(s.job.job_id); }
+        self.remove_ids(&[item_id])
+    }
+    /// Folders and videos take precedence over their children so a selected video isn't left behind
+    /// after its sections are deleted, and a selected folder isn't left empty.
+    pub fn get_removable_selection(&self) -> QVariantList {
+        QVariantList::from_iter(self.removable_selection())
+    }
+    pub fn remove_selected(&mut self) -> QVariantList {
+        let ids = self.removable_selection();
+        self.remove_ids(&ids)
+    }
+    fn video_busy(v: &Video) -> bool {
+        v.job.is_busy() || v.sections.iter().any(|s| s.job.is_busy())
+    }
+    /// A video is removed as a whole when the video row is selected or every section is.
+    fn should_remove_video(v: &Video) -> bool {
+        v.selected || (!v.sections.is_empty() && v.sections.iter().all(|s| s.selected))
+    }
+    fn removable_selection(&self) -> Vec<u32> {
+        let mut ids = Vec::new();
+        for f in &self.folders {
+            if Self::is_folder_selected(f) && !f.videos.iter().any(Self::video_busy) {
+                ids.push(f.id);
+                continue;
             }
-        };
-        if let Some(f) = self.folders.iter().find(|f| f.id == item_id) {
-            for v in &f.videos { collect(v); }
-            self.folders.retain(|f| f.id != item_id);
-        } else if let Some(v) = self.video(item_id) {
-            collect(v);
-            self.standalone.retain(|v| v.id != item_id);
-            for f in self.folders.iter_mut() {
-                f.videos.retain(|v| v.id != item_id);
-            }
-        } else if let Some((_, s)) = self.section(item_id) {
-            if s.job.job_id > 0 { job_ids.push(s.job.job_id); }
-            for v in self.all_videos_mut() {
-                v.sections.retain(|s| s.id != item_id);
+            for v in &f.videos {
+                Self::push_removable_video(&mut ids, v);
             }
         }
-        if self.current_item == item_id {
+        for v in &self.standalone {
+            Self::push_removable_video(&mut ids, v);
+        }
+        ids
+    }
+    fn push_removable_video(ids: &mut Vec<u32>, v: &Video) {
+        if Self::should_remove_video(v) && !Self::video_busy(v) {
+            ids.push(v.id);
+            return;
+        }
+        for s in &v.sections {
+            if s.selected && !s.job.is_busy() {
+                ids.push(s.id);
+            }
+        }
+    }
+    fn collect_video_jobs(v: &Video, job_ids: &mut Vec<u32>) {
+        if v.job.job_id > 0 { job_ids.push(v.job.job_id); }
+        for s in &v.sections {
+            if s.job.job_id > 0 { job_ids.push(s.job.job_id); }
+        }
+    }
+    fn remove_ids(&mut self, ids: &[u32]) -> QVariantList {
+        if ids.is_empty() { return QVariantList::default(); }
+        let idset: std::collections::HashSet<u32> = ids.iter().copied().collect();
+        let mut job_ids = Vec::new();
+
+        for f in &self.folders {
+            if idset.contains(&f.id) {
+                for v in &f.videos { Self::collect_video_jobs(v, &mut job_ids); }
+            }
+        }
+        for v in self.all_videos() {
+            if idset.contains(&v.id) {
+                Self::collect_video_jobs(v, &mut job_ids);
+            } else {
+                for s in &v.sections {
+                    if idset.contains(&s.id) && s.job.job_id > 0 {
+                        job_ids.push(s.job.job_id);
+                    }
+                }
+            }
+        }
+
+        self.folders.retain(|f| !idset.contains(&f.id));
+        self.standalone.retain(|v| !idset.contains(&v.id));
+        for f in self.folders.iter_mut() {
+            f.videos.retain(|v| !idset.contains(&v.id));
+            for v in f.videos.iter_mut() {
+                v.sections.retain(|s| !idset.contains(&s.id));
+            }
+        }
+        for v in self.standalone.iter_mut() {
+            v.sections.retain(|s| !idset.contains(&s.id));
+        }
+
+        if self.current_item > 0
+            && self.folders.iter().all(|f| f.id != self.current_item)
+            && self.video(self.current_item).is_none()
+            && self.section(self.current_item).is_none()
+        {
             self.current_item = 0;
             self.current_item_changed();
         }

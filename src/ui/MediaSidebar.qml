@@ -23,6 +23,8 @@ ResizablePanel {
     property int selectedCount: 0;
     property int queueableCount: 0;
     property int queuedSelectedCount: 0;
+    property int removableCount: 0;
+    property string removableKind: "";
     // Anchor of the shift+click range selection
     property int lastClickedId: 0;
     // Job of the item loaded in the main view, so the bottom bar can show whether it's in the queue
@@ -41,6 +43,9 @@ ResizablePanel {
         root.selectedCount      = media_library.selected_count();
         root.queueableCount     = media_library.get_queueable_selection().length;
         root.queuedSelectedCount = media_library.get_queued_selection().length;
+        const removable = media_library.get_removable_selection();
+        root.removableCount     = removable.length;
+        root.removableKind      = removable.length == 1? media_library.get_item_kind(removable[0]) : "";
         root.currentJobId       = media_library.current_item > 0? media_library.get_item_job(media_library.current_item) : 0;
         root.updateOutputFile();
         window.videoArea.timeline.importedMarkers = JSON.parse(media_library.get_timeline_markers(media_library.current_item));
@@ -256,6 +261,10 @@ ResizablePanel {
 
     function removeItem(itemId: int): void {
         const jobs = media_library.remove_item(itemId);
+        for (const jobId of jobs) render_queue.remove(jobId);
+    }
+    function removeSelected(): void {
+        const jobs = media_library.remove_selected();
         for (const jobId of jobs) render_queue.remove(jobId);
     }
     function cancelItem(itemId: int): void {
@@ -693,9 +702,12 @@ ResizablePanel {
                 }
                 Action {
                     iconName: "bin";
-                    text: dlg.isFolder? qsTr("Remove folder") : dlg.isSection? qsTr("Delete section") : qsTr("Remove video");
-                    enabled: !dlg.isBusy;
-                    onTriggered: root.removeItem(item_id);
+                    text: root.removableCount > 1? qsTr("Remove %1 selected").arg(root.removableCount)
+                        : root.removableKind == "folder"? qsTr("Remove folder")
+                        : root.removableKind == "section"? qsTr("Delete section")
+                        : qsTr("Remove video");
+                    enabled: root.removableCount > 0;
+                    onTriggered: root.removeSelected();
                 }
             }
 
