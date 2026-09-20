@@ -26,15 +26,39 @@ TextField {
 
     property bool preventChange: false;
 
+    // In path mode the field shows and edits a path that is managed elsewhere (the media library).
+    // That path is relative to the export folder by default and absolute when a folder is picked.
+    property bool pathMode: false;
+    signal pathEdited(path: string);
+
     onTextChanged: {
         // When typing manually
         if (!preventChange) {
-            if (isSandboxed) {
+            if (root.pathMode) {
+                root.pathEdited(text);
+            } else if (isSandboxed) {
                 setFilename(text.replace(/^.+\//, ""));
             } else {
                 setUrl(filesystem.path_to_url(text));
             }
         }
+    }
+
+    // Shows `path` while the actual output is `folder` + `fname`. An empty path keeps the current text.
+    function setResolvedPath(folder: url, fname: string, path: string): void {
+        preventChange = true;
+        folderUrl = folder;
+        filename = fname;
+        fullFileUrl = "";
+        if (path) text = path;
+        preventChange = false;
+    }
+    // A path picked in one of the dialogs, shown as it is and reported to the owner of the path
+    function setPathFromDialog(path: string): void {
+        preventChange = true;
+        text = path;
+        preventChange = false;
+        root.pathEdited(path);
     }
 
     function prompt(): void {
@@ -115,7 +139,11 @@ TextField {
         nameFilters: Qt.platform.os == "android"? undefined : [qsTr("Video files") + " (*.mp4 *.mov *.png *.exr)"];
         type: "output-video";
         onAccepted: {
-            root.setUrl(outputFileDialog.selectedFile);
+            if (root.pathMode) {
+                root.setPathFromDialog(filesystem.url_to_path(outputFileDialog.selectedFile));
+            } else {
+                root.setUrl(outputFileDialog.selectedFile);
+            }
             window.exportSettings.updateCodecParams();
         }
     }
@@ -126,7 +154,11 @@ TextField {
             root.folderUrl = selectedFolder;
             filesystem.folder_access_granted(selectedFolder);
             Qt.callLater(filesystem.save_allowed_folders);
-            updateText();
+            if (root.pathMode) {
+                root.setPathFromDialog(filesystem.url_to_path(filesystem.get_file_url(selectedFolder, root.filename, false)));
+            } else {
+                updateText();
+            }
 
             if (window.videoArea.loadedFileUrl.toString() && !window.vidInfo.hasAccessToInputDirectory && Qt.resolvedUrl(filesystem.get_folder(window.videoArea.loadedFileUrl)) == Qt.resolvedUrl(selectedFolder)) {
                 window.vidInfo.hasAccessToInputDirectory = true;
