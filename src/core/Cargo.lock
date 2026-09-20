@@ -1108,7 +1108,7 @@ dependencies = [
 
 [[package]]
 name = "gyroflow-core"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "ahrs",
  "akaze",
