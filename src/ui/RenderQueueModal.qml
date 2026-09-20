@@ -18,6 +18,13 @@ Item {
     visible: opacity > 0;
     Ease on opacity { duration: 300; }
 
+    // Bring a job to the front of the queue and let `start` pick it up as soon as a render slot
+    // is free, instead of rendering it right away regardless of the parallel renders limit.
+    function prioritizeJob(job_id: int): void {
+        render_queue.move_item(job_id, -1000000);
+        render_queue.start();
+    }
+
     // Nothing behind the modal can be clicked while it's open
     MouseArea {
         anchors.fill: parent;
@@ -233,7 +240,7 @@ Item {
                         iconName: "play";
                         text: qsTr("Render now");
                         enabled: !dlg.isFinished && !dlg.isRendering;
-                        onTriggered: render_queue.render_job(job_id);
+                        onTriggered: root.prioritizeJob(job_id);
                     }
                     Action {
                         iconName: "arrow-up";
@@ -314,7 +321,7 @@ Item {
                         width: 44 * dpiScale;
                         height: 44 * dpiScale;
                         anchors.verticalCenter: parent.verticalCenter;
-                        QQC.BusyIndicator { anchors.centerIn: parent; visible: !thumbnail_url; height: 20 * dpiScale; width: height; running: visible; }
+                        QQC.BusyIndicator { anchors.centerIn: parent; visible: !thumbnail_url; height: 20 * dpiScale; width: height; padding: 0; running: visible; }
                     }
 
                     Column {
@@ -372,7 +379,7 @@ Item {
                             visible: !dlg.isFinished && !dlg.isRendering;
                             iconName: "play";
                             tooltip: qsTr("Render now");
-                            onClicked: render_queue.render_job(job_id);
+                            onClicked: root.prioritizeJob(job_id);
                         }
                         LinkButton {
                             width: 28 * dpiScale;
