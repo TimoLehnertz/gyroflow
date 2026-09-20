@@ -121,10 +121,11 @@ jobs:
           # For Mac App Store
           SIGN_KEY: 58FE9D9FF561BF9910031999A8211A23858D1920
           PKG_SIGN_KEY: 1029ED283BDA1E21F7ADBC891E95BCBFB102B952
-          PROVISIONING_PROFILE: /Users/runner/Library/MobileDevice/Provisioning Profiles/${{ matrix.targets.type == 'macstore' && fromJSON(steps.provisioning_mac.outputs.profiles)[0].udid || '' }}.mobileprovision
+          PROVISIONING_PROFILES_JSON: ${{ steps.provisioning_mac.outputs.profiles }}
           FORCE_QT_VERSION: 6.7.3
           DONT_BUILD_DMG: true
         run: |
+          export PROVISIONING_PROFILE="/Users/runner/Library/MobileDevice/Provisioning Profiles/$(python3 -c 'import json,os; print(json.loads(os.environ["PROVISIONING_PROFILES_JSON"])[0]["udid"])').mobileprovision"
           /usr/libexec/PlistBuddy -x -c "Set :LSMinimumSystemVersion \"11.0\"" ${{ github.workspace }}/_deployment/mac/Gyroflow.app/Contents/Info.plist
           sed -i -e 's/"10.15"/"11.0"/' ${{ github.workspace }}/_scripts/macos.just
           just install-deps
@@ -141,7 +142,9 @@ jobs:
           MS_STORE_SIGNING_PASS: ${{ secrets.MS_STORE_SIGNING_PASS }}
         run: |
           just install-deps
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           just deploy
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (("$Env:BUILD_APP_STORE_BUNDLE" -eq "true") -and $Env:MS_STORE_SIGNING_PASS) { just bundle }
 
       - name: Build Gyroflow (Windows arm64)
@@ -151,7 +154,9 @@ jobs:
           FORCE_ARCH: aarch64
         run: |
           just install-deps
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           just deploy
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (("$Env:BUILD_APP_STORE_BUNDLE" -eq "true") -and $Env:MS_STORE_SIGNING_PASS) { just bundle }
 
       - name: Build Gyroflow (Android)
@@ -171,8 +176,9 @@ jobs:
         if: ${{ matrix.targets.type == 'ios' && env.MACOS_ITCONNECT_KEY != '' }}
         env:
           SIGN_KEY: 58FE9D9FF561BF9910031999A8211A23858D1920
-          PROVISIONING_PROFILE: /Users/runner/Library/MobileDevice/Provisioning Profiles/${{ matrix.targets.type == 'ios' && fromJSON(steps.provisioning.outputs.profiles)[0].udid || '' }}.mobileprovision
+          PROVISIONING_PROFILES_JSON: ${{ steps.provisioning.outputs.profiles }}
         run: |
+          export PROVISIONING_PROFILE="/Users/runner/Library/MobileDevice/Provisioning Profiles/$(python3 -c 'import json,os; print(json.loads(os.environ["PROVISIONING_PROFILES_JSON"])[0]["udid"])').mobileprovision"
           just ios install-deps
           just ios build-ipa
 
@@ -236,6 +242,9 @@ jobs:
             ### Improvements
             - Media sidebar for folders, videos, and sections, with queue status in the list
             - Import markers.json with a live time-offset preview
+            - Drop files or folders on the main view or sidebar to add them to the media list
+            - Drop a markers JSON file to open the import modal
+            - Add imported sections to the render queue by default
             - Option to disable stabilization and export trim-only
             - Shift/Ctrl selection and a dedicated render queue modal
             - Delete/Backspace and right-click remove the whole selection
@@ -244,6 +253,7 @@ jobs:
             - Transparent window on NVIDIA + Wayland
             - Trim-only export on files with data streams
             - Busy indicators and "Render now" respecting parallel renders
+            - Dropped files ignored when the OS left drop.urls empty
           files: |
             ./Gyroflow-windows/Gyroflow-windows64.zip
             ./Gyroflow-windows-arm/Gyroflow-windows-arm64.zip
