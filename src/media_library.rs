@@ -123,6 +123,7 @@ pub struct MediaLibrary {
 
     add_folder: qt_method!(fn(&mut self, url: QString)),
     add_files: qt_method!(fn(&mut self, urls: QStringList)),
+    add_url: qt_method!(fn(&mut self, url: QString)),
     add_dropped: qt_method!(fn(&mut self, urls: QStringList)),
     remove_item: qt_method!(fn(&mut self, item_id: u32) -> QVariantList),
     remove_selected: qt_method!(fn(&mut self) -> QVariantList),
@@ -454,32 +455,47 @@ impl MediaLibrary {
     }
 
     pub fn add_files(&mut self, urls: QStringList) {
-        for url in urls.into_iter() {
-            let url = Self::to_url(&url.to_string(), false);
-            let filename = filesystem::get_filename(&url);
-            if url.is_empty() || !Self::is_video_file(&filename) { continue; }
-            if self.all_videos().any(|v| v.url == url) { continue; }
-            let v = self.new_video(url, filename);
-            self.standalone.push(v);
+        let n = urls.len();
+        for i in 0..n {
+            self.add_url_impl(&urls[i].to_string(), false);
         }
         self.rebuild();
         self.scan_pending();
     }
 
+    /// One file or folder. QML should call this instead of passing a JS array as QStringList,
+    /// which qmetaobject turns into empty strings.
+    pub fn add_url(&mut self, url: QString) {
+        self.add_url_impl(&url.to_string(), true);
+    }
+
     /// Adds dropped urls, folders are added as input folders and files as standalone videos
     pub fn add_dropped(&mut self, urls: QStringList) {
-        let mut files = Vec::new();
-        for url in urls.into_iter() {
-            let url_str = url.to_string();
-            let path = filesystem::url_to_path(&Self::to_url(&url_str, false));
-            if !path.is_empty() && std::path::Path::new(&path).is_dir() {
-                self.add_folder(QString::from(url_str));
-            } else {
-                files.push(url.clone());
-            }
+        let n = urls.len();
+        for i in 0..n {
+            self.add_url_impl(&urls[i].to_string(), false);
         }
-        if !files.is_empty() {
-            self.add_files(QStringList::from_iter(files));
+        self.rebuild();
+        self.scan_pending();
+    }
+
+    fn add_url_impl(&mut self, url_str: &str, rebuild: bool) {
+        let url_str = url_str.trim();
+        if url_str.is_empty() { return; }
+        let path = filesystem::url_to_path(&Self::to_url(url_str, false));
+        if !path.is_empty() && std::path::Path::new(&path).is_dir() {
+            self.add_folder(QString::from(url_str));
+            return;
+        }
+        let url = Self::to_url(url_str, false);
+        let filename = filesystem::get_filename(&url);
+        if url.is_empty() || !Self::is_video_file(&filename) { return; }
+        if self.all_videos().any(|v| v.url == url) { return; }
+        let video = self.new_video(url, filename);
+        self.standalone.push(video);
+        if rebuild {
+            self.rebuild();
+            self.scan_pending();
         }
     }
 

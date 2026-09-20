@@ -149,7 +149,7 @@ Rectangle {
         MediaSidebar {
             id: mediaPanel;
             visible: window.mediaPanelShown && !videoArea.fullScreen && !isMobileLayout && window.isLandscape;
-            maxWidth: parent.width - leftPanel.width - rightPanel.width - 50 * dpiScale;
+            maxWidth: parent.width - leftPanel.lastWidth - rightPanel.lastWidth - 50 * dpiScale;
             implicitWidth: settings.value("mediaPanelSize", defaultWidth);
             onWidthChanged: settings.setValue("mediaPanelSize", width);
         }
@@ -160,7 +160,7 @@ Rectangle {
             topPadding: gflogo.height;
             x: window.mediaPanelWidth;
             visible: !videoArea.fullScreen && !isMobileLayout;
-            maxWidth: parent.width - window.mediaPanelWidth - rightPanel.width - 50 * dpiScale;
+            maxWidth: parent.width - window.mediaPanelWidth - rightPanel.lastWidth - 50 * dpiScale;
             implicitWidth: settings.value("leftPanelSize", defaultWidth);
             onWidthChanged: settings.setValue("leftPanelSize", width);
             Column {
@@ -533,7 +533,7 @@ Rectangle {
             visible: !videoArea.fullScreen;
             x: window.mediaPanelWidth + leftPanel.width + videoAreaCol.width;
             direction: SidePanel.HandleLeft;
-            maxWidth: parent.width - window.mediaPanelWidth - leftPanel.width - 50 * dpiScale;
+            maxWidth: parent.width - window.mediaPanelWidth - leftPanel.lastWidth - 50 * dpiScale;
             implicitWidth: settings.value("rightPanelSize", defaultWidth);
             onWidthChanged: settings.setValue("rightPanelSize", width);
             col.visible: !isMobileLayout;
@@ -565,6 +565,10 @@ Rectangle {
 
     Shortcuts {
         videoArea: videoArea;
+    }
+
+    function handleDroppedUrls(urls) {
+        mediaPanel.handleDroppedUrls(urls);
     }
 
     function showNotification(type: int, text: string, textFormat: var, container: var): void {

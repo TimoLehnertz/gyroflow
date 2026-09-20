@@ -107,10 +107,32 @@ ResizablePanel {
         function onPathEdited(path: string): void { root.pushOutputToItem(path); }
     }
 
-    function openImportMarkers(): void {
+    property string pendingMarkerFile: "";
+
+    function openImportMarkers(url): void {
         root.saveCurrentSettings();
+        root.pendingMarkerFile = url || "";
         importModalLoader.active = true;
-        if (importModalLoader.item) importModalLoader.item.open();
+        if (importModalLoader.item) root.finishOpenImportMarkers();
+    }
+    function finishOpenImportMarkers(): void {
+        const modal = importModalLoader.item;
+        if (root.pendingMarkerFile) {
+            modal.loadFile(root.pendingMarkerFile);
+            root.pendingMarkerFile = "";
+        }
+        modal.open();
+    }
+    function handleDroppedUrls(urls) {
+        const jsons = [];
+        const rest = [];
+        for (const u of urls) {
+            if (!u) continue;
+            if (u.split("?")[0].toLowerCase().endsWith(".json")) jsons.push(u);
+            else rest.push(u);
+        }
+        for (const u of rest) media_library.add_url(u);
+        if (jsons.length) root.openImportMarkers(jsons[0]);
     }
     function applyImportedMarkers(offsetHours: real, queue: bool): void {
         const result = JSON.parse(media_library.import_markers(offsetHours * 3600));
@@ -230,7 +252,7 @@ ResizablePanel {
         if (!url) return 0;
         let itemId = media_library.is_item_url(media_library.current_item, url)? media_library.current_item : media_library.find_by_url(url);
         if (itemId <= 0) {
-            media_library.add_files([url]);
+            media_library.add_url(url);
             itemId = media_library.find_by_url(url);
             if (itemId <= 0) return 0;
         }
@@ -330,7 +352,7 @@ ResizablePanel {
         if (jobId <= 0 || media_library.is_library_job(jobId)) return;
         let itemId = media_library.is_item_url(media_library.current_item, inputFile)? media_library.current_item : media_library.find_by_url(inputFile);
         if (itemId <= 0) {
-            media_library.add_files([inputFile]);
+            media_library.add_url(inputFile);
             itemId = media_library.find_by_url(inputFile);
         }
         if (itemId <= 0) return;
@@ -1258,7 +1280,9 @@ ResizablePanel {
         nameFilters: Qt.platform.os == "android"? undefined : [qsTr("Video files") + " (*." + fileDialog.extensions.concat(fileDialog.extensions.map(x => x.toUpperCase())).join(" *.") + ")"];
         type: "video";
         fileMode: FileDialog.OpenFiles;
-        onAccepted: media_library.add_files(selectedFiles.map(x => x.toString()));
+        onAccepted: {
+            for (let i = 0; i < selectedFiles.length; i++) media_library.add_url(selectedFiles[i].toString());
+        }
     }
 
     Rectangle {
@@ -1288,8 +1312,17 @@ ResizablePanel {
     DropArea {
         id: da;
         anchors.fill: parent;
-        onEntered: (drag) => { drag.accepted = drag.urls.length > 0; }
-        onDropped: (drop) => media_library.add_dropped(drop.urls.map(x => x.toString()));
+        property var pendingUrls: [];
+        onEntered: (drag) => {
+            da.pendingUrls = Util.collectDropUrls(drag);
+            drag.accepted = da.pendingUrls.length > 0;
+        }
+        onDropped: (drop) => {
+            let urls = Util.collectDropUrls(drop);
+            if (!urls.length) urls = da.pendingUrls;
+            da.pendingUrls = [];
+            root.handleDroppedUrls(urls);
+        }
     }
 
     // The queue modal covers the whole window, so it lives next to the main layout and not inside the panel
@@ -1320,7 +1353,7 @@ ResizablePanel {
                 onAccepted: (offsetHours, queue) => root.applyImportedMarkers(offsetHours, queue);
             }
         }
-        onLoaded: item.open();
+        onLoaded: root.finishOpenImportMarkers();
     }
 
     Component.onCompleted: {

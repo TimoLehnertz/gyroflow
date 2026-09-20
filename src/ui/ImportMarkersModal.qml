@@ -29,6 +29,7 @@ Item {
         offsetSlider.value = saved;
         offsetField.preventChange = false;
         root.offsetHours = saved;
+        queueImported.checked = +settings.value("markerQueueImported", 1) > 0;
         root.shown = true;
         if (root.hasFile) root.refresh();
     }
@@ -83,6 +84,7 @@ Item {
     }
     function confirm(): void {
         settings.setValue("markerOffsetHours", root.offsetHours);
+        settings.setValue("markerQueueImported", queueImported.checked? 1 : 0);
         root.accepted(root.offsetHours, queueImported.checked);
         root.close();
     }
@@ -230,7 +232,7 @@ Item {
                     id: queueImported;
                     text: qsTr("Add imported sections to the render queue");
                     font.pixelSize: 12 * dpiScale;
-                    checked: false;
+                    checked: true;
                 }
 
                 BasicText {

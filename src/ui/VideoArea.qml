@@ -466,7 +466,7 @@ Item {
     }
     function loadMultipleFiles(urls: list<url>, skip_detection: bool): void {
         if (urls.length == 1) {
-            if (!isCalibrator) media_library.add_files([urls[0].toString()]);
+            if (!isCalibrator) media_library.add_url(urls[0].toString());
             root.loadFile(urls[0], skip_detection);
         } else if (urls.length > 1) {
             const urlsCopy = [...urls];
@@ -475,7 +475,7 @@ Item {
             }
             const dlg = messageBox(Modal.Question, qsTr("You have opened multiple files. What do you want to do?"), [
                 { text: qsTr("Add to the file list"), accent: true, clicked: () => {
-                    media_library.add_files(urlsCopy.map(x => x.toString()));
+                    for (let i = 0; i < urlsCopy.length; i++) media_library.add_url(urlsCopy[i].toString());
                 } },
                 { text: qsTr("Merge them into one video"), clicked: () => {
                     dlg.btnsRow.children[0].enabled = false;
@@ -841,7 +841,7 @@ Item {
             BasicText {
                 id: dropText;
                 property string loadingFile: "";
-                text: loadingFile? qsTr("Loading %1...").arg(loadingFile) : (Qt.platform.os == "ios" || Qt.platform.os == "android"? qsTr("Click here to open a video file") : qsTr("Drop video file here"));
+                text: loadingFile? qsTr("Loading %1...").arg(loadingFile) : (Qt.platform.os == "ios" || Qt.platform.os == "android"? qsTr("Click here to open a video file") : qsTr("Drop files or folders here"));
                 font.pixelSize: (window.isMobileLayout? 23 : 30) * dpiScale;
                 anchors.centerIn: parent;
                 leftPadding: 0;
@@ -870,16 +870,25 @@ Item {
         DropArea {
             id: da;
             anchors.fill: dropRect;
+            property var pendingUrls: [];
             onEntered: (drag) => {
-                if (!drag.urls.length) return;
-                const ext = drag.urls[0].toString().split(".").pop().toLowerCase();
-                drag.accepted = fileDialog.extensions.indexOf(ext) > -1 || ext == "rdc";
+                da.pendingUrls = Util.collectDropUrls(drag);
+                if (isCalibrator) {
+                    if (!da.pendingUrls.length) return;
+                    const ext = da.pendingUrls[0].toString().split(".").pop().toLowerCase();
+                    drag.accepted = fileDialog.extensions.indexOf(ext) > -1 || ext == "rdc";
+                } else {
+                    drag.accepted = da.pendingUrls.length > 0;
+                }
             }
             onDropped: (drop) => {
+                let urls = Util.collectDropUrls(drop);
+                if (!urls.length) urls = da.pendingUrls;
+                da.pendingUrls = [];
                 if (isCalibrator) {
-                    calibrator_window.loadFiles(drop.urls);
+                    calibrator_window.loadFiles(urls);
                 } else {
-                    root.loadMultipleFiles(drop.urls, false);
+                    window.handleDroppedUrls(urls);
                 }
             }
         }

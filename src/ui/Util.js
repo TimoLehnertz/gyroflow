@@ -44,3 +44,24 @@ function setComboValue(c, text) {
         i++;
     }
 }
+
+function collectDropUrls(ev) {
+    const out = [];
+    function push(u) {
+        if (u === undefined || u === null) return;
+        const s = u.toString().trim();
+        if (!s || s === "undefined") return;
+        if (out.indexOf(s) < 0) out.push(s);
+    }
+    if (ev && ev.urls) {
+        for (let i = 0; i < ev.urls.length; i++) push(ev.urls[i]);
+    }
+    if (ev && ev.text) {
+        const parts = ("" + ev.text).replace(/\r/g, "\n").split("\n");
+        for (const p of parts) {
+            const t = p.trim();
+            if (t && !t.startsWith("#")) push(t);
+        }
+    }
+    return out;
+}
