@@ -314,7 +314,7 @@ Item {
                         width: 44 * dpiScale;
                         height: 44 * dpiScale;
                         anchors.verticalCenter: parent.verticalCenter;
-                        QQC.BusyIndicator { anchors.centerIn: parent; visible: !thumbnail_url; scale: 0.4; running: visible; }
+                        QQC.BusyIndicator { anchors.centerIn: parent; visible: !thumbnail_url; height: 20 * dpiScale; width: height; running: visible; }
                     }
 
                     Column {
