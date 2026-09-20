@@ -209,7 +209,7 @@ Rectangle {
             Rectangle {
                 id: exportbar;
                 width: parent.width;
-                height: 60 * dpiScale;
+                height: Math.max(60 * dpiScale, renderBtnRow.height + 16 * dpiScale);
                 color: styleBackground2;
                 visible: !isMobileLayout;
 
@@ -242,67 +242,61 @@ Rectangle {
                     anchors.verticalCenter: (isMobileLayout? undefined : parent.verticalCenter);
                     anchors.horizontalCenter: (isMobileLayout? parent.horizontalCenter : undefined);
                     anchors.horizontalCenterOffset: queueBtn.visible? (queueBtn.width + spacing) / 2 : 0;
-                    SplitButton {
+
+                    // The queue and the direct export are separate, always visible buttons now, no dropdown.
+                    // `renderBtn` is the shared logic of both, the buttons below only pick the action.
+                    Item {
                         id: renderBtn;
-                        btn.accent: true;
-                        text: {
-                            if (addQueueDelayed) {
-                                return qsTr("Added to queue");
-                            } else if (isAddToQueue) {
-                                return render_queue.editing_job_id > 0? qsTr("Save") : qsTr("Add to render queue");
-                            } else {
-                                return qsTr("Export");
-                            }
-                        }
-                        iconName: addQueueDelayed ? "confirmed" : "video";
-                        isDown: isMobileLayout;
-                        property bool tempIsAddToQueue: false;
-                        property bool isAddToQueue: false;
+                        width: 0; height: 0; visible: false;
+
+                        // Whether the item loaded in the main view is in the render queue right now
+                        readonly property bool isQueued: mediaPanel.currentJobId > 0;
                         property bool allowFile: false;
                         property bool allowLens: false;
                         property bool allowSync: false;
-                        onIsAddToQueueChanged: updateModel();
-                        enabled: window.videoArea.vid.loaded && outputFile.filename.length > 3;
+                        // "queue" adds it to the render queue, "now" renders it right away, overruling the queue
+                        property string pendingAction: "queue";
+                        // Job started by "Stabilize now" and the queue state to restore when it's done
+                        property int directJobId: 0;
+                        property bool resumeQueueAfter: false;
 
-                        property bool enabled2: window.videoArea.vid.loaded && exportSettings.item && exportSettings.item.canExport && !videoArea.videoLoader.active;
-                        onEnabled2Changed: et.start();
-                        Timer { id: et; interval: 200; onTriggered: renderBtn.btn.enabled = renderBtn.enabled2; }
+                        readonly property bool canExport: window.videoArea.vid.loaded && outputFile.filename.length > 3
+                                                       && exportSettings.item && exportSettings.item.canExport && !videoArea.videoLoader.active;
 
                         property bool addQueueDelayed: false;
-                        Timer {
-                            id: delayAddQueue;
-                            interval: 2000;
-                            onTriggered:  {
-                                renderBtn.addQueueDelayed = false;
-                                renderBtn.btn.enabled = renderBtn.enabled2;
+                        Timer { id: delayAddQueue; interval: 2000; onTriggered: renderBtn.addQueueDelayed = false; }
+
+                        function startAction(action: string): void {
+                            renderBtn.pendingAction = action;
+                            renderBtn.allowFile = false;
+                            renderBtn.allowLens = false;
+                            renderBtn.allowSync = false;
+                            window.videoArea.vid.pause();
+                            renderBtn.render();
+                        }
+                        // Adding to or removing from the queue always goes through the media list
+                        function toggleQueue(): void {
+                            if (renderBtn.isQueued) {
+                                mediaPanel.unqueueLoadedFile();
+                            } else {
+                                renderBtn.startAction("queue");
                             }
                         }
-
-                        function updateModel(): void {
-                            let m = [
-                                ["export",        isAddToQueue? QT_TRANSLATE_NOOP("Popup", "Export") : (render_queue.editing_job_id > 0? QT_TRANSLATE_NOOP("Popup", "Save") : QT_TRANSLATE_NOOP("Popup", "Add to render queue"))],
-                                ["create_preset", QT_TRANSLATE_NOOP("Popup", "Create settings preset")],
-                                ["apply_all",     QT_TRANSLATE_NOOP("Popup", "Apply selected settings to all items in the render queue")],
-                                ["export_proj:WithGyroData", QT_TRANSLATE_NOOP("Popup", "Export project file (including gyro data)")],
-                                ["export_proj:Simple",       QT_TRANSLATE_NOOP("Popup", "Export project file")]
-                            ];
-                            if (controller.project_file_url) m.push(["save", QT_TRANSLATE_NOOP("Popup", "Save project file")]);
-                            model   = m.map(x => x[1]);
-                            actions = m.map(x => x[0]);
-                        }
-
-                        model: [];
-                        property list<string> actions: [];
-
-                        Connections {
-                            target: controller;
-                            function onProject_file_url_changed(): void { renderBtn.updateModel(); }
+                        function stabilizeNow(): void { renderBtn.startAction("now"); }
+                        // The direct render is done, let the queue continue where it was paused
+                        function directRenderFinished(): void {
+                            renderBtn.directJobId = 0;
+                            if (renderBtn.resumeQueueAfter) {
+                                renderBtn.resumeQueueAfter = false;
+                                render_queue.start();
+                            }
                         }
                         Connections {
                             target: render_queue;
-                            function onQueue_changed(): void { renderBtn.updateModel(); }
+                            function onRender_progress(job_id: real, progress: real, frame: int, total_frames: int, finished: bool, start_time: real, is_conversion: bool): void {
+                                if (finished && renderBtn.directJobId > 0 && job_id == renderBtn.directJobId) renderBtn.directRenderFinished();
+                            }
                         }
-                        Component.onCompleted: updateModel();
 
                         function render(): void {
                             const fname = vidInfo.item.filename.toLowerCase();
@@ -338,10 +332,10 @@ Rectangle {
                                     renderBtn.render();
                                 }
 
-                                if ((renderBtn.isAddToQueue || renderBtn.tempIsAddToQueue) && render_queue.overwrite_mode === 1) {
+                                if (renderBtn.pendingAction == "queue" && render_queue.overwrite_mode === 1) {
                                     overwrite();
                                     showNotification(Modal.Info, qsTr("Added to queue") + ", " + qsTr("file %1 will be overwritten").arg(outputFile.filename))
-                                } else if ((renderBtn.isAddToQueue || renderBtn.tempIsAddToQueue) && render_queue.overwrite_mode === 2) {
+                                } else if (renderBtn.pendingAction == "queue" && render_queue.overwrite_mode === 2) {
                                     rename();
                                     showNotification(Modal.Info, qsTr("Added to queue") + ", " + qsTr("file will be rendered to %1").arg(outputFile.filename))
                                 } else {
@@ -375,11 +369,11 @@ Rectangle {
                                 if (isSandboxed && (!outputFile.folderUrl.toString() || !filesystem.can_create_file(outputFile.folderUrl, outputFile.filename))) {
                                     let el = messageBox(Modal.Info, qsTr("Due to file access restrictions, you need to select the destination folder manually.\nClick Ok and select the destination folder."), [
                                         { text: qsTr("Ok"), clicked: () => {
-                                            outputFile.selectFolder(outputFile.folderUrl, function(_) { renderBtn.btn.clicked(); });
+                                            outputFile.selectFolder(outputFile.folderUrl, function(_) { renderBtn.render(); });
                                         }},
                                     ], undefined, Text.AutoText, "file-access-restriction");
                                     if (!el) { // Don't show again triggered
-                                        outputFile.selectFolder(outputFile.folderUrl, function(_) { renderBtn.btn.clicked(); });
+                                        outputFile.selectFolder(outputFile.folderUrl, function(_) { renderBtn.render(); });
                                     }
                                     return;
                                 }
@@ -389,94 +383,132 @@ Rectangle {
                                     ], undefined, Text.AutoText, "keep-in-foreground");
                                 }
 
-                                const job_id = render_queue.add(window.getAdditionalProjectDataJson(), controller.image_to_b64(result.image));
-                                if (renderBtn.isAddToQueue || renderBtn.tempIsAddToQueue || render_queue.get_active_render_count() >= render_queue.parallel_renders) {
-                                    // Add to queue
-                                    renderBtn.addQueueDelayed = true;
-                                    renderBtn.btn.enabled = false;
-                                    delayAddQueue.start();
-
-                                    if (render_queue.get_active_render_count() >= render_queue.parallel_renders) {
-                                        render_queue.start();
+                                if (renderBtn.pendingAction == "queue") {
+                                    // The media list is the single source of truth for the queue, so instead of creating
+                                    // a job here, queue the loaded item there. Saving an edited job still goes directly.
+                                    if (render_queue.editing_job_id > 0 || mediaPanel.queueLoadedFile() <= 0) {
+                                        render_queue.add(window.getAdditionalProjectDataJson(), controller.image_to_b64(result.image));
                                     }
+                                    renderBtn.addQueueDelayed = true;
+                                    delayAddQueue.start();
 
                                     if (+settings.value("showQueueWhenAdding", "1"))
                                         window.mediaPanelShown = true;
                                 } else {
-                                    // Export now
+                                    // Stabilize now: this one render overrules the queue, which is resumed afterwards
+                                    if (render_queue.status == "active") {
+                                        render_queue.pause();
+                                        renderBtn.resumeQueueAfter = true;
+                                    }
+                                    const job_id = render_queue.add(window.getAdditionalProjectDataJson(), controller.image_to_b64(result.image));
+                                    renderBtn.directJobId = job_id;
                                     render_queue.main_job_id = job_id;
                                     render_queue.render_job(job_id);
                                 }
-                                renderBtn.tempIsAddToQueue = false;
                             }, Qt.size(50 * dpiScale * videoArea.vid.parent.ratio, 50 * dpiScale));
                         }
-                        btn.onClicked: {
-                            allowFile = false;
-                            allowLens = false;
-                            allowSync = false;
-                            window.videoArea.vid.pause();
-                            render();
-                        }
-                        popup.onClicked: (index) => {
-                            const action = actions[index];
-                            switch (action) {
-                                case "export": // Add to render queue or Export
-                                    renderBtn.isAddToQueue = !renderBtn.isAddToQueue;
-                                    popup.close();
-                                    renderBtn.btn.clicked();
-                                break;
-                                case "create_preset": // Create preset
-                                case "apply_all": // Apply settings to render queue
-                                    const el = Qt.createComponent("SettingsSelector.qml").createObject(window, { type: index == 1? "preset" : "apply" });
-                                    el.opened = true;
-                                    el.onApply.connect((obj) => {
-                                        const allData = JSON.parse(controller.export_gyroflow_data("Simple", window.getAdditionalProjectData()));
-                                        let finalData = el.getFilteredObject(allData, obj);
 
-                                        if (finalData.hasOwnProperty("output")) {
-                                            finalData.output.output_filename = ""; // Don't modify filenames, only target folder
-                                        }
-                                        if (obj.synchronization && obj.synchronization.do_autosync) {
-                                            finalData.synchronization.do_autosync = true;
-                                        }
-                                        if (action == "create_preset") { // Preset
-                                            if (obj.save_type == "file") {
-                                                presetFileDialog.presetData = finalData;
-                                                presetFileDialog.open2();
-                                            } else if (obj.save_type == "default") {
-                                                finalData.name = "Default preset";
-                                                const saved_to = controller.export_preset("", finalData, obj.save_type, "");
+                        // "preset" creates a settings preset, "apply" applies the selected settings to the whole queue
+                        function openSettingsSelector(type: string): void {
+                            const el = Qt.createComponent("SettingsSelector.qml").createObject(window, { type: type });
+                            el.opened = true;
+                            el.onApply.connect((obj) => {
+                                const allData = JSON.parse(controller.export_gyroflow_data("Simple", window.getAdditionalProjectData()));
+                                let finalData = el.getFilteredObject(allData, obj);
+
+                                if (finalData.hasOwnProperty("output")) {
+                                    finalData.output.output_filename = ""; // Don't modify filenames, only target folder
+                                }
+                                if (obj.synchronization && obj.synchronization.do_autosync) {
+                                    finalData.synchronization.do_autosync = true;
+                                }
+                                if (type == "preset") {
+                                    if (obj.save_type == "file") {
+                                        presetFileDialog.presetData = finalData;
+                                        presetFileDialog.open2();
+                                    } else if (obj.save_type == "default") {
+                                        finalData.name = "Default preset";
+                                        const saved_to = controller.export_preset("", finalData, obj.save_type, "");
+                                        showNotification(Modal.Info, qsTr("Preset saved to %1").arg("<b>" + saved_to + "</b>"))
+                                    } else {
+                                        const dlg = messageBox(Modal.Info, qsTr("Enter the name for the preset: "), [
+                                            { text: qsTr("Ok"), accent: true, clicked: function() {
+                                                let name = dlg.mainColumn.children[1].text;
+                                                if (!name) {
+                                                    messageBox(Modal.Error, qsTr("Name cannot be empty."), [ { text: qsTr("Ok") } ]);
+                                                    return false;
+                                                }
+                                                finalData.name = name;
+                                                const saved_to = controller.export_preset("", finalData, obj.save_type, name);
                                                 showNotification(Modal.Info, qsTr("Preset saved to %1").arg("<b>" + saved_to + "</b>"))
-                                            } else {
-                                                const dlg = messageBox(Modal.Info, qsTr("Enter the name for the preset: "), [
-                                                    { text: qsTr("Ok"), accent: true, clicked: function() {
-                                                        let name = dlg.mainColumn.children[1].text;
-                                                        if (!name) {
-                                                            messageBox(Modal.Error, qsTr("Name cannot be empty."), [ { text: qsTr("Ok") } ]);
-                                                            return false;
-                                                        }
-                                                        finalData.name = name;
-                                                        const saved_to = controller.export_preset("", finalData, obj.save_type, name);
-                                                        showNotification(Modal.Info, qsTr("Preset saved to %1").arg("<b>" + saved_to + "</b>"))
-                                                    } },
-                                                    { text: qsTr("Cancel") },
-                                                ]);
-                                                const tf = Qt.createComponent("components/TextField.qml").createObject(dlg.mainColumn, { });
-                                                tf.anchors.horizontalCenter = dlg.mainColumn.horizontalCenter;
-                                                tf.focus = true;
-                                            }
-                                        } else { // Apply
-                                            render_queue.apply_to_all(JSON.stringify(finalData), window.getAdditionalProjectDataJson(), 0);
-                                        }
-                                    });
-                                break;
-                                case "export_proj:WithGyroData":
-                                case "export_proj:Simple":
-                                    window.saveProject(action.substring(12));
-                                break;
-                                case "save": window.saveProject(""); break;
-                            }
+                                            } },
+                                            { text: qsTr("Cancel") },
+                                        ]);
+                                        const tf = Qt.createComponent("components/TextField.qml").createObject(dlg.mainColumn, { });
+                                        tf.anchors.horizontalCenter = dlg.mainColumn.horizontalCenter;
+                                        tf.focus = true;
+                                    }
+                                } else { // Apply
+                                    render_queue.apply_to_all(JSON.stringify(finalData), window.getAdditionalProjectDataJson(), 0);
+                                }
+                            });
                         }
+                    }
+
+                    // The queue actions are always visible, not hidden behind a dropdown
+                    Button {
+                        id: queueToggleBtn;
+                        accent: !renderBtn.isQueued;
+                        accentColor: renderBtn.isQueued? "#f6a00b" : styleAccentColor;
+                        height: 32 * dpiScale;
+                        font.pixelSize: 12 * dpiScale;
+                        icon.width: 14 * dpiScale;
+                        icon.height: 14 * dpiScale;
+                        iconName: renderBtn.addQueueDelayed? "confirmed" : renderBtn.isQueued? "close" : "queue";
+                        enabled: renderBtn.canExport && !renderBtn.addQueueDelayed;
+                        text: renderBtn.addQueueDelayed? qsTr("Added to queue")
+                            : render_queue.editing_job_id > 0? qsTr("Save")
+                            : renderBtn.isQueued? qsTr("Remove from render queue")
+                            : qsTr("Add to render queue");
+                        onClicked: renderBtn.toggleQueue();
+                    }
+                    Button {
+                        id: stabilizeNowBtn;
+                        height: 32 * dpiScale;
+                        font.pixelSize: 12 * dpiScale;
+                        icon.width: 14 * dpiScale;
+                        icon.height: 14 * dpiScale;
+                        iconName: "video";
+                        enabled: renderBtn.canExport;
+                        tooltip: qsTr("Renders this video right away, before everything else in the render queue. The queue is resumed afterwards.");
+                        text: qsTr("Stabilize now");
+                        onClicked: renderBtn.stabilizeNow();
+                    }
+                    LinkButton {
+                        height: 32 * dpiScale;
+                        font.pixelSize: 11 * dpiScale;
+                        text: qsTr("Export project file");
+                        onClicked: window.saveProject("WithGyroData");
+                    }
+                    LinkButton {
+                        height: 32 * dpiScale;
+                        font.pixelSize: 11 * dpiScale;
+                        visible: controller.project_file_url != "";
+                        text: qsTr("Save project file");
+                        onClicked: window.saveProject("");
+                    }
+                    LinkButton {
+                        height: 32 * dpiScale;
+                        font.pixelSize: 11 * dpiScale;
+                        text: qsTr("Create settings preset");
+                        onClicked: renderBtn.openSettingsSelector("preset");
+                    }
+                    LinkButton {
+                        height: 32 * dpiScale;
+                        font.pixelSize: 11 * dpiScale;
+                        visible: render_queue.queue.rowCount() > 0;
+                        text: qsTr("Apply settings to the queue");
+                        onClicked: renderBtn.openSettingsSelector("apply");
                     }
                     LinkButton {
                         id: queueBtn;
@@ -485,8 +517,7 @@ Rectangle {
                         rightPadding: 10 * dpiScale;
                         icon.width: 25 * dpiScale;
                         icon.height: 25 * dpiScale;
-                        // textColor: styleTextColor;
-                        anchors.verticalCenter: parent.verticalCenter;
+                        height: 32 * dpiScale;
                         iconName: "queue";
                         tooltip: window.mediaPanelShown? qsTr("Hide the media list") : qsTr("Show the media list");
                         onClicked: window.mediaPanelShown = !window.mediaPanelShown;

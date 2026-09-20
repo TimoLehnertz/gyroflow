@@ -213,22 +213,16 @@ Item {
         onActivated: if (!videoArea.isCalibrator) window.mediaPanelShown = !window.mediaPanelShown;
     }
 
-    // Add to render queue
+    // Add to or remove from the render queue
     Shortcut {
         sequence: "Ctrl+Q";
-        onActivated: {
-            window.renderBtn.tempIsAddToQueue = true;
-            window.renderBtn.btn.clicked();
-        }
+        onActivated: window.renderBtn.toggleQueue();
     }
 
-    // Export
+    // Stabilize this video now
     Shortcut {
         sequence: "Ctrl+W";
-        onActivated: {
-            window.renderBtn.tempIsAddToQueue = false;
-            window.renderBtn.btn.clicked();
-        }
+        onActivated: window.renderBtn.stabilizeNow();
     }
 
     // Save project file
@@ -308,7 +302,6 @@ Item {
         const current_id = render_queue.editing_job_id;
         if (current_id > 0) {
             // Save
-            window.renderBtn.isAddToQueue = true;
             videoArea.vid.grabToImage(function(result) {
                 render_queue.add(window.getAdditionalProjectDataJson(), controller.image_to_b64(result.image));
                 if (new_id > 0) {

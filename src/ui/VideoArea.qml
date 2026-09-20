@@ -1190,6 +1190,8 @@ Item {
             onCancel: {
                 if (render_queue.main_job_id > 0) {
                     render_queue.cancel_job(render_queue.main_job_id);
+                    // The queue was paused so this render could overrule it, let it continue now
+                    if (!root.isCalibrator) window.renderBtn.directRenderFinished();
                 } else {
                     controller.cancel_current_operation();
                 }
@@ -1197,6 +1199,7 @@ Item {
             onHide: {
                 render_queue.main_job_id = 0;
                 videoLoader.active = false;
+                if (!root.isCalibrator) window.renderBtn.directRenderFinished();
             }
         }
         Column {
