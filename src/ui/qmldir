@@ -3,6 +3,7 @@ CalibrationTarget 1.0 CalibrationTarget.qml
 Calibrator 1.0 Calibrator.qml
 ImportMarkersModal 1.0 ImportMarkersModal.qml
 MediaSidebar 1.0 MediaSidebar.qml
+RenderQueueModal 1.0 RenderQueueModal.qml
 Statistics 1.0 Statistics.qml
 Shortcuts 1.0 Shortcuts.qml
 VideoArea 1.0 VideoArea.qml
