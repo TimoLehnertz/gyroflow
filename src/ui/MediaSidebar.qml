@@ -734,7 +734,6 @@ ResizablePanel {
                             height: 16 * dpiScale;
                             width: height;
                             anchors.verticalCenter: parent.verticalCenter;
-                            scale: 0.4;
                             running: visible;
                         }
                         QQCI.IconImage {
