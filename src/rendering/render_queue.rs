@@ -267,6 +267,7 @@ pub struct RenderQueue {
 
     get_prev_item_id: qt_method!(fn(&self, job_id: u32) -> u32),
     get_next_item_id: qt_method!(fn(&self, job_id: u32) -> u32),
+    get_job_ids: qt_method!(fn(&self) -> QVariantList),
     get_encoder_options: qt_method!(fn(&self, encoder: String) -> String),
     get_default_encoder: qt_method!(fn(&self, codec: String, gpu: bool) -> String),
     get_active_render_count: qt_method!(fn(&self) -> usize),
@@ -1727,6 +1728,10 @@ impl RenderQueue {
             prev_id = itm.job_id;
         }
         0
+    }
+    /// Ids of all jobs currently in the queue, in the order they are rendered
+    fn get_job_ids(&self) -> QVariantList {
+        QVariantList::from_iter(self.queue.borrow().iter().map(|itm| itm.job_id))
     }
 
     // Keep in sync with Synchronization.qml

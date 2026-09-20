@@ -127,6 +127,8 @@ pub struct MediaLibrary {
     toggle_expanded: qt_method!(fn(&mut self, item_id: u32)),
     set_selected: qt_method!(fn(&mut self, item_id: u32, selected: bool)),
     select_only: qt_method!(fn(&mut self, item_id: u32)),
+    toggle_selected: qt_method!(fn(&mut self, item_id: u32)),
+    select_range: qt_method!(fn(&mut self, from_item_id: u32, to_item_id: u32)),
     select_all: qt_method!(fn(&mut self, selected: bool)),
     selected_count: qt_method!(fn(&self) -> usize),
 
@@ -139,6 +141,7 @@ pub struct MediaLibrary {
     get_trim_end: qt_method!(fn(&self, item_id: u32) -> f64),
     is_item_url: qt_method!(fn(&self, item_id: u32, url: QString) -> bool),
     find_by_url: qt_method!(fn(&self, url: QString) -> u32),
+    get_item_index: qt_method!(fn(&self, item_id: u32) -> i32),
 
     add_section: qt_method!(fn(&mut self, video_id: u32, trim_start: f64, trim_end: f64) -> u32),
     set_section_trim: qt_method!(fn(&mut self, item_id: u32, trim_start: f64, trim_end: f64)),
@@ -156,6 +159,10 @@ pub struct MediaLibrary {
     set_output_url: qt_method!(fn(&mut self, item_id: u32, folder: QString, filename: QString)),
 
     get_render_items: qt_method!(fn(&self, selected_only: bool) -> QVariantList),
+    get_queueable_selection: qt_method!(fn(&self) -> QVariantList),
+    get_queued_selection: qt_method!(fn(&self) -> QVariantList),
+    is_item_queued: qt_method!(fn(&self, item_id: u32) -> bool),
+    retain_jobs: qt_method!(fn(&mut self, job_ids: QVariantList)),
     set_item_job: qt_method!(fn(&mut self, item_id: u32, job_id: u32)),
     get_item_job: qt_method!(fn(&self, item_id: u32) -> u32),
     get_item_job_status: qt_method!(fn(&self, item_id: u32) -> QString),
@@ -654,28 +661,78 @@ impl MediaLibrary {
         self.rebuild();
     }
 
+    /// The selection is only the working set the bulk actions are applied to, it says nothing about
+    /// the render queue. Being in the queue is tracked separately, by the job of the item.
+    fn select_video(v: &mut Video, selected: bool) {
+        v.selected = selected;
+        for s in v.sections.iter_mut() { s.selected = selected; }
+    }
+
     pub fn set_selected(&mut self, item_id: u32, selected: bool) {
+        self.set_selected_internal(item_id, selected);
+        self.update_selection_rows();
+    }
+    fn set_selected_internal(&mut self, item_id: u32, selected: bool) {
         if let Some(index) = self.folders.iter().position(|f| f.id == item_id) {
             for v in self.folders[index].videos.iter_mut() {
-                v.selected = selected;
-                for s in v.sections.iter_mut() { s.selected = selected; }
+                Self::select_video(v, selected);
             }
         } else if let Some(v) = self.video_mut(item_id) {
-            v.selected = selected;
-            for s in v.sections.iter_mut() { s.selected = selected; }
+            Self::select_video(v, selected);
         } else if let Some(s) = self.section_mut(item_id) {
             s.selected = selected;
         }
+    }
+    /// Plain click: this item becomes the whole selection
+    pub fn select_only(&mut self, item_id: u32) {
+        for v in self.all_videos_mut() {
+            Self::select_video(v, false);
+        }
+        self.set_selected_internal(item_id, true);
         self.update_selection_rows();
     }
-    pub fn select_only(&mut self, item_id: u32) {
-        self.select_all(false);
-        self.set_selected(item_id, true);
+    /// Ctrl+click: add or remove this item from the selection
+    pub fn toggle_selected(&mut self, item_id: u32) {
+        let selected = if let Some(v) = self.video(item_id) {
+            v.selected
+        } else if let Some((_, s)) = self.section(item_id) {
+            s.selected
+        } else if let Some(f) = self.folders.iter().find(|f| f.id == item_id) {
+            Self::is_folder_selected(f)
+        } else {
+            return;
+        };
+        self.set_selected(item_id, !selected);
+    }
+    /// Shift+click: select everything between the two items, in the order they are shown in the list
+    pub fn select_range(&mut self, from_item_id: u32, to_item_id: u32) {
+        if from_item_id == 0 || from_item_id == to_item_id {
+            self.select_only(to_item_id);
+            return;
+        }
+        let (from, to) = (self.get_item_index(from_item_id), self.get_item_index(to_item_id));
+        if from < 0 || to < 0 {
+            self.select_only(to_item_id);
+            return;
+        }
+        let ids = match self.items.try_borrow() {
+            Ok(q) => {
+                let count = q.row_count() as usize;
+                (from.min(to) as usize..=from.max(to) as usize).filter(|i| *i < count).map(|i| q[i].item_id).collect::<Vec<_>>()
+            },
+            Err(_) => return
+        };
+        for v in self.all_videos_mut() {
+            Self::select_video(v, false);
+        }
+        for id in ids {
+            self.set_selected_internal(id, true);
+        }
+        self.update_selection_rows();
     }
     pub fn select_all(&mut self, selected: bool) {
         for v in self.all_videos_mut() {
-            v.selected = selected;
-            for s in v.sections.iter_mut() { s.selected = selected; }
+            Self::select_video(v, selected);
         }
         self.update_selection_rows();
     }
@@ -741,6 +798,15 @@ impl MediaLibrary {
         let url = Self::to_url(&url.to_string(), false);
         if url.is_empty() { return 0; }
         self.all_videos().find(|v| v.url == url).map(|v| v.id).unwrap_or_default()
+    }
+    /// Row of the item in the list model, or -1 if it's not visible (filtered out or in a collapsed folder)
+    pub fn get_item_index(&self, item_id: u32) -> i32 {
+        if let Ok(q) = self.items.try_borrow() {
+            for i in 0..q.row_count() as usize {
+                if q[i].item_id == item_id { return i as i32; }
+            }
+        }
+        -1
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -838,6 +904,7 @@ impl MediaLibrary {
             return;
         }
         self.update_stabilized_row(item_id);
+        self.refresh_job_hash(item_id);
         if new_trim.is_some() { self.rebuild(); }
     }
 
@@ -921,6 +988,7 @@ impl MediaLibrary {
         }
         for id in ids {
             self.update_stabilized_row(id);
+            self.refresh_job_hash(id);
         }
         count
     }
@@ -943,6 +1011,15 @@ impl MediaLibrary {
             Some(hash) => {
                 if *hash == rendering::render_queue::stabilization_settings_hash(&Self::effective_stabilization(settings)) { STABILIZED } else { STALE }
             }
+        }
+    }
+    /// The job of a queued item is kept in sync with its settings, so it also renders with the new hash
+    fn refresh_job_hash(&mut self, item_id: u32) {
+        let hash = self.settings_hash(item_id).to_string();
+        if let Some(v) = self.video_mut(item_id) {
+            if v.job.status == "queued" { v.job.hash = hash; }
+        } else if let Some(s) = self.section_mut(item_id) {
+            if s.job.status == "queued" { s.job.hash = hash; }
         }
     }
     fn update_stabilized_row(&mut self, item_id: u32) {
@@ -1079,6 +1156,58 @@ impl MediaLibrary {
         QVariantList::from_iter(ret)
     }
 
+    /// Selected items that can be added to the render queue, ie. the ones that don't have a job yet
+    pub fn get_queueable_selection(&self) -> QVariantList {
+        let mut ret = Vec::new();
+        for v in self.all_videos() {
+            if v.sections.is_empty() {
+                if v.selected && v.job.job_id == 0 { ret.push(v.id); }
+            } else {
+                for s in &v.sections {
+                    if s.selected && s.job.job_id == 0 { ret.push(s.id); }
+                }
+            }
+        }
+        QVariantList::from_iter(ret)
+    }
+    /// Selected items that are in the render queue and can be removed from it
+    pub fn get_queued_selection(&self) -> QVariantList {
+        let mut ret = Vec::new();
+        for v in self.all_videos() {
+            if v.selected && v.job.job_id > 0 { ret.push(v.id); }
+            for s in &v.sections {
+                if s.selected && s.job.job_id > 0 { ret.push(s.id); }
+            }
+        }
+        QVariantList::from_iter(ret)
+    }
+    pub fn is_item_queued(&self, item_id: u32) -> bool {
+        self.item_settings(item_id).map(|(_, _, _, job)| job.job_id > 0).unwrap_or_default()
+    }
+    /// The render queue is the single source of truth for what's queued: every item whose job is not in
+    /// it anymore (removed in the queue modal, cleared, ...) loses its job and its highlight in the list.
+    pub fn retain_jobs(&mut self, job_ids: QVariantList) {
+        let existing = job_ids.into_iter().filter_map(|x| x.to_qbytearray().to_string().parse::<u32>().ok()).collect::<std::collections::HashSet<_>>();
+        let mut removed = Vec::new();
+        for v in self.all_videos_mut() {
+            if v.job.job_id > 0 && !existing.contains(&v.job.job_id) { v.job = Default::default(); removed.push(v.id); }
+            for s in v.sections.iter_mut() {
+                if s.job.job_id > 0 && !existing.contains(&s.job.job_id) { s.job = Default::default(); removed.push(s.id); }
+            }
+        }
+        if removed.is_empty() { return; }
+        for id in removed {
+            self.patch_row(id, |x| {
+                x.job_id = 0;
+                x.job_status = QString::default();
+                x.job_progress = 0.0;
+                x.error_string = QString::default();
+                x.job_message = QString::default();
+            });
+        }
+        self.items_changed();
+    }
+
     pub fn set_item_job(&mut self, item_id: u32, job_id: u32) {
         let job = JobState {
             job_id,
@@ -1102,6 +1231,8 @@ impl MediaLibrary {
             x.error_string = QString::default();
             x.job_message = QString::default();
         });
+        // Whether an item is queued is read from here in several places, let them know it changed
+        self.items_changed();
     }
     pub fn get_item_job(&self, item_id: u32) -> u32 {
         self.item_settings(item_id).map(|(_, _, _, job)| job.job_id).unwrap_or_default()
@@ -1245,6 +1376,7 @@ impl MediaLibrary {
                 x.job_message = QString::default();
             });
         }
+        self.items_changed();
     }
     pub fn active_job_count(&self) -> usize {
         self.all_videos().map(|v| {

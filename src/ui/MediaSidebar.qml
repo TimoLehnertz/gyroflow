@@ -19,18 +19,29 @@ ResizablePanel {
     color: styleBackground2;
 
     property int currentItemId: media_library.current_item;
+    // The selection is only the working set of the bulk actions, being in the render queue is a separate state
     property int selectedCount: 0;
-    property bool isStabilizing: false;
+    property int queueableCount: 0;
+    property int queuedSelectedCount: 0;
+    // Anchor of the shift+click range selection
+    property int lastClickedId: 0;
+    // Job of the item loaded in the main view, so the bottom bar can show whether it's in the queue
+    property int currentJobId: 0;
+    property alias queueModal: queueModalLoader;
     // Jobs queued from here, the user already decided to (re-)stabilize these items, so their output is always overwritten
     property var ownJobs: ({ });
 
     Connections {
         target: media_library;
-        function onItems_changed(): void {
-            root.selectedCount = media_library.selected_count();
-            root.updateOutputField();
-        }
-        function onCurrent_item_changed(): void { root.updateOutputField(); }
+        function onItems_changed(): void { root.refreshState(); }
+        function onCurrent_item_changed(): void { root.refreshState(); }
+    }
+    function refreshState(): void {
+        root.selectedCount      = media_library.selected_count();
+        root.queueableCount     = media_library.get_queueable_selection().length;
+        root.queuedSelectedCount = media_library.get_queued_selection().length;
+        root.currentJobId       = media_library.current_item > 0? media_library.get_item_job(media_library.current_item) : 0;
+        root.updateOutputFile();
     }
 
     // -----------------------------------------------------------------------------------------
@@ -41,6 +52,7 @@ ResizablePanel {
         const id = media_library.current_item;
         if (id > 0 && window.videoArea.vid.loaded && !window.videoArea.videoLoader.active) {
             media_library.save_settings(id, controller.export_gyroflow_data("Simple", window.getAdditionalProjectData()));
+            root.updateQueuedJob(id);
         }
     }
 
@@ -59,33 +71,33 @@ ResizablePanel {
         root.updateOutputFile();
     }
 
-    // Keeps the output path in the bottom bar in sync with the item loaded in the main view
+    // The output path of the item loaded in the main view is edited in the bottom bar. It's stored as
+    // written there: relative to the export folder by default, or absolute if the user picks a folder.
     property bool updatingOutput: false;
     function updateOutputFile(): void {
         const id = media_library.current_item;
-        if (id <= 0 || !window.outputFile) { root.updatingOutput = false; return; }
+        // Don't type over the field while the user is editing it
+        if (!window.outputFile || root.updatingOutput) return;
         root.updatingOutput = true;
-        window.outputFile.setFolder(media_library.get_output_folder(id));
-        window.outputFile.setFilename(media_library.get_output_filename(id));
+        if (id > 0) {
+            window.outputFile.setResolvedPath(media_library.get_output_folder(id), media_library.get_output_filename(id), media_library.get_output_path(id));
+        }
+        window.outputFile.pathMode = id > 0;
         root.updatingOutput = false;
     }
     // The output path can also be changed in the bottom bar, store it in the library then
-    function pushOutputToItem(): void {
+    function pushOutputToItem(path: string): void {
         const id = media_library.current_item;
         if (root.updatingOutput || id <= 0) return;
-        if (!media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString())) return;
-        media_library.set_output_url(id, window.outputFile.folderUrl.toString(), window.outputFile.filename);
+        root.updatingOutput = true;
+        media_library.set_output_path(id, path);
+        window.outputFile.setResolvedPath(media_library.get_output_folder(id), media_library.get_output_filename(id), "");
+        root.updatingOutput = false;
+        root.updateQueuedJob(id);
     }
     Connections {
         target: window.outputFile;
-        function onFilenameChanged():  void { root.pushOutputToItem(); }
-        function onFolderUrlChanged(): void { root.pushOutputToItem(); }
-    }
-    function updateOutputField(): void {
-        const id = media_library.current_item;
-        outputPathField.preventChange = true;
-        outputPathField.text = id > 0? media_library.get_output_path(id) : "";
-        outputPathField.preventChange = false;
+        function onPathEdited(path: string): void { root.pushOutputToItem(path); }
     }
 
     function applyStabilizationToAll(): void {
@@ -96,36 +108,76 @@ ResizablePanel {
         }
         const allData = JSON.parse(controller.export_gyroflow_data("Simple", window.getAdditionalProjectData()));
         const count = media_library.apply_stabilization_to_all(JSON.stringify({ stabilization: allData.stabilization }), 0);
+        root.updateQueuedJobs();
         showNotification(Modal.Success, qsTr("Stabilization settings applied to %1 items.").arg("<b>" + count + "</b>"));
     }
 
-    function stabilizeSelected(): void {
-        root.saveCurrentSettings();
-        const ids = media_library.get_render_items(true);
-        if (!ids.length) {
-            messageBox(Modal.Info, qsTr("Select the videos you want to stabilize."), [ { text: qsTr("Ok") } ]);
-            return;
-        }
-        const additional = window.getAdditionalProjectData();
-        for (const id of ids) {
-            const status = media_library.get_item_job_status(id);
-            if (status == "queued" || status == "rendering") continue; // Already in the queue
-            if (status) root.cancelItem(id); // Stabilize it again
-            let ad = JSON.parse(JSON.stringify(additional));
-            ad.output = ad.output || ({ });
-            // Every video is rendered in its own resolution
-            delete ad.output.output_width;
-            delete ad.output.output_height;
-            ad.output.output_folder   = media_library.get_output_folder(id);
-            ad.output.output_filename = media_library.get_output_filename(id);
-            ad.output.metadata = Object.assign({ }, ad.output.metadata || { }, { stabilization_hash: media_library.settings_hash(id) });
+    // -----------------------------------------------------------------------------------------
+    // -------------------------------------- Selection ----------------------------------------
+    // -----------------------------------------------------------------------------------------
 
-            const jobId = render_queue.add_file(media_library.get_item_url(id), "", JSON.stringify(ad));
-            media_library.set_item_job(id, jobId);
-            root.ownJobs[jobId] = true;
+    // A plain click selects one item and loads it, ctrl+click toggles one and shift+click selects a range
+    function clickItem(itemId: int, modifiers: int): void {
+        if (modifiers & Qt.ShiftModifier) {
+            media_library.select_range(root.lastClickedId, itemId);
+        } else if (modifiers & Qt.ControlModifier) {
+            media_library.toggle_selected(itemId);
+            root.lastClickedId = itemId;
+        } else {
+            media_library.select_only(itemId);
+            root.lastClickedId = itemId;
+            root.loadItem(itemId);
         }
-        // The queue is started when the files are loaded and the settings are applied, in onProcessing_done
-        root.isStabilizing = true;
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // ------------------------------------ Queueing items -------------------------------------
+    // -----------------------------------------------------------------------------------------
+
+    // Queueing is always an explicit action: the selection is just the set of items it's applied to
+    function queueSelected(): void {
+        const ids = media_library.get_queueable_selection();
+        if (!ids.length) return;
+        // The main view can have unsaved changes of the item that's being queued
+        root.saveCurrentSettings();
+        for (const id of ids) root.queueItem(id);
+    }
+    function unqueueSelected(): void {
+        for (const id of media_library.get_queued_selection()) root.unqueueItem(id);
+    }
+    function unqueueItem(itemId: int): void {
+        if (media_library.get_item_job_status(itemId) == "rendering" || media_library.get_item_job_status(itemId) == "processing") return;
+        root.cancelItem(itemId);
+    }
+    function queueItem(itemId: int): void {
+        const jobId = render_queue.add_file(media_library.get_item_url(itemId), "", JSON.stringify(root.jobData(itemId)));
+        root.pendingJobs[jobId] = true;
+        media_library.set_item_job(itemId, jobId);
+        root.ownJobs[jobId] = true;
+    }
+    // Render settings of the job, with the output path and the settings hash of this item
+    function jobData(itemId: int): var {
+        let ad = JSON.parse(JSON.stringify(window.getAdditionalProjectData()));
+        ad.output = ad.output || ({ });
+        // Every video is rendered in its own resolution
+        delete ad.output.output_width;
+        delete ad.output.output_height;
+        ad.output.output_folder   = media_library.get_output_folder(itemId);
+        ad.output.output_filename = media_library.get_output_filename(itemId);
+        ad.output.metadata = Object.assign({ }, ad.output.metadata || { }, { stabilization_hash: media_library.settings_hash(itemId) });
+        return ad;
+    }
+    // An item can be edited while it's waiting in the queue, keep its job up to date until it starts rendering
+    function updateQueuedJob(itemId: int): void {
+        const jobId = media_library.get_item_job(itemId);
+        if (jobId <= 0 || media_library.get_item_job_status(itemId) != "queued") return;
+        const settings = media_library.get_settings_for_job(jobId);
+        let data = settings? JSON.parse(settings) : ({ title: "Gyroflow data file", version: 4 });
+        data.output = root.jobData(itemId).output;
+        render_queue.apply_to_all(JSON.stringify(data), window.getAdditionalProjectDataJson(), jobId);
+    }
+    function updateQueuedJobs(): void {
+        for (const id of media_library.get_render_items(false)) root.updateQueuedJob(id);
     }
 
     // A new section starts with the trim range of the main view if this video is loaded there, otherwise with the whole video
@@ -135,6 +187,43 @@ ResizablePanel {
         const ranges = isLoaded? window.videoArea.timeline.getTrimRanges() : [[0.0, 1.0]];
         const newId = media_library.add_section(videoId, ranges[0][0], ranges[0][1]);
         if (newId > 0) root.loadItem(newId);
+    }
+
+    // The item of the video (or section) currently loaded in the main view, adding it to the list
+    // as a standalone entry if it isn't tracked in a watched folder yet. 0 if there's nothing loaded.
+    function loadedItem(): int {
+        const url = window.videoArea.loadedFileUrl.toString();
+        if (!url) return 0;
+        let itemId = media_library.is_item_url(media_library.current_item, url)? media_library.current_item : media_library.find_by_url(url);
+        if (itemId <= 0) {
+            media_library.add_files([url]);
+            itemId = media_library.find_by_url(url);
+            if (itemId <= 0) return 0;
+        }
+        if (media_library.current_item != itemId) media_library.set_current_item(itemId);
+        return itemId;
+    }
+    // The "Add to render queue" button of the bottom bar queues the loaded item through the same path
+    // the sidebar uses, so there's only one way a job is created. Returns the queued item id, or 0.
+    function queueLoadedFile(): int {
+        const itemId = root.loadedItem();
+        if (itemId <= 0) return 0;
+        // The settings of the main view are the ones of this item
+        root.saveCurrentSettings();
+        if (!media_library.is_item_queued(itemId)) root.queueItem(itemId);
+        const index = media_library.get_item_index(itemId);
+        if (index >= 0) lv.positionViewAtIndex(index, ListView.Contain);
+        return itemId;
+    }
+    function unqueueLoadedFile(): void {
+        const itemId = root.loadedItem();
+        if (itemId > 0) root.unqueueItem(itemId);
+    }
+
+    // The render queue itself is managed in its own modal, opened from here or from the bottom bar
+    function showQueue(): void {
+        queueModalLoader.active = true;
+        if (queueModalLoader.item) queueModalLoader.item.shown = true;
     }
 
     function removeItem(itemId: int): void {
@@ -150,18 +239,21 @@ ResizablePanel {
     }
     function resetItem(itemId: int): void {
         const jobId = media_library.get_item_job(itemId);
-        if (jobId > 0) {
-            render_queue.reset_job(jobId);
-            media_library.set_item_job(itemId, jobId);
-        }
+        if (jobId <= 0) return;
+        const status = media_library.get_item_job_status(itemId);
+        render_queue.reset_job(jobId);
+        media_library.set_item_job(itemId, jobId);
+        // A finished or failed job renders again with the settings the item has now, a running one is only stopped
+        if (status != "rendering" && status != "processing") root.updateQueuedJob(itemId);
     }
 
     // -----------------------------------------------------------------------------------------
     // ------------------------------------- Render queue --------------------------------------
     // -----------------------------------------------------------------------------------------
 
-    // This sidebar is the only queue UI, so every job of the render queue is represented by an item here,
-    // no matter if it was queued from here, from the export panel or restored from the previous session.
+    // Every job of the render queue belongs to an item in this list, no matter if it was queued from here,
+    // exported directly from the bottom bar or restored from the previous session. This mirrors the state
+    // of the jobs onto their items, the queue itself stays the only source of truth for what is queued.
     Instantiator {
         model: render_queue.queue;
         delegate: QtObject {
@@ -169,11 +261,21 @@ ResizablePanel {
             onErrorStringChanged: root.updateJobState(job_id, errorString);
             // The job is not fully set up yet when the row is added, so register it in the next event loop iteration
             Component.onCompleted: root.scheduleJobRegistration(job_id, input_file, output_folder, output_filename);
-            Component.onDestruction: root.unregisterJob(job_id);
         }
+    }
+    // Jobs removed from the queue elsewhere (the queue modal, clearing the queue) lose their item as well.
+    // A job that was just added doesn't have its row yet, so it's kept until it shows up in the queue.
+    property var pendingJobs: ({ });
+    function syncJobsWithQueue(): void {
+        const ids = render_queue.get_job_ids().concat(Object.keys(root.pendingJobs).map(x => +x));
+        media_library.retain_jobs(ids);
+        let own = ({ });
+        for (const id of ids) { if (root.ownJobs[id]) own[id] = true; }
+        root.ownJobs = own;
     }
     property var jobsToRegister: [];
     function scheduleJobRegistration(jobId: int, inputFile: string, outputFolder: string, outputFilename: string): void {
+        delete root.pendingJobs[jobId]; // It's in the queue now
         root.jobsToRegister.push([jobId, inputFile, outputFolder, outputFilename]);
         registerTimer.start();
     }
@@ -205,11 +307,6 @@ ResizablePanel {
         render_queue.set_job_output_filename(jobId, newName, start);
         if (itemId > 0) media_library.set_output_url(itemId, folder, newName);
     }
-    function unregisterJob(jobId: int): void {
-        delete root.ownJobs[jobId];
-        const itemId = media_library.get_item_for_job(jobId);
-        if (itemId > 0) media_library.set_item_job(itemId, 0);
-    }
     // The error string of a queue item can be an error, a question (convert_format, file_exists) or just an informational note
     function updateJobState(jobId: int, errorString: string): void {
         if (jobId == render_queue.main_job_id && errorString == "uses_cpu") {
@@ -223,13 +320,17 @@ ResizablePanel {
     Connections {
         target: render_queue;
         function onProcessing_done(job_id: real, by_preset: bool): void {
-            if (by_preset || !media_library.is_library_job(job_id)) return;
+            if (by_preset) return;
+            // Either the job made it into the queue by now, or it never will
+            delete root.pendingJobs[job_id];
+            if (!media_library.is_library_job(job_id)) return;
             // The video is loaded in the queue now, apply the settings of this item on top of it
             const data = media_library.get_settings_for_job(job_id);
             if (data) {
                 render_queue.apply_to_all(data, window.getAdditionalProjectDataJson(), job_id);
             }
-            if (root.isStabilizing) render_queue.start();
+            // Queued jobs wait for the user to start the queue, but a running queue picks up the new ones
+            if (render_queue.status == "active") render_queue.start();
         }
         function onProcessing_progress(job_id: real, progress: real): void {
             media_library.set_job_processing(job_id, progress);
@@ -251,12 +352,9 @@ ResizablePanel {
             media_library.set_job_error(job_id, window.getReadableError(qsTr(text).arg(arg)) || text);
         }
         function onQueue_finished(): void {
-            if (root.isStabilizing && media_library.active_job_count() == 0) {
-                root.isStabilizing = false;
-                media_library.refresh_outputs();
-            }
+            if (media_library.active_job_count() == 0) media_library.refresh_outputs();
         }
-        function onQueue_changed():  void { render_queue.save_render_queue(); }
+        function onQueue_changed():  void { render_queue.save_render_queue(); root.syncJobsWithQueue(); root.refreshState(); }
         function onStatus_changed(): void { render_queue.save_render_queue(); }
         function onRequest_close(): void {
             main_window.closeConfirmed = true;
@@ -272,7 +370,7 @@ ResizablePanel {
             Qt.callLater(() => {
                 if (render_queue.restore_render_queue(window.getAdditionalProjectDataJson())) {
                     messageBox(Modal.Info, qsTr("You have unfinished tasks in the render queue."), [
-                        { text: qsTr("Show the media list"), accent: true, clicked: function() { window.mediaPanelShown = true; } },
+                        { text: qsTr("Open render queue"), accent: true, clicked: function() { root.showQueue(); } },
                         { text: qsTr("Ok") }
                     ]);
                 }
@@ -443,29 +541,51 @@ ResizablePanel {
             property bool isQuestion:   job_status == "question";
             property bool isJobDone:    job_status == "done";
             property bool isBusy: dlg.isRendering || dlg.isProcessing;
+            // Being in the render queue is shown independently of the selection, an item can be both
+            property bool isInQueue: job_id > 0;
 
-            color: isJobError? "#30ed7676"
-                 : isQuestion? "#30" + styleAccentColor.toString().substring(1)
+            color: selected?     "#33ffffff"
+                 : isJobError?   "#30ed7676"
+                 : isQuestion?   "#30" + styleAccentColor.toString().substring(1)
                  : stabilized_state == 1? "#3070e574"
                  : stabilized_state == 2? "#30f6a00b"
-                 : selected? "#20ffffff" : "transparent";
-            border.width: is_current? 1 * dpiScale : 0;
-            border.color: styleAccentColor;
+                 : "transparent";
+            border.width: selected || is_current? 1 * dpiScale : 0;
+            border.color: selected? "#99ffffff" : styleAccentColor;
+
+            // Queued items get an accent stripe on the left, which stays visible while they are selected
+            Rectangle {
+                visible: dlg.isInQueue;
+                width: 3 * dpiScale;
+                height: parent.height - 8 * dpiScale;
+                radius: width;
+                x: 1 * dpiScale;
+                anchors.verticalCenter: parent.verticalCenter;
+                color: dlg.isJobError? "#ed7676" : dlg.isJobDone? "#70e574" : styleAccentColor;
+            }
 
             MouseArea {
                 anchors.fill: parent;
                 acceptedButtons: Qt.LeftButton;
                 cursorShape: dlg.isFolder? Qt.ArrowCursor : Qt.PointingHandCursor;
-                onClicked: {
+                onClicked: (mouse) => {
                     if (dlg.isFolder) {
-                        media_library.toggle_expanded(item_id);
+                        if (mouse.modifiers & (Qt.ShiftModifier | Qt.ControlModifier)) {
+                            root.clickItem(item_id, mouse.modifiers);
+                        } else {
+                            media_library.toggle_expanded(item_id);
+                        }
                     } else {
-                        root.loadItem(item_id);
+                        root.clickItem(item_id, mouse.modifiers);
                     }
                 }
             }
             ContextMenuMouseArea {
-                onContextMenu: (isHold, mx, my) => itemMenu.popup(dlg, mx, my);
+                // Right clicking an item that isn't part of the selection makes it the selection first
+                onContextMenu: (isHold, mx, my) => {
+                    if (!selected) root.clickItem(item_id, Qt.NoModifier);
+                    itemMenu.popup(dlg, mx, my);
+                }
             }
             Menu {
                 id: itemMenu;
@@ -477,13 +597,16 @@ ResizablePanel {
                     onTriggered: root.addSection(dlg.isSection? parent_id : item_id, item_id);
                 }
                 Action {
-                    iconName: "play";
-                    text: qsTr("Stabilize");
-                    enabled: !dlg.isFolder && !dlg.isBusy;
-                    onTriggered: {
-                        media_library.select_only(item_id);
-                        root.stabilizeSelected();
-                    }
+                    iconName: "queue";
+                    text: qsTr("Add %1 selected to the render queue").arg(root.queueableCount);
+                    enabled: root.queueableCount > 0;
+                    onTriggered: root.queueSelected();
+                }
+                Action {
+                    iconName: "close";
+                    text: qsTr("Remove %1 selected from the render queue").arg(root.queuedSelectedCount);
+                    enabled: root.queuedSelectedCount > 0;
+                    onTriggered: root.unqueueSelected();
                 }
                 Action {
                     iconName: "play";
@@ -530,12 +653,6 @@ ResizablePanel {
                     onTriggered: filesystem.open_file_externally(dlg.isFolder? url : filesystem.get_folder(url));
                 }
                 Action {
-                    iconName: "close";
-                    text: qsTr("Remove from the queue");
-                    enabled: job_id > 0 && !dlg.isBusy;
-                    onTriggered: root.cancelItem(item_id);
-                }
-                Action {
                     iconName: "bin";
                     text: dlg.isFolder? qsTr("Remove folder") : dlg.isSection? qsTr("Delete section") : qsTr("Remove video");
                     enabled: !dlg.isBusy;
@@ -567,37 +684,10 @@ ResizablePanel {
                         iconName: expanded? "chevron-down" : "chevron-right";
                         onClicked: media_library.toggle_expanded(item_id);
                     }
-                    Rectangle {
-                        id: selCb;
-                        visible: !dlg.isFolder || has_children;
-                        anchors.left: parent.left;
-                        anchors.leftMargin: 20 * dpiScale;
-                        anchors.verticalCenter: parent.verticalCenter;
-                        width: 14 * dpiScale;
-                        height: width;
-                        radius: 4 * dpiScale;
-                        color: selected? styleAccentColor : "transparent";
-                        border.width: 1 * dpiScale;
-                        border.color: selected? styleAccentColor : "#999999";
-                        QQCI.IconImage {
-                            visible: selected;
-                            anchors.fill: parent;
-                            anchors.margins: 2 * dpiScale;
-                            name: "checkmark";
-                            source: "qrc:/resources/icons/svg/checkmark.svg";
-                            color: styleTextColorOnAccent;
-                        }
-                        MouseArea {
-                            anchors.fill: parent;
-                            anchors.margins: -3 * dpiScale;
-                            cursorShape: Qt.PointingHandCursor;
-                            onClicked: media_library.set_selected(item_id, !selected);
-                        }
-                    }
                     QQCI.IconImage {
                         id: itemIcon;
-                        anchors.left: selCb.right;
-                        anchors.leftMargin: 4 * dpiScale;
+                        anchors.left: parent.left;
+                        anchors.leftMargin: 20 * dpiScale;
                         anchors.verticalCenter: parent.verticalCenter;
                         name: dlg.isFolder? "folder" : dlg.isSection? "file-empty" : "video";
                         source: "qrc:/resources/icons/svg/" + (dlg.isFolder? "folder" : dlg.isSection? "file-empty" : "video") + ".svg";
@@ -817,6 +907,7 @@ ResizablePanel {
                 onFolderUrlChanged: {
                     media_library.export_folder = folderUrl.toString();
                     settings.setValue("mediaExportFolder", folderUrl.toString());
+                    root.updateQueuedJobs();
                 }
                 Component.onCompleted: {
                     const saved = settings.value("mediaExportFolder", "");
@@ -834,29 +925,6 @@ ResizablePanel {
             text: qsTr("Empty: the stabilized files are written next to the original files.");
         }
 
-        Label {
-            width: parent.width;
-            visible: root.currentItemId > 0;
-            text: qsTr("Output path:");
-            position: Label.TopPosition;
-            spacing: 2 * dpiScale;
-            t.font.pixelSize: 12 * dpiScale;
-            TextField {
-                id: outputPathField;
-                width: parent.width;
-                height: 28 * dpiScale;
-                font.pixelSize: 12 * dpiScale;
-                property bool preventChange: false;
-                tooltip: qsTr("Relative to the export folder, or an absolute path.");
-                onTextChanged: {
-                    if (!preventChange && root.currentItemId > 0) {
-                        media_library.set_output_path(root.currentItemId, text);
-                        root.updateOutputFile();
-                    }
-                }
-            }
-        }
-
         Item { width: 1; height: 2 * dpiScale; }
 
         Button {
@@ -868,22 +936,64 @@ ResizablePanel {
             enabled: window.videoArea.vid.loaded;
             onClicked: root.applyStabilizationToAll();
         }
-        Button {
-            width: parent.width;
-            height: 34 * dpiScale;
-            accent: true;
-            iconName: "play";
-            icon.width: 15 * dpiScale;
-            icon.height: 15 * dpiScale;
-            font.pixelSize: 13 * dpiScale;
-            text: root.selectedCount > 0? qsTr("Stabilize %1 selected").arg(root.selectedCount) : qsTr("Stabilize selected");
-            enabled: root.selectedCount > 0;
-            onClicked: root.stabilizeSelected();
-        }
 
         // -------------------------------------- Render queue --------------------------------------
 
-        Hr { width: parent.width; visible: queueCol.visible; }
+        Hr { width: parent.width; }
+
+        // Queueing the selection is an explicit action, the button follows what the current selection allows
+        Button {
+            width: parent.width;
+            height: 32 * dpiScale;
+            accent: true;
+            iconName: root.queueableCount > 0? "queue" : "close";
+            icon.width: 14 * dpiScale;
+            icon.height: 14 * dpiScale;
+            font.pixelSize: 12 * dpiScale;
+            enabled: root.queueableCount > 0 || root.queuedSelectedCount > 0;
+            tooltip: qsTr("Select the videos and sections in the list above, then add them to the render queue.");
+            text: root.queueableCount > 0? qsTr("Add %1 selected to the queue").arg(root.queueableCount)
+                : root.queuedSelectedCount > 0? qsTr("Remove %1 selected from the queue").arg(root.queuedSelectedCount)
+                : qsTr("Add selected to the queue");
+            onClicked: if (root.queueableCount > 0) { root.queueSelected(); } else { root.unqueueSelected(); }
+        }
+
+        // Opening the queue and starting or pausing it, without having to open the queue first
+        Row {
+            width: parent.width;
+            spacing: 4 * dpiScale;
+            Button {
+                id: openQueueBtn;
+                width: parent.width - playPauseBtn.width - parent.spacing;
+                height: 30 * dpiScale;
+                iconName: "queue";
+                icon.width: 14 * dpiScale;
+                icon.height: 14 * dpiScale;
+                font.pixelSize: 12 * dpiScale;
+                text: render_queue.queue.rowCount() > 0? qsTr("Render queue (%1)").arg(render_queue.queue.rowCount()) : qsTr("Render queue");
+                onClicked: root.showQueue();
+            }
+            Button {
+                id: playPauseBtn;
+                width: 36 * dpiScale;
+                height: 30 * dpiScale;
+                accent: true;
+                leftPadding: 0; rightPadding: 0;
+                icon.width: 14 * dpiScale;
+                icon.height: 14 * dpiScale;
+                property var statuses: ({
+                    "stopped": ["play",  styleAccentColor, "start", qsTr("Start exporting")],
+                    "paused":  ["play",  "#70e574",        "start", qsTr("Resume")],
+                    "active":  ["pause", "#f6a00b",        "pause", qsTr("Pause")],
+                })
+                iconName:    statuses[render_queue.status][0];
+                accentColor: statuses[render_queue.status][1];
+                tooltip:     statuses[render_queue.status][3];
+                enabled: render_queue.total_frames > 0;
+                Behavior on accentColor { ColorAnimation { duration: 700; easing.type: Easing.OutExpo; } }
+                onClicked: render_queue[statuses[render_queue.status][2]]();
+            }
+        }
 
         Column {
             id: queueCol;
@@ -928,27 +1038,6 @@ ResizablePanel {
                 property real fps: 0;
                 property string fpsText: queueCol.progress > 0? qsTr(" @ %1fps").arg(fps.toFixed(1)) : "";
                 text: qsTr("Elapsed: %1. Remaining: %2").arg(elapsed).arg(render_queue.status == "active"? remaining : "---");
-            }
-
-            Item { width: 1; height: 2 * dpiScale; }
-
-            Button {
-                width: parent.width;
-                height: 30 * dpiScale;
-                accent: true;
-                property var statuses: ({
-                    "stopped": [qsTr("Start exporting"), "play",  styleAccentColor, "start"],
-                    "paused":  [qsTr("Resume"),          "play",  "#70e574",        "start"],
-                    "active":  [qsTr("Pause"),           "pause", "#f6a00b",        "pause"],
-                })
-                text:        statuses[render_queue.status][0];
-                iconName:    statuses[render_queue.status][1];
-                accentColor: statuses[render_queue.status][2];
-                icon.width: 13 * dpiScale;
-                icon.height: 13 * dpiScale;
-                font.pixelSize: 12 * dpiScale;
-                Behavior on accentColor { ColorAnimation { duration: 700; easing.type: Easing.OutExpo; } }
-                onClicked: render_queue[statuses[render_queue.status][3]]();
             }
         }
 
@@ -1125,8 +1214,25 @@ ResizablePanel {
         onDropped: (drop) => media_library.add_dropped(drop.urls.map(x => x.toString()));
     }
 
+    // The queue modal covers the whole window, so it lives next to the main layout and not inside the panel
+    Loader {
+        id: queueModalLoader;
+        active: false;
+        parent: window;
+        anchors.fill: parent;
+        z: 100;
+        asynchronous: true;
+        sourceComponent: Component {
+            RenderQueueModal {
+                onShownChanged: if (!shown) hideTimer.start();
+                Timer { id: hideTimer; interval: 500; onTriggered: queueModalLoader.active = false; }
+            }
+        }
+        onLoaded: item.shown = true;
+    }
+
     Component.onCompleted: {
         if (window.advanced) media_library.default_suffix = window.advanced.defaultSuffix.text;
-        root.selectedCount = media_library.selected_count();
+        root.refreshState();
     }
 }
