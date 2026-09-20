@@ -149,6 +149,12 @@ ResizablePanel {
         if (media_library.get_item_job_status(itemId) == "rendering" || media_library.get_item_job_status(itemId) == "processing") return;
         root.cancelItem(itemId);
     }
+    // Bring a job to the front of the queue and let `start` pick it up as soon as a render slot
+    // is free, instead of rendering it right away regardless of the parallel renders limit.
+    function prioritizeJob(job_id: int): void {
+        render_queue.move_item(job_id, -1000000);
+        render_queue.start();
+    }
     function queueItem(itemId: int): void {
         const jobId = render_queue.add_file(media_library.get_item_url(itemId), "", JSON.stringify(root.jobData(itemId)));
         root.pendingJobs[jobId] = true;
@@ -612,7 +618,7 @@ ResizablePanel {
                     iconName: "play";
                     text: qsTr("Render now");
                     enabled: job_id > 0 && !dlg.isBusy && !dlg.isJobDone;
-                    onTriggered: render_queue.render_job(job_id);
+                    onTriggered: root.prioritizeJob(job_id);
                 }
                 Action {
                     iconName: "pencil";
@@ -733,6 +739,7 @@ ResizablePanel {
                             visible: scanning;
                             height: 16 * dpiScale;
                             width: height;
+                            padding: 0;
                             anchors.verticalCenter: parent.verticalCenter;
                             running: visible;
                         }
