@@ -145,6 +145,7 @@ ResizablePanel {
 
     // A plain click selects one item and loads it, ctrl+click toggles one and shift+click selects a range
     function clickItem(itemId: int, modifiers: int): void {
+        lv.forceActiveFocus();
         if (modifiers & Qt.ShiftModifier) {
             media_library.select_range(root.lastClickedId, itemId);
         } else if (modifiers & Qt.ControlModifier) {
@@ -561,6 +562,19 @@ ResizablePanel {
         clip: true;
         spacing: 2 * dpiScale;
         model: media_library.items;
+        focus: true;
+        Shortcut {
+            sequences: ["Delete", "Backspace"];
+            context: Qt.WidgetWithChildrenShortcut;
+            enabled: root.removableCount > 0;
+            onActivated: root.removeSelected();
+        }
+        Keys.onPressed: (event) => {
+            if (event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace) {
+                if (root.removableCount > 0) root.removeSelected();
+                event.accepted = true;
+            }
+        }
         QQC.ScrollIndicator.vertical: QQC.ScrollIndicator { }
 
         BasicText {
@@ -617,6 +631,7 @@ ResizablePanel {
                 acceptedButtons: Qt.LeftButton;
                 cursorShape: dlg.isFolder? Qt.ArrowCursor : Qt.PointingHandCursor;
                 onClicked: (mouse) => {
+                    lv.forceActiveFocus();
                     if (dlg.isFolder) {
                         if (mouse.modifiers & (Qt.ShiftModifier | Qt.ControlModifier)) {
                             root.clickItem(item_id, mouse.modifiers);
@@ -631,6 +646,7 @@ ResizablePanel {
             ContextMenuMouseArea {
                 // Right clicking an item that isn't part of the selection makes it the selection first
                 onContextMenu: (isHold, mx, my) => {
+                    lv.forceActiveFocus();
                     if (!selected) root.clickItem(item_id, Qt.NoModifier);
                     itemMenu.popup(dlg, mx, my);
                 }
