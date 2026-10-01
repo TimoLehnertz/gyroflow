@@ -1066,7 +1066,8 @@ Item {
                     iconName: "fov-overview";
                     checked: false;
                     visible: window.stabilizationEnabled;
-                    onVisibleChanged: if (!visible) checked = false;
+                    // Don't use onVisibleChanged: effective visibility also changes when the parent is hidden (e.g. in full screen)
+                    Connections { target: window; function onStabilizationEnabledChanged(): void { if (!window.stabilizationEnabled) fovOverviewBtn.checked = false; } }
                     onCheckedChanged: { controller.fov_overview = checked; vid.forceRedraw(); }
                     tooltip: qsTr("Toggle stabilization overview");
                     TapHandler {
@@ -1079,7 +1080,8 @@ Item {
                     id: stabEnabledBtn;
                     iconName: "gyroflow";
                     visible: window.stabilizationEnabled;
-                    onVisibleChanged: if (!visible) checked = false;
+                    // Don't use onVisibleChanged: effective visibility also changes when the parent is hidden (e.g. in full screen)
+                    Connections { target: window; function onStabilizationEnabledChanged(): void { if (!window.stabilizationEnabled) stabEnabledBtn.checked = false; } }
                     onCheckedChanged: { controller.stab_enabled = checked; vid.forceRedraw(); vid.fovChanged(); }
                     tooltip: qsTr("Toggle stabilization");
                 }
