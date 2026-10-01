@@ -211,13 +211,19 @@ ResizablePanel {
         media_library.set_item_job(itemId, jobId);
         root.ownJobs[jobId] = true;
     }
-    // Render settings of the job, with the output path and the settings hash of this item
+    // Render settings of the job, with the export settings, the output path and the settings hash of this item
     function jobData(itemId: int): var {
         let ad = JSON.parse(JSON.stringify(window.getAdditionalProjectData()));
         ad.output = ad.output || ({ });
-        // Every video is rendered in its own resolution
-        delete ad.output.output_width;
-        delete ad.output.output_height;
+        const isLoaded = media_library.current_item == itemId && window.videoArea.vid.loaded && !window.videoArea.videoLoader.active;
+        const saved = isLoaded? "" : media_library.get_output_settings(itemId);
+        if (saved) {
+            ad.output = JSON.parse(saved);
+        } else if (!isLoaded) {
+            // Not configured yet, use the current export settings, but every video is rendered in its own resolution
+            delete ad.output.output_width;
+            delete ad.output.output_height;
+        }
         ad.output.output_folder   = media_library.get_output_folder(itemId);
         ad.output.output_filename = media_library.get_output_filename(itemId);
         ad.output.metadata = Object.assign({ }, ad.output.metadata || { }, { stabilization_hash: media_library.settings_hash(itemId) });

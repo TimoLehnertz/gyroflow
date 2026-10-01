@@ -162,6 +162,7 @@ pub struct MediaLibrary {
     get_settings_for_job: qt_method!(fn(&self, job_id: u32) -> QString),
     apply_stabilization_to_all: qt_method!(fn(&mut self, data: QString, except_item_id: u32) -> usize),
     settings_hash: qt_method!(fn(&self, item_id: u32) -> QString),
+    get_output_settings: qt_method!(fn(&self, item_id: u32) -> QString),
 
     get_output_path: qt_method!(fn(&self, item_id: u32) -> QString),
     get_output_folder: qt_method!(fn(&self, item_id: u32) -> QString),
@@ -1156,7 +1157,8 @@ impl MediaLibrary {
         }
         let mut obj = parsed.unwrap_or_else(|| serde_json::json!({ "title": "Gyroflow data file", "version": 4 }));
         if let serde_json::Value::Object(ref mut o) = obj {
-            o.remove("output"); // The output path is managed by the media library
+            // The output path is managed by the media library, but the other export settings (resolution, codec etc.) belong to the item
+            if let Some(output) = o.get_mut("output") { Self::strip_output_path(output); }
             if as_preset {
                 o.remove("videofile");
                 o.remove("videofile_bookmark");
@@ -1177,6 +1179,24 @@ impl MediaLibrary {
             }
         }
         Some(obj.to_string())
+    }
+
+    fn strip_output_path(output: &mut serde_json::Value) {
+        if let serde_json::Value::Object(output) = output {
+            for k in ["output_path", "output_folder", "output_filename", "output_folder_bookmark"] {
+                output.remove(k);
+            }
+        }
+    }
+    /// Export settings saved with the item, without the output path. Empty if the item wasn't configured yet
+    pub fn get_output_settings(&self, item_id: u32) -> QString {
+        self.item_settings(item_id)
+            .and_then(|(_, s, _, _)| s.as_ref())
+            .and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok())
+            .and_then(|x| x.get("output").cloned())
+            .filter(|x| x.is_object())
+            .map(|mut x| { Self::strip_output_path(&mut x); QString::from(x.to_string()) })
+            .unwrap_or_default()
     }
 
     /// Applies the stabilization settings (and only those) to all videos and sections in the library
