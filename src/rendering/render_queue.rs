@@ -1693,10 +1693,16 @@ impl RenderQueue {
                         }
                     }
 
+                    // Only update the settings here. The smoothing and zooming are recomputed when the job starts rendering anyway,
+                    // so a blocking import would just stall the UI for every queued job
                     let mut is_preset = false;
-                    if let Err(e) = job.stab.import_gyroflow_data(&data_vec, true, None, |_|(), Arc::new(AtomicBool::new(false)), &mut is_preset, false) {
+                    if let Err(e) = job.stab.import_gyroflow_data(&data_vec, false, None, |_|(), Arc::new(AtomicBool::new(false)), &mut is_preset, false) {
                         ::log::error!("Failed to update queue stab data: {:?}", e);
                     }
+                    job.stab.recompute_gyro();
+                    // The render options are the source of the output size, the stabilizer needs it for the FOV and zooming
+                    job.stab.set_output_size(job.render_options.output_width, job.render_options.output_height);
+                    job.stab.init_size();
 
                     Self::update_sync_settings(&job.stab, &sync_options);
                     job.project_data = Self::get_gyroflow_data_internal(&job.stab, &job.additional_data, &job.render_options);

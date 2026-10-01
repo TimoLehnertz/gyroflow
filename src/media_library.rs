@@ -161,6 +161,7 @@ pub struct MediaLibrary {
     get_project_data: qt_method!(fn(&self, item_id: u32) -> QString),
     get_settings_for_job: qt_method!(fn(&self, job_id: u32) -> QString),
     apply_stabilization_to_all: qt_method!(fn(&mut self, data: QString, except_item_id: u32) -> usize),
+    apply_settings_to_queued: qt_method!(fn(&mut self, data: QString) -> QVariantList),
     settings_hash: qt_method!(fn(&self, item_id: u32) -> QString),
     get_output_settings: qt_method!(fn(&self, item_id: u32) -> QString),
 
@@ -1239,6 +1240,58 @@ impl MediaLibrary {
             self.refresh_job_hash(id);
         }
         count
+    }
+
+    /// Applies the settings selected in the "Apply to render queue" dialog to the items waiting in the render queue,
+    /// so their jobs aren't reverted when they are synced with the library again. Returns the ids of the changed items
+    pub fn apply_settings_to_queued(&mut self, data: QString) -> QVariantList {
+        let mut new_data = match serde_json::from_str::<serde_json::Value>(&data.to_string()) {
+            Ok(v) if v.is_object() => v,
+            _ => return QVariantList::default()
+        };
+        // The output path is managed by the media library
+        if let Some(output) = new_data.get_mut("output") { Self::strip_output_path(output); }
+
+        fn apply(settings: &mut Option<String>, url: &str, new_data: &serde_json::Value) {
+            let mut obj = settings.as_ref()
+                .and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok())
+                .filter(|x| x.is_object())
+                .unwrap_or_else(|| serde_json::json!({ "title": "Gyroflow data file", "version": 4, "videofile": url }));
+            if let (serde_json::Value::Object(obj), serde_json::Value::Object(new_data)) = (&mut obj, new_data) {
+                for (k, v) in new_data {
+                    if k == "version" { continue; }
+                    match (obj.get_mut(k), v) {
+                        // Groups only contain the selected fields, so replace those and keep the others.
+                        // Values are replaced as a whole, so arrays like the trim ranges aren't merged
+                        (Some(serde_json::Value::Object(group)), serde_json::Value::Object(fields)) if ["video_info", "gyro_source", "synchronization", "stabilization", "output"].contains(&k.as_str()) => {
+                            for (fk, fv) in fields { group.insert(fk.clone(), fv.clone()); }
+                        },
+                        _ => { obj.insert(k.clone(), v.clone()); }
+                    }
+                }
+            }
+            *settings = Some(obj.to_string());
+        }
+
+        let mut ids = Vec::new();
+        for v in self.all_videos_mut() {
+            let url = v.url.clone();
+            if v.job.job_id > 0 && (v.job.status == "queued" || v.job.status == "processing") {
+                apply(&mut v.settings, &url, &new_data);
+                ids.push(v.id);
+            }
+            for s in v.sections.iter_mut() {
+                if s.job.job_id > 0 && (s.job.status == "queued" || s.job.status == "processing") {
+                    apply(&mut s.settings, &url, &new_data);
+                    ids.push(s.id);
+                }
+            }
+        }
+        for &id in &ids {
+            self.update_stabilized_row(id);
+            self.refresh_job_hash(id);
+        }
+        QVariantList::from_iter(ids)
     }
 
     fn effective_stabilization(settings: &Option<String>) -> serde_json::Value {

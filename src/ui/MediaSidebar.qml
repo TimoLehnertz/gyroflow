@@ -241,6 +241,23 @@ ResizablePanel {
     function updateQueuedJobs(): void {
         for (const id of media_library.get_render_items(false)) root.updateQueuedJob(id);
     }
+    // "Apply settings to render queue": the jobs of the library items are synced from the item settings,
+    // so those are updated instead of the jobs directly, otherwise the next sync would revert them
+    function applySettingsToQueue(data: var): void {
+        const json = JSON.stringify(data);
+        const folder = data.output && data.output.output_folder;
+        let libraryJobs = ({ });
+        for (const id of media_library.apply_settings_to_queued(json)) {
+            if (folder) media_library.set_output_url(id, folder, media_library.get_output_filename(id));
+            libraryJobs[media_library.get_item_job(id)] = true;
+            root.updateQueuedJob(id);
+        }
+        // Jobs that were added outside of the library
+        const additionalData = window.getAdditionalProjectDataJson();
+        for (const jobId of render_queue.get_job_ids()) {
+            if (!libraryJobs[jobId] && !media_library.is_library_job(jobId)) render_queue.apply_to_all(json, additionalData, jobId);
+        }
+    }
 
     // A new section starts with the trim range of the main view if this video is loaded there, otherwise with the whole video
     function addSection(videoId: int, fromItemId: int): void {

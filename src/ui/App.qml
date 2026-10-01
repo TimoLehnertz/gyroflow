@@ -451,7 +451,7 @@ Rectangle {
                                         tf.focus = true;
                                     }
                                 } else { // Apply
-                                    render_queue.apply_to_all(JSON.stringify(finalData), window.getAdditionalProjectDataJson(), 0);
+                                    mediaPanel.applySettingsToQueue(finalData);
                                 }
                             });
                         }
