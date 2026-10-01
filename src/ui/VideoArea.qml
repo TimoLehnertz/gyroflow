@@ -433,14 +433,17 @@ Item {
         render_queue.editing_job_id = 0;
         controller.load_video(url, vid);
         if (!isCalibrator) {
-            const suffix = window.advanced.defaultSuffix.text;
-            window.outputFile.setFilename(filesystem.filename_with_suffix(filename, suffix).replace(/%0[0-9]+d/, ""));
+            // The output path of a video in the media library is managed there
+            if (!window.outputFile.pathMode) {
+                const suffix = window.advanced.defaultSuffix.text;
+                window.outputFile.setFilename(filesystem.filename_with_suffix(filename, suffix).replace(/%0[0-9]+d/, ""));
 
-            const preservedPath = settings.value("preservedOutputPath", "");
-            if (window.exportSettings.preserveOutputPath.checked && preservedPath) {
-                window.outputFile.setFolder(preservedPath);
-            } else {
-                window.outputFile.setFolder(folder);
+                const preservedPath = settings.value("preservedOutputPath", "");
+                if (window.exportSettings.preserveOutputPath.checked && preservedPath) {
+                    window.outputFile.setFolder(preservedPath);
+                } else {
+                    window.outputFile.setFolder(folder);
+                }
             }
             window.exportSettings.updateCodecParams();
         }

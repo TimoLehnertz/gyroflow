@@ -28,8 +28,12 @@ TextField {
 
     // In path mode the field shows and edits a path that is managed elsewhere (the media library).
     // That path is relative to the export folder by default and absolute when a folder is picked.
+    // Changes made by the app (a new extension, a renamed file etc.) go through the owner of the path as well,
+    // otherwise they'd only be shown here and the next load of the item would bring back the old path.
     property bool pathMode: false;
     signal pathEdited(path: string);
+    // The owner resolves the path again, eg. with the extension of a new codec
+    signal resolveRequested();
 
     onTextChanged: {
         // When typing manually
@@ -77,6 +81,10 @@ TextField {
     }
 
     function setUrl(url: url): void {
+        if (root.pathMode) {
+            root.setPathFromDialog(filesystem.url_to_path(url));
+            return;
+        }
         fullFileUrl = url;
         filename = filesystem.get_filename(url);
         folderUrl = filesystem.get_folder(url);
@@ -84,12 +92,22 @@ TextField {
     }
     function setFilename(fname: string): void {
         if (fname != filename) {
+            if (root.pathMode) {
+                // Keep the folder part of the path as it's written
+                const pos = Math.max(text.lastIndexOf("/"), text.lastIndexOf("\\"));
+                root.setPathFromDialog(text.substring(0, pos + 1) + fname);
+                return;
+            }
             filename = fname;
             fullFileUrl = "";
             updateText();
         }
     }
     function setFolder(folder: url): void {
+        if (root.pathMode) {
+            if (folder.toString()) root.setPathFromDialog(filesystem.url_to_path(filesystem.get_file_url(folder, filename, false)));
+            return;
+        }
         folderUrl = folder;
         if (folder.toString())
             fullFileUrl = "";

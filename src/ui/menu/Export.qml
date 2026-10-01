@@ -214,6 +214,13 @@ MenuItem {
     function loadGyroflow(obj: var): void {
         const output = obj.output || { };
         if (output && Object.keys(output).length > 0) {
+            // The output path of a video in the media library is managed there (relative to the export folder by default),
+            // so presets and project files don't change it
+            if (window.outputFile.pathMode) {
+                delete output.output_path;
+                delete output.output_folder;
+                delete output.output_filename;
+            }
             if (output.output_path) {
                 // Backwards compatibility
                 if (window.outputFile.filename && output.output_path.endsWith("/") || output.output_path.endsWith("\\")) {
@@ -281,6 +288,8 @@ MenuItem {
         visible: root.stabilizationEnabled;
         currentIndex: 1;
         function updateExtension(ext: string): void {
+            // The media library adds the extension to the output path itself
+            if (window.outputFile.pathMode) { window.outputFile.resolveRequested(); return; }
             window.outputFile.setFilename(window.outputFile.filename.replace(/(_%[0-9d]+)?\.[a-z0-9]+$/i, ext));
         }
         function updateGpuStatus(): void {

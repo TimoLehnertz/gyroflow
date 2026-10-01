@@ -167,7 +167,7 @@ pub struct MediaLibrary {
 
     get_output_path: qt_method!(fn(&self, item_id: u32) -> QString),
     get_output_folder: qt_method!(fn(&self, item_id: u32) -> QString),
-    get_output_filename: qt_method!(fn(&self, item_id: u32) -> QString),
+    get_output_filename: qt_method!(fn(&self, item_id: u32, ext: QString) -> QString),
     set_output_path: qt_method!(fn(&mut self, item_id: u32, path: QString)),
     set_output_url: qt_method!(fn(&mut self, item_id: u32, folder: QString, filename: QString)),
 
@@ -232,9 +232,9 @@ impl MediaLibrary {
         if search.is_empty() { return true; }
         if v.filename.to_lowercase().contains(&search) { return true; }
         if v.timeline_markers.iter().any(|m| m.name.to_lowercase().contains(&search)) { return true; }
-        if self.output_filename_of(&v.url, &v.output_path).to_lowercase().contains(&search) { return true; }
+        if self.output_filename_of(&v.url, &v.output_path, &v.settings).to_lowercase().contains(&search) { return true; }
         v.sections.iter().any(|s| {
-            s.name.to_lowercase().contains(&search) || self.output_filename_of(&v.url, &s.output_path).to_lowercase().contains(&search)
+            s.name.to_lowercase().contains(&search) || self.output_filename_of(&v.url, &s.output_path, &s.settings).to_lowercase().contains(&search)
         })
     }
 
@@ -249,7 +249,7 @@ impl MediaLibrary {
     }
 
     fn video_to_item(&self, v: &Video, parent_id: u32, depth: i32) -> MediaItem {
-        let (folder, filename) = self.resolve_output(&v.url, &v.output_path);
+        let (folder, filename) = self.resolve_output(&v.url, &v.output_path, &v.settings, None);
         MediaItem {
             item_id: v.id,
             parent_id,
@@ -280,7 +280,7 @@ impl MediaLibrary {
         }
     }
     fn section_to_item(&self, s: &Section, v: &Video, depth: i32) -> MediaItem {
-        let (folder, filename) = self.resolve_output(&v.url, &s.output_path);
+        let (folder, filename) = self.resolve_output(&v.url, &s.output_path, &s.settings, None);
         MediaItem {
             item_id: s.id,
             parent_id: v.id,
@@ -713,9 +713,9 @@ impl MediaLibrary {
     pub fn refresh_outputs(&mut self) {
         let mut to_check = Vec::new();
         for v in self.all_videos() {
-            to_check.push((v.id, self.resolve_output(&v.url, &v.output_path)));
+            to_check.push((v.id, self.resolve_output(&v.url, &v.output_path, &v.settings, None)));
             for s in &v.sections {
-                to_check.push((s.id, self.resolve_output(&v.url, &s.output_path)));
+                to_check.push((s.id, self.resolve_output(&v.url, &s.output_path, &s.settings, None)));
             }
         }
         if to_check.is_empty() { return; }
@@ -1034,16 +1034,8 @@ impl MediaLibrary {
             let settings = v.sections.last().map(|s| s.settings.clone()).unwrap_or_else(|| v.settings.clone());
             let num = v.sections.len() + 1;
             let default_path = Self::filename_with_index(&Self::default_output_filename(&v.filename, &suffix), num);
-            let named_path = name.as_ref().filter(|n| !n.trim().is_empty()).map(|name| {
-                let mut filename = name.trim().replace(['/', '\\'], "_");
-                if std::path::Path::new(&filename).extension().is_none() {
-                    if let Some(ext) = std::path::Path::new(&v.filename).extension().and_then(|x| x.to_str()) {
-                        filename.push('.');
-                        filename.push_str(ext);
-                    }
-                }
-                filename
-            });
+            // The extension is added when the path is resolved, it follows the codec
+            let named_path = name.as_ref().filter(|n| !n.trim().is_empty()).map(|name| name.trim().replace(['/', '\\'], "_"));
             v.expanded = true;
             v.sections.push(Section {
                 id,
@@ -1336,14 +1328,38 @@ impl MediaLibrary {
     // --------------------------------------- Output paths ----------------------------------------
     // ---------------------------------------------------------------------------------------------
 
+    /// Just the name of the video with the suffix, so it's relative to the export folder and the extension follows the codec
     fn default_output_filename(input_filename: &str, suffix: &str) -> String {
-        filesystem::filename_with_suffix(input_filename, suffix)
+        let stem = input_filename.rfind('.').map_or(input_filename, |pos| &input_filename[..pos]);
+        format!("{stem}{suffix}")
     }
     fn filename_with_index(filename: &str, index: usize) -> String {
-        match filename.rfind('.') {
-            Some(pos) => format!("{}_{}{}", &filename[..pos], index, &filename[pos..]),
-            None => format!("{filename}_{index}")
+        format!("{filename}_{index}")
+    }
+    /// Extension of the rendered file, from the export settings saved with the item
+    fn output_extension(input_url: &str, settings: &Option<String>) -> String {
+        #[derive(serde::Deserialize)]
+        struct Settings { output: Option<serde_json::Value> }
+        let mut options = rendering::render_queue::RenderOptions::default();
+        if let Some(output) = settings.as_ref().and_then(|x| serde_json::from_str::<Settings>(x).ok()).and_then(|x| x.output) {
+            options.update_from_json(&output);
         }
+        options.output_extension(&filesystem::get_filename(input_url), None)
+    }
+    /// The extension of the output path is replaced with the one of the codec, so it's always valid for the export settings
+    fn with_output_extension(filename: &str, input_url: &str, ext: &str) -> String {
+        let input_filename = filesystem::get_filename(input_url);
+        let input_ext = input_filename.rfind('.').map(|pos| input_filename[pos + 1..].to_ascii_lowercase()).unwrap_or_default();
+        let mut stem = filename;
+        if let Some(pos) = filename.rfind('.') {
+            let current = filename[pos + 1..].to_ascii_lowercase();
+            if ["mp4", "mov", "mxf", "mkv", "avi", "m4v", "exr", "png"].contains(&current.as_str()) || current == input_ext {
+                stem = &filename[..pos];
+                // Frame number pattern of image sequences
+                if let Some(p) = stem.rfind("_%0").filter(|&p| stem[p..].ends_with('d')) { stem = &stem[..p]; }
+            }
+        }
+        format!("{stem}{ext}")
     }
     fn output_path_or_default(&self, input_url: &str, output_path: &str) -> String {
         if output_path.is_empty() {
@@ -1352,36 +1368,45 @@ impl MediaLibrary {
             output_path.to_owned()
         }
     }
-    fn output_filename_of(&self, input_url: &str, output_path: &str) -> String {
-        self.resolve_output(input_url, output_path).1
+    fn output_filename_of(&self, input_url: &str, output_path: &str, settings: &Option<String>) -> String {
+        self.resolve_output(input_url, output_path, settings, None).1
     }
-    /// The output path can be either absolute, or relative to the export folder (which defaults to the input folder)
-    fn resolve_output(&self, input_url: &str, output_path: &str) -> (String, String) {
+    /// The output path can be either absolute, or relative to the export folder (which defaults to the input folder).
+    /// The extension comes from `ext` if given, otherwise from the export settings of the item
+    fn resolve_output(&self, input_url: &str, output_path: &str, settings: &Option<String>, ext: Option<&str>) -> (String, String) {
         let path = self.output_path_or_default(input_url, output_path);
+        let ext = ext.map(|x| x.to_owned()).unwrap_or_else(|| Self::output_extension(input_url, settings));
         let is_absolute = path.starts_with('/') || path.contains("://") || path.get(1..3).map_or(false, |x| x == ":/" || x == ":\\");
-        if is_absolute {
+        let (folder, filename) = if is_absolute {
             let url = if path.contains("://") { path } else { filesystem::path_to_url(&path) };
-            return (filesystem::get_folder(&url), filesystem::get_filename(&url));
-        }
-        let base = if self.export_folder.is_empty() { filesystem::get_folder(input_url) } else { self.export_folder.to_string() };
-        if !path.contains('/') && !path.contains('\\') {
-            return (base, path);
-        }
-        let mut full = filesystem::url_to_path(&base);
-        if !full.ends_with('/') && !full.ends_with('\\') { full.push('/'); }
-        full.push_str(&path.replace('\\', "/"));
-        let url = filesystem::path_to_url(&full);
-        (filesystem::get_folder(&url), filesystem::get_filename(&url))
+            (filesystem::get_folder(&url), filesystem::get_filename(&url))
+        } else {
+            let base = if self.export_folder.is_empty() { filesystem::get_folder(input_url) } else { self.export_folder.to_string() };
+            if !path.contains('/') && !path.contains('\\') {
+                (base, path)
+            } else {
+                let mut full = filesystem::url_to_path(&base);
+                if !full.ends_with('/') && !full.ends_with('\\') { full.push('/'); }
+                full.push_str(&path.replace('\\', "/"));
+                let url = filesystem::path_to_url(&full);
+                (filesystem::get_folder(&url), filesystem::get_filename(&url))
+            }
+        };
+        let filename = Self::with_output_extension(&filename, input_url, &ext);
+        (folder, filename)
     }
 
     pub fn get_output_path(&self, item_id: u32) -> QString {
         self.item_settings(item_id).map(|(url, _, path, _)| QString::from(self.output_path_or_default(url, path))).unwrap_or_default()
     }
     pub fn get_output_folder(&self, item_id: u32) -> QString {
-        self.item_settings(item_id).map(|(url, _, path, _)| QString::from(self.resolve_output(url, path).0)).unwrap_or_default()
+        self.item_settings(item_id).map(|(url, settings, path, _)| QString::from(self.resolve_output(url, path, settings, None).0)).unwrap_or_default()
     }
-    pub fn get_output_filename(&self, item_id: u32) -> QString {
-        self.item_settings(item_id).map(|(url, _, path, _)| QString::from(self.resolve_output(url, path).1)).unwrap_or_default()
+    /// The extension follows `ext` (the codec selected in the main view) or, if it's empty, the export settings saved with the item
+    pub fn get_output_filename(&self, item_id: u32, ext: QString) -> QString {
+        let ext = ext.to_string();
+        let ext = Some(ext.as_str()).filter(|x| !x.is_empty());
+        self.item_settings(item_id).map(|(url, settings, path, _)| QString::from(self.resolve_output(url, path, settings, ext).1)).unwrap_or_default()
     }
     pub fn set_output_path(&mut self, item_id: u32, path: QString) {
         let path = path.to_string();
@@ -1683,5 +1708,27 @@ impl MediaLibrary {
         self.all_videos().map(|v| {
             (if v.job.is_active() { 1 } else { 0 }) + v.sections.iter().filter(|s| s.job.is_active()).count()
         }).sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MediaLibrary;
+
+    #[test]
+    fn default_output_path_is_relative_without_extension() {
+        assert_eq!(MediaLibrary::default_output_filename("C0001.MP4", "_stabilized"), "C0001_stabilized");
+        assert_eq!(MediaLibrary::default_output_filename("my.clip.mov", "_stabilized"), "my.clip_stabilized");
+        assert_eq!(MediaLibrary::filename_with_index("my.clip_stabilized", 2), "my.clip_stabilized_2");
+    }
+
+    #[test]
+    fn output_extension_follows_the_codec() {
+        let input = "file:///videos/my.clip.MP4";
+        assert_eq!(MediaLibrary::with_output_extension("my.clip_stabilized", input, ".mov"), "my.clip_stabilized.mov");
+        assert_eq!(MediaLibrary::with_output_extension("out.mp4", input, ".mov"), "out.mov");
+        assert_eq!(MediaLibrary::with_output_extension("out.MP4", input, ".mp4"), "out.mp4");
+        assert_eq!(MediaLibrary::with_output_extension("out_%05d.png", input, ".mp4"), "out.mp4");
+        assert_eq!(MediaLibrary::with_output_extension("out", input, "_%05d.exr"), "out_%05d.exr");
     }
 }

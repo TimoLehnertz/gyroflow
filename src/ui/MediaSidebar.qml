@@ -66,8 +66,9 @@ ResizablePanel {
     function loadItem(itemId: int): void {
         if (itemId <= 0 || itemId == media_library.current_item) return;
         root.saveCurrentSettings();
-        root.updatingOutput = true;
         media_library.set_current_item(itemId);
+        // Show the path of the item before loading, so the video area leaves the output path to the library
+        root.updateOutputFile();
 
         const data = media_library.get_project_data(itemId);
         if (data) {
@@ -75,19 +76,23 @@ ResizablePanel {
         } else {
             window.videoArea.loadFile(media_library.get_item_url(itemId), true);
         }
-        root.updateOutputFile();
     }
 
     // The output path of the item loaded in the main view is edited in the bottom bar. It's stored as
     // written there: relative to the export folder by default, or absolute if the user picks a folder.
     property bool updatingOutput: false;
+    // The item in the main view is resolved with the extension of the codec selected there, which isn't saved with the item yet
+    function outputFilename(itemId: int): string {
+        const ext = itemId == media_library.current_item && window.exportSettings? window.exportSettings.currentExtension() : "";
+        return media_library.get_output_filename(itemId, ext);
+    }
     function updateOutputFile(): void {
         const id = media_library.current_item;
         // Don't type over the field while the user is editing it
         if (!window.outputFile || root.updatingOutput) return;
         root.updatingOutput = true;
         if (id > 0) {
-            window.outputFile.setResolvedPath(media_library.get_output_folder(id), media_library.get_output_filename(id), media_library.get_output_path(id));
+            window.outputFile.setResolvedPath(media_library.get_output_folder(id), root.outputFilename(id), media_library.get_output_path(id));
         }
         window.outputFile.pathMode = id > 0;
         root.updatingOutput = false;
@@ -98,13 +103,17 @@ ResizablePanel {
         if (root.updatingOutput || id <= 0) return;
         root.updatingOutput = true;
         media_library.set_output_path(id, path);
-        window.outputFile.setResolvedPath(media_library.get_output_folder(id), media_library.get_output_filename(id), "");
+        window.outputFile.setResolvedPath(media_library.get_output_folder(id), root.outputFilename(id), "");
         root.updatingOutput = false;
         root.updateQueuedJob(id);
     }
     Connections {
         target: window.outputFile;
         function onPathEdited(path: string): void { root.pushOutputToItem(path); }
+        function onResolveRequested(): void {
+            const id = media_library.current_item;
+            if (id > 0) window.outputFile.setResolvedPath(media_library.get_output_folder(id), root.outputFilename(id), "");
+        }
     }
 
     property string pendingMarkerFile: "";
@@ -225,7 +234,7 @@ ResizablePanel {
             delete ad.output.output_height;
         }
         ad.output.output_folder   = media_library.get_output_folder(itemId);
-        ad.output.output_filename = media_library.get_output_filename(itemId);
+        ad.output.output_filename = isLoaded? root.outputFilename(itemId) : media_library.get_output_filename(itemId, "");
         ad.output.metadata = Object.assign({ }, ad.output.metadata || { }, { stabilization_hash: media_library.settings_hash(itemId) });
         return ad;
     }
@@ -248,7 +257,7 @@ ResizablePanel {
         const folder = data.output && data.output.output_folder;
         let libraryJobs = ({ });
         for (const id of media_library.apply_settings_to_queued(json)) {
-            if (folder) media_library.set_output_url(id, folder, media_library.get_output_filename(id));
+            if (folder) media_library.set_output_url(id, folder, media_library.get_output_filename(id, ""));
             libraryJobs[media_library.get_item_job(id)] = true;
             root.updateQueuedJob(id);
         }
@@ -461,14 +470,16 @@ ResizablePanel {
         }
     }
 
-    // The main view can also be loaded from outside of the sidebar, in that case follow the loaded file
+    // The main view can also be loaded from outside of the sidebar, in that case follow the loaded file.
+    // It's added to the list if needed, so its output path is managed (and kept) by the library like any other.
+    // This happens before the video area sets up the output path for the new file, so it leaves it to the library.
     Connections {
         target: window.videoArea;
         function onLoadedFileUrlChanged(): void {
             const url = window.videoArea.loadedFileUrl.toString();
             if (!media_library.is_item_url(media_library.current_item, url)) {
                 root.saveCurrentSettings();
-                media_library.set_current_item(media_library.find_by_url(url));
+                if (root.loadedItem() <= 0) media_library.set_current_item(0);
             }
         }
     }
@@ -754,7 +765,7 @@ ResizablePanel {
                     iconName: "play";
                     text: qsTr("Open rendered file");
                     enabled: !dlg.isFolder && stabilized_state > 0 && Qt.platform.os != "ios";
-                    onTriggered: filesystem.open_file_externally(filesystem.get_file_url(media_library.get_output_folder(item_id), media_library.get_output_filename(item_id), false));
+                    onTriggered: filesystem.open_file_externally(filesystem.get_file_url(media_library.get_output_folder(item_id), media_library.get_output_filename(item_id, ""), false));
                 }
                 Action {
                     iconName: "folder";

@@ -147,6 +147,25 @@ impl RenderOptions {
         metadata.set("comment", &comment);
         metadata
     }
+    /// Extension of the rendered file, including the frame number pattern of image sequences
+    pub fn output_extension(&self, input_filename: &str, override_ext: Option<&str>) -> String {
+        // Trim-only export copies the streams, so keep the original container
+        if self.disable_stabilization {
+            if let Some(pos) = input_filename.rfind('.') {
+                return input_filename[pos..].to_owned();
+            }
+        }
+        let ext = override_ext.unwrap_or(match self.codec.as_ref() {
+            "ProRes"        => ".mov",
+            "DNxHD"         => ".mov",
+            "CineForm"      => ".mov",
+            "EXR Sequence"  => "_%05d.exr",
+            "PNG Sequence"  => "_%05d.png",
+            _ => ".mp4"
+        });
+        if ext == ".mp4" && self.preserve_other_tracks { ".mov".to_owned() } else { ext.to_owned() }
+    }
+
     pub fn update_from_json(&mut self, obj: &serde_json::Value) {
         if let serde_json::Value::Object(obj) = obj {
             if let Some(v) = obj.get("codec")          .and_then(|x| x.as_str())  { self.codec = v.to_string(); }
@@ -1164,23 +1183,8 @@ impl RenderQueue {
             return render_options.output_filename.to_owned();
         }
         let mut filename = filesystem::get_filename(input_url);
-
-        let mut ext = override_ext.unwrap_or(match render_options.codec.as_ref() {
-            "ProRes"        => ".mov",
-            "DNxHD"         => ".mov",
-            "CineForm"      => ".mov",
-            "EXR Sequence"  => "_%05d.exr",
-            "PNG Sequence"  => "_%05d.png",
-            _ => ".mp4"
-        }).to_owned();
-        if ext == ".mp4" && render_options.preserve_other_tracks {
-            ext = ".mov".to_owned();
-        }
+        let ext = render_options.output_extension(&filename, override_ext);
         if let Some(pos) = filename.rfind('.') {
-            // Trim-only export copies the streams, so keep the original container
-            if render_options.disable_stabilization {
-                ext = filename[pos..].to_owned();
-            }
             filename = filename[..pos].to_owned();
         }
 
