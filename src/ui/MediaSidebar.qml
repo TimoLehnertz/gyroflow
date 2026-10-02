@@ -391,6 +391,21 @@ ResizablePanel {
         if (index >= 0) lv.positionViewAtIndex(index, ListView.Contain);
         return itemId;
     }
+    // The output files of the video loaded in the main view, with its current settings: one per trim range
+    // if they are exported as separate videos. Empty if it's not a video of the library
+    function loadedOutputs(): var {
+        const itemId = root.loadedItem();
+        if (itemId <= 0) return [];
+        root.saveCurrentSettings();
+        return JSON.parse(media_library.get_item_outputs(itemId, root.outputExtension(itemId)));
+    }
+    // "Stabilize now" renders the main view in one job, split it into one job per output file like the queue does.
+    // Returns the ids of the jobs, in the order of the trim ranges
+    function splitDirectJob(jobId: int): var {
+        const outputs = root.loadedOutputs();
+        if (outputs.length <= 1 && (!outputs.length || outputs[0].range_index < 0)) return [jobId];
+        return render_queue.split_job_by_ranges(jobId, JSON.stringify(outputs));
+    }
     function unqueueLoadedFile(): void {
         const itemId = root.loadedItem();
         if (itemId > 0) root.unqueueItem(itemId);

@@ -259,8 +259,10 @@ Rectangle {
                         property bool allowSync: false;
                         // "queue" adds it to the render queue, "now" renders it right away, overruling the queue
                         property string pendingAction: "queue";
-                        // Job started by "Stabilize now" and the queue state to restore when it's done
+                        // Job started by "Stabilize now" and the queue state to restore when it's done.
+                        // With trim ranges exported as separate videos, the jobs of the other ranges render after it
                         property int directJobId: 0;
+                        property var directNextJobs: [];
                         property bool resumeQueueAfter: false;
 
                         readonly property bool canExport: window.videoArea.vid.loaded && outputFile.filename.length > 3
@@ -287,7 +289,25 @@ Rectangle {
                         }
                         function stabilizeNow(): void { renderBtn.startAction("now"); }
                         // The direct render is done, let the queue continue where it was paused
+                        // Cancelled: the files of the other trim ranges aren't rendered either
+                        function cancelDirectRender(): void {
+                            for (const jobId of renderBtn.directNextJobs) render_queue.remove(jobId);
+                            renderBtn.directNextJobs = [];
+                            renderBtn.directRenderFinished();
+                        }
+                        // Hidden: it keeps rendering in the queue, and so do the files of the other trim ranges
+                        function hideDirectRender(): void {
+                            renderBtn.directNextJobs = [];
+                            renderBtn.directRenderFinished();
+                        }
                         function directRenderFinished(): void {
+                            if (renderBtn.directNextJobs.length) {
+                                const next = renderBtn.directNextJobs.shift();
+                                renderBtn.directJobId = next;
+                                render_queue.main_job_id = next;
+                                render_queue.render_job(next);
+                                return;
+                            }
                             renderBtn.directJobId = 0;
                             if (renderBtn.resumeQueueAfter) {
                                 renderBtn.resumeQueueAfter = false;
@@ -324,7 +344,10 @@ Rectangle {
                                 ]);
                                 return;
                             }
-                            const exists = filesystem.exists_in_folder(outputFile.folderUrl, outputFile.filename.replace("_%05d", "_00001"));
+                            // With trim ranges exported as separate videos, the bottom bar shows only the file of the active range
+                            const outputs = renderBtn.pendingAction == "now"? mediaPanel.loadedOutputs() : [];
+                            const exists = filesystem.exists_in_folder(outputFile.folderUrl, outputFile.filename.replace("_%05d", "_00001"))
+                                        || outputs.some(x => filesystem.exists_in_folder(x.output_folder, x.output_filename.replace("_%05d", "_00001")));
                             if ((exists || render_queue.file_exists_in_folder(outputFile.folderUrl, outputFile.filename)) && !allowFile) {
                                 function overwrite() {
                                     allowFile = true;
@@ -404,9 +427,12 @@ Rectangle {
                                         renderBtn.resumeQueueAfter = true;
                                     }
                                     const job_id = render_queue.add(window.getAdditionalProjectDataJson(), controller.image_to_b64(result.image));
-                                    renderBtn.directJobId = job_id;
-                                    render_queue.main_job_id = job_id;
-                                    render_queue.render_job(job_id);
+                                    // One job per output file, they share the loaded video and render one after another
+                                    const jobs = mediaPanel.splitDirectJob(job_id);
+                                    renderBtn.directNextJobs = jobs.slice(1);
+                                    renderBtn.directJobId = jobs[0];
+                                    render_queue.main_job_id = jobs[0];
+                                    render_queue.render_job(jobs[0]);
                                 }
                             }, Qt.size(50 * dpiScale * videoArea.vid.parent.ratio, 50 * dpiScale));
                         }
