@@ -1,6 +1,6 @@
 # Todos
 
-- On a Mac, "One video per range, separate settings" doesn't separate the settings (works on Linux). Note: the v1.7.3 release doesn't contain separate range settings yet (built before the overhaul was merged), so check which build the Mac runs first.
+- On a Mac, "One video per range, separate settings" doesn't separate the settings (works on Linux)
 
 ## Upstream PRs (gyroflow/gyroflow)
 
