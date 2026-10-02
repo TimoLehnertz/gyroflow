@@ -42,6 +42,71 @@ Item {
 
     property Menu.VideoInformation vidInfo: null;
 
+    // ------------------------------------ Stabilization settings per trim range ------------------------------------
+    // With separate settings, every trim range has its own stabilization settings, stored with the range (next to its
+    // output path). The panels show the ones of the active range: when it changes, the current ones are stored in the
+    // range they belong to, and the ones of the new active range are loaded.
+    property bool separateRangeSettings: false;
+    // Info object of the trim range whose settings are shown, it's changed in place so it identifies the range
+    property var displayedRangeInfo: null;
+    function currentStabilization(): var {
+        return JSON.parse(controller.export_gyroflow_data("Simple", ({ }))).stabilization || ({ });
+    }
+    function storeDisplayedRangeSettings(): void {
+        if (!root.separateRangeSettings || !root.displayedRangeInfo || !vid.loaded) return;
+        // The range could have been removed in the meantime
+        if (!timeline.trimRanges.some(x => x[2] === root.displayedRangeInfo)) return;
+        root.displayedRangeInfo.stabilization = root.currentStabilization();
+    }
+    function showActiveRangeSettings(): void {
+        if (!root.separateRangeSettings) { root.displayedRangeInfo = null; return; }
+        const i = timeline.activeTrimRange;
+        if (i < 0 || !vid.loaded) return;
+        const info = timeline.trimRangeInfo(i);
+        if (info === root.displayedRangeInfo) return;
+        root.storeDisplayedRangeSettings();
+        root.displayedRangeInfo = info;
+        if (info.stabilization) {
+            root.loadGyroflowData({ title: "Gyroflow data file", version: 4, stabilization: info.stabilization }, 0);
+        } else {
+            info.stabilization = root.currentStabilization();
+        }
+    }
+    // New ranges (eg. added or split off) start with the settings of the active one, ie. the ones that are shown
+    function fillMissingRangeSettings(): void {
+        if (!root.separateRangeSettings || !vid.loaded) return;
+        let current = null;
+        for (let i = 0; i < timeline.trimRanges.length; ++i) {
+            const info = timeline.trimRangeInfo(i);
+            if (info.stabilization) continue;
+            if (!current) current = root.currentStabilization();
+            info.stabilization = JSON.parse(JSON.stringify(current));
+        }
+    }
+    // Every range starts with the current settings. Turned off, the settings of the active range are the ones of the video
+    function setSeparateRangeSettings(separate: bool): void {
+        if (separate == root.separateRangeSettings) return;
+        if (separate) {
+            const current = root.currentStabilization();
+            for (let i = 0; i < timeline.trimRanges.length; ++i) timeline.trimRangeInfo(i).stabilization = JSON.parse(JSON.stringify(current));
+            root.separateRangeSettings = true;
+            root.displayedRangeInfo = timeline.activeTrimRange >= 0? timeline.trimRangeInfo(timeline.activeTrimRange) : null;
+            // Ranges with different settings can't be joined into one video
+            if (window.exportSettings) window.exportSettings.exportTrimsSeparately.checked = true;
+        } else {
+            for (let i = 0; i < timeline.trimRanges.length; ++i) delete timeline.trimRangeInfo(i).stabilization;
+            root.separateRangeSettings = false;
+            root.displayedRangeInfo = null;
+        }
+        timeline.trimRangesChanged();
+    }
+    function applySettingsToAllRanges(): void {
+        if (!root.separateRangeSettings) return;
+        const current = root.currentStabilization();
+        for (let i = 0; i < timeline.trimRanges.length; ++i) timeline.trimRangeInfo(i).stabilization = JSON.parse(JSON.stringify(current));
+        timeline.trimRangesChanged();
+    }
+
     function loadGyroflowData(obj: var, queueJobId: var): void {
         root.pendingGyroflowData = null;
         root.pendingQueueJobId = 0;
@@ -132,8 +197,13 @@ Item {
                 if (obj.hasOwnProperty("trim_start")) {
                     timeline.setTrimRanges([[obj.trim_start, obj.trim_end]]);
                 }
+                // A project or the settings of a video have the mode, a preset (or the settings of a trim range) don't change it
+                if (obj.hasOwnProperty("trim_range_config") || obj.hasOwnProperty("trim_ranges_ms") || obj.hasOwnProperty("videofile")) {
+                    root.separateRangeSettings = obj.trim_range_config == "separate";
+                    root.displayedRangeInfo = null;
+                }
                 if (obj.hasOwnProperty("trim_ranges_ms")) {
-                    // The output path of each range is kept with it
+                    // The output path (and with separate settings, the stabilization settings) of each range are kept with it
                     const info = obj.trim_range_info || [];
                     timeline.setTrimRanges(obj.trim_ranges_ms.map((x, i) => [x[0] / duration_ms, (x[1] < 0? duration_ms + x[1] : x[1]) / duration_ms, info[i] || ({ })]));
                 } else if (obj.hasOwnProperty("trim_ranges")) {
@@ -433,6 +503,8 @@ Item {
         //vid.url = url;
         vid.errorShown = false;
         render_queue.editing_job_id = 0;
+        root.separateRangeSettings = false;
+        root.displayedRangeInfo = null;
         controller.load_video(url, vid);
         if (!isCalibrator) {
             // The output path of a video in the media library is managed there
@@ -1192,11 +1264,16 @@ Item {
                 Component.onCompleted: prevRestrictTrim = restrictTrim;
 
                 onTrimRangesChanged: {
+                    root.fillMissingRangeSettings();
+                    Qt.callLater(root.showActiveRangeSettings);
                     controller.set_trim_ranges(timeline.trimRanges.map(x => x[0] + ":" + x[1]).join(";"));
                     restrictTrimChanged();
                 }
                 // Playback is restricted to the active trim range
-                onActiveTrimRangeChanged: if (restrictTrim) restrictTrimChanged();
+                onActiveTrimRangeChanged: {
+                    if (restrictTrim) restrictTrimChanged();
+                    root.showActiveRangeSettings();
+                }
                 onRestrictTrimChanged: {
                     if (restrictTrim) {
                         const range = timeline.activeTrimRange >= 0? timeline.trimRanges[timeline.activeTrimRange] : [0.0, 1.0];

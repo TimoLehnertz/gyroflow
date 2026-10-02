@@ -117,12 +117,13 @@ ResizablePanel {
         const used = timeline.trimRanges.map(x => (x[2] || { }).output_path).filter(x => x);
         let number = 1;
         let changed = false;
-        for (const range of timeline.trimRanges) {
-            if ((range[2] || { }).output_path) continue;
+        for (let i = 0; i < timeline.trimRanges.length; ++i) {
+            const info = timeline.trimRangeInfo(i);
+            if (info.output_path) continue;
             let path = "";
             do { path = base + "-" + ("00" + number++).slice(-3); } while (used.includes(path));
             used.push(path);
-            range[2] = Object.assign({ }, range[2] || { }, { output_path: path });
+            info.output_path = path;
             changed = true;
         }
         if (changed) timeline.trimRangesChanged();
@@ -221,7 +222,8 @@ ResizablePanel {
             return;
         }
         const allData = JSON.parse(controller.export_gyroflow_data("Simple", window.getAdditionalProjectData()));
-        const count = media_library.apply_stabilization_to_all(JSON.stringify({ stabilization: allData.stabilization }), 0);
+        // The current video keeps its settings, including the separate ones of its trim ranges
+        const count = media_library.apply_stabilization_to_all(JSON.stringify({ stabilization: allData.stabilization }), media_library.current_item);
         root.updateQueuedJobs();
         showNotification(Modal.Success, qsTr("Stabilization settings applied to %1 items.").arg("<b>" + count + "</b>"));
     }
@@ -296,6 +298,22 @@ ResizablePanel {
         const ids = render_queue.split_job_by_ranges(jobId, JSON.stringify(outputs));
         for (const id of ids) root.ownJobs[id] = true;
         media_library.set_item_jobs(itemId, ids, outputs.map(x => x.range_index));
+        root.applyRangeSettings(itemId, ids, outputs);
+        root.splitLayouts[itemId] = root.splitLayout(outputs);
+    }
+    // Which ranges the jobs of an item were split into, and which of them got their own copy of the video
+    property var splitLayouts: ({ });
+    function splitLayout(outputs: var): string {
+        return JSON.stringify(outputs.map(x => [x.range_index, !!x.own_settings]));
+    }
+    // Trim ranges with their own stabilization settings got their own copy of the loaded video, apply their settings to it
+    function applyRangeSettings(itemId: int, jobIds: var, outputs: var): void {
+        const additionalData = window.getAdditionalProjectDataJson();
+        for (let i = 0; i < jobIds.length && i < outputs.length; ++i) {
+            if (!outputs[i].own_settings) continue;
+            const data = media_library.get_range_settings(itemId, outputs[i].range_index);
+            if (data) render_queue.apply_to_all(data, additionalData, jobIds[i]);
+        }
     }
     // Render settings of the job, with the export settings, the output path and the settings hash of this item
     function jobData(itemId: int): var {
@@ -319,16 +337,18 @@ ResizablePanel {
     function updateQueuedJob(itemId: int): void {
         const jobIds = media_library.get_item_jobs(itemId);
         if (!jobIds.length) return;
-        const settings = media_library.get_settings_for_job(jobIds[0]);
-        let data = settings? JSON.parse(settings) : ({ title: "Gyroflow data file", version: 4 });
+        // A trim range with its own stabilization settings gets those
+        const settingsOf = (jobId) => { const x = media_library.get_settings_for_job(jobId); return x? JSON.parse(x) : ({ title: "Gyroflow data file", version: 4 }); };
+        let data = settingsOf(jobIds[0]);
         const output = root.jobData(itemId).output;
         const additionalData = window.getAdditionalProjectDataJson();
         const outputs = JSON.parse(media_library.get_item_outputs(itemId, ""));
         const ranges = jobIds.map(id => render_queue.get_job_range_index(id));
         const allQueued = jobIds.every(id => media_library.get_job_status(id) == "queued");
-        const sameFiles = outputs.length == jobIds.length && outputs.every((x, i) => x.range_index == ranges[i]);
+        const sameFiles = outputs.length == jobIds.length && outputs.every((x, i) => x.range_index == ranges[i])
+                       && (root.splitLayouts[itemId] || root.splitLayout(outputs)) == root.splitLayout(outputs);
         if (!sameFiles && allQueued) {
-            // The trim ranges changed: keep the first job, which has the video loaded, and split it again
+            // The trim ranges (or whether they have their own settings) changed: keep the first job, which has the video loaded, and split it again
             for (const id of jobIds.slice(1)) render_queue.remove(id);
             data.output = output;
             render_queue.apply_to_all(JSON.stringify(data), additionalData, jobIds[0]);
@@ -339,6 +359,7 @@ ResizablePanel {
         for (let i = 0; i < jobIds.length; ++i) {
             if (media_library.get_job_status(jobIds[i]) != "queued") continue;
             const file = outputs.find(x => x.range_index == ranges[i]);
+            data = settingsOf(jobIds[i]);
             data.output = Object.assign({ }, output, file? { output_folder: file.output_folder, output_filename: file.output_filename } : { });
             render_queue.apply_to_all(JSON.stringify(data), additionalData, jobIds[i]);
             render_queue.set_job_output(jobIds[i], ranges[i], "", "");
@@ -404,7 +425,9 @@ ResizablePanel {
     function splitDirectJob(jobId: int): var {
         const outputs = root.loadedOutputs();
         if (outputs.length <= 1 && (!outputs.length || outputs[0].range_index < 0)) return [jobId];
-        return render_queue.split_job_by_ranges(jobId, JSON.stringify(outputs));
+        const ids = render_queue.split_job_by_ranges(jobId, JSON.stringify(outputs));
+        root.applyRangeSettings(root.loadedItem(), ids, outputs);
+        return ids;
     }
     function unqueueLoadedFile(): void {
         const itemId = root.loadedItem();
@@ -1150,14 +1173,31 @@ ResizablePanel {
 
         Item { width: 1; height: 2 * dpiScale; }
 
+        // Copying the stabilization settings shown in the main view, to the other trim ranges of the video or to the other videos
         Button {
+            id: applySettingsBtn;
             width: parent.width;
             height: 30 * dpiScale;
             font.pixelSize: 12 * dpiScale;
-            text: qsTr("Apply stabilization settings to all");
-            tooltip: qsTr("Applies the stabilization settings of the current video to all videos. Lens profile and trim ranges are not changed.");
+            text: qsTr("Apply stabilization settings...");
+            iconName: "chevron-down";
             enabled: window.videoArea.vid.loaded;
-            onClicked: root.applyStabilizationToAll();
+            onClicked: applySettingsMenu.popup(applySettingsBtn, 0, applySettingsBtn.height);
+            Menu {
+                id: applySettingsMenu;
+                Action {
+                    text: qsTr("Apply to all ranges of this clip");
+                    enabled: window.videoArea.separateRangeSettings;
+                    onTriggered: {
+                        window.videoArea.applySettingsToAllRanges();
+                        showNotification(Modal.Success, qsTr("Stabilization settings applied to all trim ranges of this video."));
+                    }
+                }
+                Action {
+                    text: qsTr("Apply to all other clips");
+                    onTriggered: root.applyStabilizationToAll();
+                }
+            }
         }
 
         // -------------------------------------- Render queue --------------------------------------

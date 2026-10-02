@@ -593,9 +593,10 @@ impl RenderQueue {
             self.remove(job_id);
         }
     }
-    /// Makes `job_id` render only the first of `outputs` (`[{ range_index, output_folder, output_filename }]`) and adds a job for each
-    /// of the others right after it. They all share the stabilizer of `job_id`, so the video is loaded, synchronized and its smoothing
-    /// computed only once for all of its trim ranges. Returns the ids of the jobs, in the order of `outputs`
+    /// Makes `job_id` render only the first of `outputs` (`[{ range_index, output_folder, output_filename, own_settings }]`) and adds
+    /// a job for each of the others right after it. They all share the stabilizer of `job_id`, so the video is loaded, synchronized and
+    /// its smoothing computed only once for all of its trim ranges. A range with `own_settings` (its own stabilization settings) gets
+    /// its own copy of the loaded stabilizer instead, the settings are applied to its job afterwards. Returns the ids of the jobs
     pub fn split_job_by_ranges(&mut self, job_id: u32, outputs: String) -> QVariantList {
         let outputs = serde_json::from_str::<Vec<serde_json::Value>>(&outputs).unwrap_or_default();
         let mut ids = Vec::new();
@@ -608,20 +609,26 @@ impl RenderQueue {
             let range_index = output.get("range_index").and_then(|x| x.as_i64()).filter(|x| *x >= 0).map(|x| x as usize);
             let folder   = output.get("output_folder").and_then(|x| x.as_str()).unwrap_or_default().to_owned();
             let filename = output.get("output_filename").and_then(|x| x.as_str()).unwrap_or_default().to_owned();
+            let own_settings = output.get("own_settings").and_then(|x| x.as_bool()).unwrap_or_default();
             let id = if n == 0 {
                 job_id
             } else {
                 let new_id = fastrand::u32(1..2147483640);
                 let base = &self.jobs[&job_id];
+                let (job_stab, gyro_outdated, prepared) = if own_settings {
+                    (Arc::new(stab.get_cloned()), Arc::new(AtomicBool::new(base.gyro_outdated.load(SeqCst))), Default::default())
+                } else {
+                    (stab.clone(), base.gyro_outdated.clone(), base.prepared.clone())
+                };
                 let job = Job {
                     queue_index: base_index + n,
                     render_options: base.render_options.clone(),
                     additional_data: base.additional_data.clone(),
                     cancel_flag: Default::default(),
                     project_data: None,
-                    stab: stab.clone(),
-                    gyro_outdated: base.gyro_outdated.clone(),
-                    prepared: base.prepared.clone()
+                    stab: job_stab,
+                    gyro_outdated,
+                    prepared
                 };
                 self.jobs.insert(new_id, job);
                 let mut itm = base_item.clone();

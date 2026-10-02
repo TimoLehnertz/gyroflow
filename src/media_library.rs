@@ -97,7 +97,9 @@ struct Video {
 struct OutputFile {
     range_index: i32,
     folder: String,
-    filename: String
+    filename: String,
+    /// The trim range has its own stabilization settings
+    own_settings: bool
 }
 impl OutputFile {
     fn url(&self) -> String { filesystem::get_file_url(&self.folder, &self.filename.replace("_%05d", "_00001"), false) }
@@ -161,6 +163,7 @@ pub struct MediaLibrary {
     save_settings: qt_method!(fn(&mut self, item_id: u32, data: QString)),
     get_project_data: qt_method!(fn(&self, item_id: u32) -> QString),
     get_settings_for_job: qt_method!(fn(&self, job_id: u32) -> QString),
+    get_range_settings: qt_method!(fn(&self, item_id: u32, range_index: i32) -> QString),
     apply_stabilization_to_all: qt_method!(fn(&mut self, data: QString, except_item_id: u32) -> usize),
     apply_settings_to_queued: qt_method!(fn(&mut self, data: QString) -> QVariantList),
     settings_hash: qt_method!(fn(&self, item_id: u32) -> QString),
@@ -1089,9 +1092,22 @@ impl MediaLibrary {
         self.build_project_data(item_id, false).map(QString::from).unwrap_or_default()
     }
     /// Settings of the rendered item, applied to the already loaded render job (ie. without the video and gyro data)
+    /// The job of a trim range with its own settings gets those instead of the ones of the video
     pub fn get_settings_for_job(&self, job_id: u32) -> QString {
         let item_id = self.item_id_for_job(job_id);
-        self.build_project_data(item_id, true).map(QString::from).unwrap_or_default()
+        let range_index = self.video(item_id).and_then(|v| v.jobs.iter().find(|x| x.job_id == job_id)).map(|x| x.range_index).unwrap_or(-1);
+        self.get_range_settings(item_id, range_index)
+    }
+    /// Settings of the video to apply to a render job of one of its trim ranges (-1: the whole video)
+    pub fn get_range_settings(&self, item_id: u32, range_index: i32) -> QString {
+        let Some(data) = self.build_project_data(item_id, true) else { return QString::default(); };
+        let mut obj = serde_json::from_str::<serde_json::Value>(&data).unwrap_or_default();
+        if range_index >= 0 {
+            if let Some(stab) = Self::range_stabilization(&obj, range_index as usize) {
+                obj["stabilization"] = stab;
+            }
+        }
+        QString::from(obj.to_string())
     }
 
     fn build_project_data(&self, item_id: u32, as_preset: bool) -> Option<String> {
@@ -1149,6 +1165,12 @@ impl MediaLibrary {
                 .unwrap_or_else(|| serde_json::json!({ "title": "Gyroflow data file", "version": 4, "videofile": url }));
             if let serde_json::Value::Object(ref mut obj) = obj {
                 obj.insert("stabilization".into(), new_stab.clone());
+                // A video with separate settings for its trim ranges gets them for all of its ranges
+                if let Some(serde_json::Value::Array(info)) = obj.get_mut("trim_range_info") {
+                    for x in info.iter_mut().filter_map(|x| x.as_object_mut()) {
+                        if x.contains_key("stabilization") { x.insert("stabilization".into(), new_stab.clone()); }
+                    }
+                }
             }
             *settings = Some(obj.to_string());
         }
@@ -1216,11 +1238,17 @@ impl MediaLibrary {
         QVariantList::from_iter(ids)
     }
 
+    /// The stabilization settings the video is rendered with, including the ones of its trim ranges if they have their own
     fn effective_stabilization(settings: &Option<String>) -> serde_json::Value {
-        settings.as_ref()
-            .and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok())
-            .and_then(|x| x.get("stabilization").cloned())
-            .unwrap_or(serde_json::Value::Null)
+        let Some(obj) = settings.as_ref().and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok()) else { return serde_json::Value::Null; };
+        let stab = obj.get("stabilization").cloned().unwrap_or(serde_json::Value::Null);
+        let ranges = (0..Self::trim_ranges_ms(&obj).len()).filter_map(|i| Self::range_stabilization(&obj, i)).collect::<Vec<_>>();
+        if ranges.is_empty() { stab } else { serde_json::json!({ "stabilization": stab, "trim_ranges": ranges }) }
+    }
+    /// Stabilization settings of a trim range, if the video has separate settings for each range
+    fn range_stabilization(obj: &serde_json::Value, range_index: usize) -> Option<serde_json::Value> {
+        if obj.get("trim_range_config").and_then(|x| x.as_str()) != Some("separate") { return None; }
+        obj.get("trim_range_info")?.get(range_index)?.get("stabilization").filter(|x| x.is_object()).cloned()
     }
     pub fn settings_hash(&self, item_id: u32) -> QString {
         let settings = self.item_settings(item_id).map(|(_, s, _)| s.clone()).unwrap_or_default();
@@ -1325,14 +1353,15 @@ impl MediaLibrary {
         let (count, paths, separate) = Self::range_info(&v.settings);
         if count == 0 || !separate {
             let (folder, filename) = self.resolve_output(&v.url, &v.output_path, &v.settings, ext);
-            return vec![OutputFile { range_index: -1, folder, filename }];
+            return vec![OutputFile { range_index: -1, folder, filename, own_settings: false }];
         }
         let base = self.output_path_or_default(&v.url, &v.output_path);
         paths.iter().enumerate().map(|(i, path)| {
             // Every range gets a path when the settings are saved, this is only for settings that never were
             let path = if path.is_empty() { format!("{base}-{:0>3}", i + 1) } else { path.clone() };
             let (folder, filename) = self.resolve_output(&v.url, &path, &v.settings, ext);
-            OutputFile { range_index: i as i32, folder, filename }
+            let own_settings = v.settings.as_ref().and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok()).map_or(false, |obj| Self::range_stabilization(&obj, i).is_some());
+            OutputFile { range_index: i as i32, folder, filename, own_settings }
         }).collect()
     }
     /// Folder and filename (with the extension of the codec) the output path resolves to for the video, for the output path field
@@ -1351,6 +1380,7 @@ impl MediaLibrary {
             "range_index": x.range_index,
             "output_folder": x.folder,
             "output_filename": x.filename,
+            "own_settings": x.own_settings,
         })).collect::<Vec<_>>()).to_string())
     }
 

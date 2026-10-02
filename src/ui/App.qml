@@ -232,6 +232,8 @@ Rectangle {
                     font.pixelSize: 12 * dpiScale;
                     model: [QT_TRANSLATE_NOOP("Popup", "One video per range"), QT_TRANSLATE_NOOP("Popup", "Join ranges into one video")];
                     currentIndex: exportbar.separateRanges? 0 : 1;
+                    // Ranges with their own stabilization settings can't be joined into one video
+                    enabled: !videoArea.separateRangeSettings;
                     onActivated: (index) => { exportSettings.item.exportTrimsSeparately.checked = index == 0; }
                     tooltip: qsTr("Export every trim range as its own video, or all of them joined into one video");
                 }
@@ -857,8 +859,9 @@ Rectangle {
         return {
             "output": exportSettings.item.getExportOptions(),
             "synchronization": sync.item.getSettings(),
-            // Output path of each trim range, in the order of `trim_ranges_ms`
-            "trim_range_info": videoArea.timeline.getTrimRangeInfo(),
+            // Output path of each trim range (and its stabilization settings if they are separate), in the order of `trim_ranges_ms`
+            "trim_range_info": (videoArea.storeDisplayedRangeSettings(), videoArea.timeline.getTrimRangeInfo()),
+            "trim_range_config": videoArea.separateRangeSettings? "separate" : "shared",
 
             "muted": window.videoArea.vid.muted,
             "playback_speed": window.videoArea.vid.playbackRate

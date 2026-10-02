@@ -163,9 +163,14 @@ Item {
     function getTrimRangeInfo(): list<var> {
         return trimRanges.map(x => x[2] || ({ }));
     }
+    // The info object of a range is changed in place, it identifies the range whose settings are shown (see VideoArea)
+    function trimRangeInfo(i: int): var {
+        if (!trimRanges[i][2]) trimRanges[i][2] = ({ });
+        return trimRanges[i][2];
+    }
     function setTrimRangeOutputPath(i: int, path: string): void {
         if (i < 0 || i >= trimRanges.length) return;
-        trimRanges[i][2] = Object.assign({ }, trimRanges[i][2] || { }, { output_path: path });
+        trimRangeInfo(i).output_path = path;
         root.trimRangesChanged();
     }
     function getTrimRanges(): list<var> {

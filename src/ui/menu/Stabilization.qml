@@ -22,6 +22,29 @@ MenuItem {
     property alias croppingMode: croppingMode;
     property alias automaticHorizonLock: autoLockCb.checked;
 
+    // With several trim ranges, each of them can have its own stabilization settings
+    CheckBox {
+        id: separateRangesCb;
+        visible: window.videoArea.timeline.trimRanges.length > 1;
+        width: parent.width;
+        text: qsTr("Separate settings for each trim range");
+        tooltip: qsTr("Every trim range gets its own stabilization settings, the ones of the active range are shown here.");
+        checked: window.videoArea.separateRangeSettings;
+        onClicked: {
+            window.videoArea.setSeparateRangeSettings(checked);
+            checked = Qt.binding(() => window.videoArea.separateRangeSettings);
+        }
+        Component.onCompleted: contentItem.wrapMode = Text.WordWrap;
+    }
+    BasicText {
+        visible: separateRangesCb.visible && window.videoArea.separateRangeSettings && window.videoArea.timeline.activeTrimRange >= 0;
+        width: parent.width;
+        wrapMode: Text.WordWrap;
+        font.pixelSize: 11 * dpiScale;
+        opacity: 0.8;
+        text: qsTr("These are the settings of trim range %1.").arg(window.videoArea.timeline.activeTrimRange + 1);
+    }
+
     Item {
         id: sett;
         property alias smoothingMethod: smoothingMethod.currentIndex;
