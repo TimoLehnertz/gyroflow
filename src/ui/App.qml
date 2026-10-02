@@ -90,6 +90,7 @@ Rectangle {
     }
     property alias vidInfo: vidInfo.item;
     property alias videoArea: videoArea;
+    property alias mediaPanel: mediaPanel;
     property alias motionData: motionData.item;
     property alias lensProfile: lensProfile.item;
     property alias outputFile: outputFile;

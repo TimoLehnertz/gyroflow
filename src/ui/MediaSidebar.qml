@@ -1125,7 +1125,12 @@ ResizablePanel {
                 tooltip:     statuses[render_queue.status][3];
                 enabled: render_queue.total_frames > 0;
                 Behavior on accentColor { ColorAnimation { duration: 700; easing.type: Easing.OutExpo; } }
-                onClicked: render_queue[statuses[render_queue.status][2]]();
+                onClicked: {
+                    const action = statuses[render_queue.status][2];
+                    render_queue[action]();
+                    // Show what's being rendered when starting, not when pausing
+                    if (action == "start") root.showQueue();
+                }
             }
         }
 

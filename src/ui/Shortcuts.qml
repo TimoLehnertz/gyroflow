@@ -195,10 +195,17 @@ Item {
         onActivated: videoArea.timeline.addManualSyncPoint(videoArea.timeline.position);
     }
 
-    // Exit full screen mode
+    // Close the render queue, or exit full screen mode
     Shortcut {
         sequence: "Esc";
-        onActivated: videoArea.fullScreen = 0;
+        onActivated: {
+            const queueModal = window.mediaPanel? window.mediaPanel.queueModal.item : null;
+            if (queueModal && queueModal.shown) {
+                queueModal.shown = false;
+            } else {
+                videoArea.fullScreen = 0;
+            }
+        }
     }
 
     // Toggle full screen mode
