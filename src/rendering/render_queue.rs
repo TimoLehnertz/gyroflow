@@ -33,6 +33,8 @@ pub struct RenderQueueItem {
     pub processing_progress: f64,
     /// The previous item in the queue renders the same video (eg. another of its trim ranges), so they are shown as a group
     pub same_video_as_previous: bool,
+    /// The next item renders the same video too, the first item of a group has the name of the video above it
+    pub same_video_as_next: bool,
 
     frame_times: std::collections::VecDeque<(u64, u64)>,
 
@@ -518,6 +520,7 @@ impl RenderQueue {
                 processing_progress: 0.0,
                 error_string: QString::default(),
                 same_video_as_previous: false,
+                same_video_as_next: false,
                 frame_times: Default::default(),
                 status: JobStatus::Queued,
             });
@@ -679,11 +682,14 @@ impl RenderQueue {
         }
         // The items of one video next to each other are shown as a group
         if let Ok(mut q) = self.queue.try_borrow_mut() {
-            for i in 0..q.row_count() as usize {
-                let grouped = i > 0 && q[i - 1].input_file == q[i].input_file;
-                if q[i].same_video_as_previous != grouped {
+            let count = q.row_count() as usize;
+            for i in 0..count {
+                let previous = i > 0 && q[i - 1].input_file == q[i].input_file;
+                let next = i + 1 < count && q[i + 1].input_file == q[i].input_file;
+                if q[i].same_video_as_previous != previous || q[i].same_video_as_next != next {
                     let mut itm = q[i].clone();
-                    itm.same_video_as_previous = grouped;
+                    itm.same_video_as_previous = previous;
+                    itm.same_video_as_next = next;
                     q.change_line(i, itm);
                 }
             }

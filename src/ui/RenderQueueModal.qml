@@ -196,11 +196,13 @@ Item {
 
             delegate: Rectangle {
                 id: dlg;
-                // The items of one video (eg. its trim ranges) are indented below the first one
-                x: same_video_as_previous? 24 * dpiScale : 0;
+                // The items of one video (eg. its trim ranges) are indented below its name, each with its own output file
+                readonly property bool inGroup: same_video_as_previous || same_video_as_next;
+                readonly property bool groupStart: inGroup && !same_video_as_previous;
+                readonly property real headerHeight: groupStart? 24 * dpiScale : 0;
+                x: inGroup? 24 * dpiScale : 0;
                 width: lv.width - x;
-                height: 60 * dpiScale;
-                radius: 5 * dpiScale;
+                height: 60 * dpiScale + headerHeight;
                 property real progress: total_frames > 0? current_frame / total_frames : 0;
                 property bool isFinished: current_frame >= total_frames && total_frames > 0;
                 property bool isQuestion: error_string.startsWith("convert_format:") || error_string.startsWith("file_exists:");
@@ -210,11 +212,31 @@ Item {
                 property bool isRendering: !isFinished && !isError && !isQuestion && total_frames > 0 && (current_frame > 0 || isProcessing);
                 property bool dragging: false;
 
-                color: isError?    "#30ed7676"
-                     : isQuestion? "#30" + styleAccentColor.toString().substring(1)
-                     : isFinished? "#3070e574"
-                     : "#15ffffff";
+                color: "transparent";
                 opacity: dragging? 0.5 : 1;
+
+                BasicText {
+                    visible: dlg.groupStart;
+                    x: -24 * dpiScale;
+                    y: 3 * dpiScale;
+                    width: lv.width;
+                    leftPadding: 0;
+                    text: input_filename;
+                    font.bold: true;
+                    font.pixelSize: 12 * dpiScale;
+                    elide: Text.ElideMiddle;
+                }
+                Rectangle {
+                    id: bg;
+                    y: dlg.headerHeight;
+                    width: parent.width;
+                    height: parent.height - y;
+                    radius: 5 * dpiScale;
+                    color: dlg.isError?    "#30ed7676"
+                         : dlg.isQuestion? "#30" + styleAccentColor.toString().substring(1)
+                         : dlg.isFinished? "#3070e574"
+                         : "#15ffffff";
+                }
                 Ease on opacity { duration: 200; }
 
                 Drag.active: dragging;
@@ -271,7 +293,7 @@ Item {
                 }
 
                 Row {
-                    anchors.fill: parent;
+                    anchors.fill: bg;
                     anchors.leftMargin: 5 * dpiScale;
                     anchors.rightMargin: 8 * dpiScale;
                     spacing: 8 * dpiScale;
@@ -333,8 +355,8 @@ Item {
                         BasicText {
                             width: parent.width;
                             leftPadding: 0;
-                            text: same_video_as_previous? output_filename : input_filename;
-                            font.bold: !same_video_as_previous;
+                            text: dlg.inGroup? output_filename : input_filename;
+                            font.bold: !dlg.inGroup;
                             font.pixelSize: 12 * dpiScale;
                             elide: Text.ElideMiddle;
                         }
