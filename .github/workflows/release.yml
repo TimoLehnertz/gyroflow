@@ -240,6 +240,11 @@ jobs:
             Fork of Gyroflow with a media library for organizing, trimming, and batch-stabilizing footage.
 
             ### Improvements
+            - Optical-only stabilization and optical gyro correction (upstream)
+            - Reworked lens profile math (upstream)
+            - Export settings and output path kept per media library item, output path relative by default
+            - "Apply settings to render queue" applies instantly, including the output size
+            - The render queue opens when starting it and closes with Esc
             - Media sidebar for folders, videos, and sections, with queue status in the list
             - Import markers.json with a live time-offset preview
             - Drop files or folders on the main view or sidebar to add them to the media list
@@ -250,6 +255,9 @@ jobs:
             - Delete/Backspace and right-click remove the whole selection
 
             ### Bug fixes
+            - Corrupted HEVC/H.264 files from the VAAPI encoders
+            - Heavily zoomed out preview outside the trim ranges
+            - Stabilization/overview buttons unchecked when entering full screen
             - Transparent window on NVIDIA + Wayland
             - Trim-only export on files with data streams
             - Busy indicators and "Render now" respecting parallel renders
