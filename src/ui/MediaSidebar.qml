@@ -68,6 +68,10 @@ ResizablePanel {
         if (itemId <= 0 || itemId == media_library.current_item) return;
         root.saveCurrentSettings();
         media_library.set_current_item(itemId);
+        root.loadItemSettings(itemId);
+    }
+    // Loads the item into the main view with the settings the library has for it
+    function loadItemSettings(itemId: int): void {
         // Show the path of the item before loading, so the video area leaves the output path to the library
         root.updateOutputFile();
 
@@ -212,6 +216,12 @@ ResizablePanel {
         }
         result.queued = queue;
         root.lastImport = result;
+        // The video in the main view doesn't have the new trim ranges yet, and saving its settings would drop them again.
+        // Its settings were saved when the import was opened, so load it again with the ranges.
+        const current = media_library.current_item;
+        if ((result.queue_ids || []).includes(current) && window.videoArea.vid.loaded && !window.videoArea.videoLoader.active) {
+            root.loadItemSettings(current);
+        }
         if (queue) {
             for (const id of result.queue_ids || []) root.queueItem(id);
         }
