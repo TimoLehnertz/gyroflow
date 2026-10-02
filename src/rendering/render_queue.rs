@@ -288,6 +288,8 @@ pub struct RenderQueue {
     pub end_timestamp: qt_property!(u64; NOTIFY progress_changed),
     current_frame: qt_property!(u64; READ get_current_frame NOTIFY progress_changed),
     total_frames: qt_property!(u64; READ get_total_frames NOTIFY queue_changed),
+    /// Frames rendered per second by all the items that are rendering (they can render in parallel), over the last seconds
+    fps: qt_property!(f64; READ get_fps NOTIFY progress_changed),
     pub status: qt_property!(QString; NOTIFY status_changed),
 
     pub progress_changed: qt_signal!(),
@@ -378,10 +380,19 @@ impl RenderQueue {
     }
 
     pub fn get_total_frames(&self) -> u64 {
-        self.queue.try_borrow().map(|x| x.iter().map(|v| v.total_frames).sum::<u64>() - self.start_frame).unwrap_or_default()
+        self.queue.try_borrow().map(|x| x.iter().map(|v| v.total_frames).sum::<u64>().saturating_sub(self.start_frame)).unwrap_or_default()
     }
     pub fn get_current_frame(&self) -> u64 {
-        self.queue.try_borrow().map(|x| x.iter().map(|v| v.current_frame).sum::<u64>() - self.start_frame).unwrap_or_default()
+        // Saturating: items can be removed or reset after the queue started
+        self.queue.try_borrow().map(|x| x.iter().map(|v| v.current_frame).sum::<u64>().saturating_sub(self.start_frame)).unwrap_or_default()
+    }
+    pub fn get_fps(&self) -> f64 {
+        self.queue.try_borrow().map(|q| q.iter().filter(|v| v.status == JobStatus::Rendering).filter_map(|v| {
+            // `frame_times` holds the progress updates of about the last 10 seconds
+            let (first_frame, first_time) = *v.frame_times.front()?;
+            let (last_frame, last_time) = *v.frame_times.back()?;
+            (last_time > first_time).then(|| last_frame.saturating_sub(first_frame) as f64 / ((last_time - first_time) as f64 / 1000.0))
+        }).sum()).unwrap_or_default()
     }
 
     pub fn set_pixel_format(&mut self, job_id: u32, format: String) {

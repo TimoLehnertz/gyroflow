@@ -95,7 +95,7 @@ Item {
                 if (times !== false && progress < 1.0) {
                     totalTime.elapsed = times[0];
                     totalTime.remaining = times[1];
-                    if (times.length > 2) totalTime.fps = times[2];
+                    totalTime.fps = render_queue.fps > 0? render_queue.fps : (times[2] || 0);
                 } else {
                     totalTime.remaining = "---";
                 }

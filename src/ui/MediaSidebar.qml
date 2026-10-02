@@ -1282,7 +1282,7 @@ ResizablePanel {
                 if (times !== false && progress < 1.0) {
                     queueTime.elapsed = times[0];
                     queueTime.remaining = times[1];
-                    if (times.length > 2) queueTime.fps = times[2];
+                    queueTime.fps = render_queue.fps > 0? render_queue.fps : (times[2] || 0);
                     window.reportProgress(progress, "queue");
                 } else {
                     window.reportProgress(-1, "queue");

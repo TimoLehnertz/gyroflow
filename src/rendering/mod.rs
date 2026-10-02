@@ -234,7 +234,12 @@ pub fn render<F, F2, F3>(stab: Arc<StabilizationManager>, progress: F, input_fil
     let org_trim_ranges = params.trim_ranges.clone();
     let trim_ranges = trim_range_ind.map(|x| vec![params.trim_ranges[x]]).unwrap_or_else(|| params.trim_ranges.clone());
     let trim_ratio = if !render_options.pad_with_black && !render_options.preserve_other_tracks {
-        params.get_trim_ratio()
+        match (trim_range_ind, render_options.trim_range_index) {
+            // A job of a single range counts only its frames. A job of all the ranges exported separately counts all of them,
+            // its progress continues over the ranges
+            (Some(i), Some(_)) => params.trim_ranges.get(i).map(|x| x.1 - x.0).unwrap_or(1.0),
+            _ => params.get_trim_ratio()
+        }
     } else {
         1.0
     };
