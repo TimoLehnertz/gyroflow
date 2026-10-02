@@ -168,7 +168,26 @@ impl GyroSource {
             }
         }
 
+        let md = Self::parse_telemetry(stream, filesize, path, options, size, fps, false, progress_cb, cancel_flag)?;
+
+        #[cfg(feature = "cache-gyro-metadata")]
+        {
+            let mut cache = CACHE.write();
+            cache.insert(key, md.clone());
+        }
+
+        Ok(md)
+    }
+
+    /// Parses only the first metadata sample, which is enough to detect the camera and its lens, but not the motion.
+    /// Reading every sample is a random read per frame, and on SD cards that alone takes seconds for every minute of footage.
+    pub fn probe_telemetry_file<T: Read + Seek, P: AsRef<std::path::Path>>(stream: &mut T, filesize: usize, path: P, size: (usize, usize), fps: f64) -> Result<FileMetadata, crate::GyroflowCoreError> {
+        Self::parse_telemetry(stream, filesize, path, &Default::default(), size, fps, true, |_| (), Arc::new(AtomicBool::new(false)))
+    }
+
+    fn parse_telemetry<T: Read + Seek, P: AsRef<std::path::Path>, F: Fn(f64)>(stream: &mut T, filesize: usize, path: P, options: &FileLoadOptions, size: (usize, usize), fps: f64, probe_only: bool, progress_cb: F, cancel_flag: Arc<AtomicBool>) -> Result<FileMetadata, crate::GyroflowCoreError> {
         let tpoptions = InputOptions {
+            probe_only,
             blackbox_gyro_only: true,
             tag_blacklist: [
                 TagFilter::EntireGroup(GroupId::UnknownGroup(0xf000)),
@@ -628,12 +647,6 @@ impl GyroSource {
                     }
                 }
             }
-        }
-
-        #[cfg(feature = "cache-gyro-metadata")]
-        {
-            let mut cache = CACHE.write();
-            cache.insert(key, md.clone());
         }
 
         Ok(md)

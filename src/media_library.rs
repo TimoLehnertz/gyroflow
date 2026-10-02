@@ -622,7 +622,12 @@ impl MediaLibrary {
             this.refresh_outputs();
         });
 
+        // Every add_url call starts its own scan, and dropping many files would then read all of them at once.
+        // A memory card serves one read at a time, so the parallel scans only got slower each, one after another is faster.
+        static SCAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
         core::run_threaded(move || {
+            let _lock = SCAN_LOCK.lock();
             for (video_id, url) in urls {
                 let mut result = ScanResult::default();
                 let mut size = (0, 0);
@@ -637,25 +642,17 @@ impl MediaLibrary {
                 if size.0 > 0 && fps > 0.0 {
                     if let Ok(mut file) = filesystem::open_file(&url, false, false) {
                         let filesize = file.size;
-                        let md = core::gyro_source::GyroSource::parse_telemetry_file(file.get_file(), filesize, &url, &Default::default(), size, fps, |_| (), Arc::new(AtomicBool::new(false)));
-                        if let Ok(md) = md {
-                            if md.lens_profile.as_ref().map(|x| x.is_object()).unwrap_or_default() {
-                                result.lens_profile = "Built-in".to_string();
-                                result.lens_warning = false;
-                            } else {
-                                let id_str = md.camera_identifier.as_ref().map(|x| x.get_identifier_for_autoload()).unwrap_or_default();
-                                if !id_str.is_empty() {
-                                    {
-                                        let db = lens_db.read();
-                                        if !db.loaded { drop(db); lens_db.write().load_all(); }
-                                    }
-                                    let db = lens_db.read();
-                                    if let Some(profile) = db.get_by_id(&id_str) {
-                                        result.lens_profile = profile.get_display_name();
-                                        result.lens_warning = false;
-                                    }
-                                }
-                            }
+                        // Only the lens is shown here, so the first metadata sample is usually enough. Reading all of them
+                        // (the motion) is left to loading the video, unless the beginning alone doesn't tell the lens.
+                        let md = core::gyro_source::GyroSource::probe_telemetry_file(file.get_file(), filesize, &url, size, fps);
+                        let found = md.ok().and_then(|md| Self::scanned_lens_profile(&md, &lens_db));
+                        let found = found.or_else(|| {
+                            let md = core::gyro_source::GyroSource::parse_telemetry_file(file.get_file(), filesize, &url, &Default::default(), size, fps, |_| (), Arc::new(AtomicBool::new(false)));
+                            md.ok().and_then(|md| Self::scanned_lens_profile(&md, &lens_db))
+                        });
+                        if let Some(name) = found {
+                            result.lens_profile = name;
+                            result.lens_warning = false;
                         }
                     }
                 }
@@ -664,6 +661,20 @@ impl MediaLibrary {
             }
             finished(());
         });
+    }
+
+    /// The name of the lens profile the video would load: its built-in one, or the one matching the camera in the database
+    fn scanned_lens_profile(md: &core::gyro_source::FileMetadata, lens_db: &Arc<parking_lot::RwLock<core::lens_profile_database::LensProfileDatabase>>) -> Option<String> {
+        if md.lens_profile.as_ref().map(|x| x.is_object()).unwrap_or_default() {
+            return Some("Built-in".to_string());
+        }
+        let id_str = md.camera_identifier.as_ref().map(|x| x.get_identifier_for_autoload()).unwrap_or_default();
+        if id_str.is_empty() { return None; }
+        {
+            let db = lens_db.read();
+            if !db.loaded { drop(db); lens_db.write().load_all(); }
+        }
+        lens_db.read().get_by_id(&id_str).map(|profile| profile.get_display_name())
     }
 
     /// Checks which of the output files already exist and reads the stabilization hash from them
