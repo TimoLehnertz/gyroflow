@@ -148,7 +148,10 @@ Item {
         trimRanges.push([v - 0.05, v]);
         Qt.callLater(root.cleanupTrimRanges);
     }
-    function setTrimRanges(ranges: list<var>): void {
+    // `ranges` must stay `var`: a `list<var>` annotation makes Qt 6.5+ convert the array into a `QVariantList`, which
+    // copies the info object of every range. The settings written into them later (see VideoArea) would be lost and
+    // `x[2] === displayedRangeInfo` would never match. Qt 6.4 (the Linux build) doesn't convert, so it only broke on macOS
+    function setTrimRanges(ranges: var): void {
         for (const [start, end] of ranges) {
             if (start >= end) {
                 resetTrim();

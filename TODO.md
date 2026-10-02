@@ -1,7 +1,5 @@
 # Todos
 
-- On a Mac, "One video per range, separate settings" doesn't separate the settings (works on Linux)
-
 ## Upstream PRs (gyroflow/gyroflow)
 
 Rules:
