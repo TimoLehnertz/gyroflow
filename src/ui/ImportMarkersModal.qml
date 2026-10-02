@@ -24,10 +24,9 @@ Item {
 
     function open(): void {
         const saved = +settings.value("markerOffsetHours", 0);
-        offsetField.preventChange = true;
+        // Not with offsetField.preventChange: that also stops the field from showing the value, so it showed 0 while the saved offset was used.
         offsetField.value = saved;
         offsetSlider.value = saved;
-        offsetField.preventChange = false;
         root.offsetHours = saved;
         queueImported.checked = +settings.value("markerQueueImported", 1) > 0;
         root.shown = true;
