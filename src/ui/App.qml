@@ -8,6 +8,8 @@ import QtQuick.Dialogs
 
 import "."
 import "components/"
+// `Menu` is the namespace of the side panels here, the menu component is `Components.Menu`
+import "components/" as Components
 import "menu/" as Menu
 
 Rectangle {
@@ -500,7 +502,7 @@ Rectangle {
                         iconName: "menu";
                         tooltip: qsTr("Project files, presets and applying the settings to the queue");
                         onClicked: moreMenu.popup(moreBtn, 0, -moreMenu.height);
-                        Menu {
+                        Components.Menu {
                             id: moreMenu;
                             Action { iconName: "save"; text: qsTr("Export project file"); onTriggered: window.saveProject("WithGyroData"); }
                             Action { iconName: "save"; text: qsTr("Save project file"); enabled: controller.project_file_url != ""; onTriggered: window.saveProject(""); }
