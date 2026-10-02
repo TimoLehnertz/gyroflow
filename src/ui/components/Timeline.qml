@@ -168,6 +168,11 @@ Item {
         if (!trimRanges[i][2]) trimRanges[i][2] = ({ });
         return trimRanges[i][2];
     }
+    function removeTrimRange(i: int): void {
+        if (i < 0 || i >= trimRanges.length) return;
+        trimRanges.splice(i, 1);
+        root.cleanupTrimRanges();
+    }
     function setTrimRangeOutputPath(i: int, path: string): void {
         if (i < 0 || i >= trimRanges.length) return;
         trimRangeInfo(i).output_path = path;
@@ -668,6 +673,8 @@ Item {
             }
             onMouseYChanged: if (!pressed && keyframes.item) Qt.callLater(keyframes.item.handleMouseMove, mouseX, mouseY, false, 0);
             onPressed: (mouse) => {
+                // So the keyboard shortcuts (eg. Delete for the active range) apply here and not to the media list
+                root.forceActiveFocus();
                 panInit.x = mouse.x;
                 panInit.y = mouse.y;
                 panInit.visibleAreaLeft  = root.visibleAreaLeft;
@@ -840,10 +847,7 @@ Item {
                         enabled: trimRangeMenu.currentTrimRange != -1;
                         iconName: "bin;#f67575";
                         text: qsTr("Delete this range");
-                        onTriggered: {
-                            root.trimRanges.splice(trimRangeMenu.currentTrimRange, 1);
-                            root.cleanupTrimRanges();
-                        }
+                        onTriggered: root.removeTrimRange(trimRangeMenu.currentTrimRange);
                     }
                     Action {
                         enabled: root.trimActive;

@@ -30,6 +30,7 @@ ResizablePanel {
     // Job of the item loaded in the main view, so the bottom bar can show whether it's in the queue
     property int currentJobId: 0;
     property alias queueModal: queueModalLoader;
+    readonly property bool listHasFocus: lv.activeFocus;
     // Jobs queued from here, the user already decided to (re-)stabilize these items, so their output is always overwritten
     property var ownJobs: ({ });
     property var lastImport: null;
@@ -777,7 +778,8 @@ ResizablePanel {
         Shortcut {
             sequences: ["Delete", "Backspace"];
             context: Qt.WidgetWithChildrenShortcut;
-            enabled: root.removableCount > 0;
+            // Only while the list has the focus, otherwise Delete removes the active trim range of the timeline
+            enabled: root.removableCount > 0 && lv.activeFocus;
             onActivated: root.removeSelected();
         }
         Keys.onPressed: (event) => {

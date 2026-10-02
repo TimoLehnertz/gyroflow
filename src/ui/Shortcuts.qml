@@ -82,6 +82,12 @@ Item {
             videoArea.timeline.addTrimEnd(videoArea.timeline.position);
         }
     }
+    // Delete the active trim range (the media list uses the key itself while it has the focus)
+    Shortcut {
+        sequences: ["Delete", "Backspace"];
+        enabled: videoArea.timeline.trimRanges.length > 0 && !(window.mediaPanel && window.mediaPanel.listHasFocus);
+        onActivated: videoArea.timeline.removeTrimRange(videoArea.timeline.activeTrimRange);
+    }
     // Clear trim range
     Shortcut {
         sequence: "c";
