@@ -1207,33 +1207,6 @@ ResizablePanel {
 
         Item { width: 1; height: 2 * dpiScale; }
 
-        // Copying the stabilization settings shown in the main view, to the other trim ranges of the video or to the other videos
-        Button {
-            id: applySettingsBtn;
-            width: parent.width;
-            height: 30 * dpiScale;
-            font.pixelSize: 12 * dpiScale;
-            text: qsTr("Apply stabilization settings...");
-            iconName: "chevron-down";
-            enabled: window.videoArea.vid.loaded;
-            onClicked: applySettingsMenu.popup(applySettingsBtn, 0, applySettingsBtn.height);
-            Menu {
-                id: applySettingsMenu;
-                Action {
-                    text: qsTr("Apply to all ranges of this clip");
-                    enabled: window.videoArea.separateRangeSettings;
-                    onTriggered: {
-                        window.videoArea.applySettingsToAllRanges();
-                        showNotification(Modal.Success, qsTr("Stabilization settings applied to all trim ranges of this video."));
-                    }
-                }
-                Action {
-                    text: qsTr("Apply to all other clips");
-                    onTriggered: root.applyStabilizationToAll();
-                }
-            }
-        }
-
         // -------------------------------------- Render queue --------------------------------------
 
         Hr { width: parent.width; }

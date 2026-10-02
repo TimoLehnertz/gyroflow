@@ -225,7 +225,6 @@ Rectangle {
                     spacing: 5 * dpiScale;
                     anchors.verticalCenter: (isMobileLayout? undefined : parent.verticalCenter);
                     anchors.horizontalCenter: (isMobileLayout? parent.horizontalCenter : undefined);
-                    anchors.horizontalCenterOffset: queueBtn.visible? (queueBtn.width + spacing) / 2 : 0;
 
                     // The queue and the direct export are separate, always visible buttons now, no dropdown.
                     // `renderBtn` is the shared logic of both, the buttons below only pick the action.
@@ -503,7 +502,7 @@ Rectangle {
                         icon.width: 18 * dpiScale;
                         icon.height: 18 * dpiScale;
                         iconName: "menu";
-                        tooltip: qsTr("Project files, presets and applying the settings to the queue");
+                        tooltip: qsTr("Project files, presets and applying the settings to other ranges, clips or the queue");
                         onClicked: moreMenu.popup(moreBtn, 0, -moreMenu.height);
                         Components.Menu {
                             id: moreMenu;
@@ -511,19 +510,24 @@ Rectangle {
                             Action { iconName: "save"; text: qsTr("Save project file"); enabled: controller.project_file_url != ""; onTriggered: window.saveProject(""); }
                             Action { iconName: "settings"; text: qsTr("Create settings preset"); onTriggered: renderBtn.openSettingsSelector("preset"); }
                             Action { iconName: "queue"; text: qsTr("Apply settings to the queue"); enabled: render_queue.queue.rowCount() > 0; onTriggered: renderBtn.openSettingsSelector("apply"); }
+                            QQC.MenuSeparator { verticalPadding: 5 * dpiScale; }
+                            // The stabilization settings shown in the main view, to the other trim ranges of the video or to the other videos
+                            Action {
+                                iconName: "gyroflow";
+                                text: qsTr("Apply stabilization settings to all ranges of this clip");
+                                enabled: videoArea.separateRangeSettings;
+                                onTriggered: {
+                                    videoArea.applySettingsToAllRanges();
+                                    showNotification(Modal.Success, qsTr("Stabilization settings applied to all trim ranges of this video."));
+                                }
+                            }
+                            Action {
+                                iconName: "gyroflow";
+                                text: qsTr("Apply stabilization settings to all other clips");
+                                enabled: videoArea.vid.loaded;
+                                onTriggered: mediaPanel.applyStabilizationToAll();
+                            }
                         }
-                    }
-                    LinkButton {
-                        id: queueBtn;
-                        visible: !isMobileLayout && window.isLandscape;
-                        leftPadding: 10 * dpiScale;
-                        rightPadding: 10 * dpiScale;
-                        icon.width: 25 * dpiScale;
-                        icon.height: 25 * dpiScale;
-                        height: 32 * dpiScale;
-                        iconName: "queue";
-                        tooltip: window.mediaPanelShown? qsTr("Hide the media list") : qsTr("Show the media list");
-                        onClicked: window.mediaPanelShown = !window.mediaPanelShown;
                     }
                 }
             }
