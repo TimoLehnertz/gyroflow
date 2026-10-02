@@ -764,7 +764,8 @@ pub fn render<F, F2, F3>(stab: Arc<StabilizationManager>, progress: F, input_fil
     if cfg!(not(any(target_os = "android", target_os = "ios"))) && !gyroflow_core::filesystem::exists(folder) {
         let path = gyroflow_core::filesystem::url_to_path(folder);
         if !path.is_empty() {
-            let _ = std::fs::create_dir_all(path);
+            // Fails when the folder is on a drive that isn't connected, ffmpeg would then only say "No such file or directory"
+            std::fs::create_dir_all(&path).map_err(|e| FFmpegError::CannotCreateOutputFolder((path.clone(), e)))?;
         }
     }
     // A job of a single trim range has its own, final output filename

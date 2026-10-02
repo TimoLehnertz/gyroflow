@@ -81,6 +81,7 @@ pub enum FFmpegError {
     InternalError(ffmpeg_next::Error),
     CannotOpenInputFile((String, FilesystemError)),
     CannotOpenOutputFile((String, FilesystemError)),
+    CannotCreateOutputFolder((String, std::io::Error)),
 }
 
 impl std::fmt::Display for FFmpegError {
@@ -106,6 +107,7 @@ impl std::fmt::Display for FFmpegError {
             FFmpegError::InternalError(e)     => write!(f, "ffmpeg error: {:?}", e),
             FFmpegError::CannotOpenInputFile((url, e))   => write!(f, "Cannot open input file {url}: {e:?}"),
             FFmpegError::CannotOpenOutputFile((url, e))   => write!(f, "Cannot open output file {url}: {e:?}"),
+            FFmpegError::CannotCreateOutputFolder((path, e)) => write!(f, "The export folder {path} doesn't exist and can't be created, is its drive connected? ({e})"),
         }
     }
 }
