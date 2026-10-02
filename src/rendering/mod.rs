@@ -200,27 +200,37 @@ pub struct ProcessingInfo {
     pub encoder: String,
     pub encoder_gpu: bool,
     pub encoder_wanted_gpu: bool,
+    /// Why the GPU encoder wasn't used, from the FFmpeg log
+    pub encoder_note: String,
 }
 impl ProcessingInfo {
     pub fn to_json(&self) -> String {
         serde_json::json!({
             "decoder": self.decoder, "decoder_wanted_gpu": self.decoder_wanted_gpu, "decoder_note": self.decoder_note,
             "stabilization": self.stabilization, "stabilization_wanted_gpu": self.stabilization_wanted_gpu,
-            "encoder": self.encoder, "encoder_gpu": self.encoder_gpu, "encoder_wanted_gpu": self.encoder_wanted_gpu,
+            "encoder": self.encoder, "encoder_gpu": self.encoder_gpu, "encoder_wanted_gpu": self.encoder_wanted_gpu, "encoder_note": self.encoder_note,
         }).to_string()
     }
 }
 
-/// The last message of the FFmpeg log about why the hardware decoder couldn't be used, eg. "Hardware does not support image size 5312x4648 (...)"
-fn gpu_decoding_failure_reason() -> String {
+/// The last message of the FFmpeg log that `filter` accepts, without its formatting and the "[hevc @ 0x...]" prefix
+fn last_log_message(filter: impl Fn(&str) -> bool) -> Option<String> {
     let tags = regex::Regex::new(r"<[^>]+>").unwrap();
     let log = FFMPEG_LOG.read();
-    let lines: Vec<String> = log.lines().map(|line| tags.replace_all(line, "").trim().to_string()).collect();
-    let specific = lines.iter().rfind(|line| line.contains("Hardware does not support") || line.contains("failed to decode picture"));
-    specific.or_else(|| lines.iter().rfind(|line| line.contains("hwaccel")))
-        // Without the "[hevc @ 0x...]" prefix
-        .map(|line| match line.find("] ") { Some(i) if line.starts_with('[') => line[i + 2..].to_string(), _ => line.clone() })
+    log.lines().map(|line| tags.replace_all(line, "").trim().to_string())
+        .filter(|line| filter(line))
+        .last()
+        .map(|line| match line.find("] ") { Some(i) if line.starts_with('[') => line[i + 2..].to_string(), _ => line })
+}
+/// Why the hardware decoder couldn't be used, eg. "Hardware does not support image size 5312x4648 (...)"
+fn gpu_decoding_failure_reason() -> String {
+    last_log_message(|line| (line.contains("Hardware does not support") && !line.contains("encoding")) || line.contains("failed to decode picture"))
+        .or_else(|| last_log_message(|line| line.contains("hwaccel")))
         .unwrap_or_default()
+}
+/// Why the hardware encoder couldn't be used, eg. "Hardware does not support encoding at size 5312x4648 (...)"
+pub fn gpu_encoding_failure_reason() -> String {
+    last_log_message(|line| line.contains("Hardware does not support encoding")).unwrap_or_default()
 }
 
 pub fn render<F, F2, F3>(stab: Arc<StabilizationManager>, progress: F, input_file: &gyroflow_core::InputFile, render_options: &RenderOptions, gpu_decoder_index: i32, trim_range_ind: Option<usize>, cancel_flag: Arc<AtomicBool>, pause_flag: Arc<AtomicBool>, encoder_initialized: F2, processing_info: F3) -> Result<(), FFmpegError>

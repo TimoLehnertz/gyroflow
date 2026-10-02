@@ -435,6 +435,7 @@ Item {
                                 }
                                 if (!encodeGpu) {
                                     if (!info.encoder_wanted_gpu) lines.push(qsTr("GPU encoding is turned off in the export settings."));
+                                    else if (info.encoder_note)   lines.push(qsTr("The GPU can't encode this video, so it's encoded on the CPU: %1").arg(info.encoder_note));
                                     else                          lines.push(qsTr("No GPU encoder could be used for this output, so it's encoded on the CPU."));
                                 }
                                 return lines.join("\n");

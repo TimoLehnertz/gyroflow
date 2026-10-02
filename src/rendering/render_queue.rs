@@ -1107,7 +1107,7 @@ impl RenderQueue {
             drop(params);
             let mut input_file = stab.input_file.read().clone();
             let filename = filesystem::get_filename(&input_file.url);
-            let render_options = job.render_options.clone();
+            let mut render_options = job.render_options.clone();
 
             progress((0.0, 0, (total_frame_count as f64 * trim_ratio).round() as usize, false, false));
 
@@ -1280,9 +1280,14 @@ impl RenderQueue {
                     vec![None]
                 };
                 let original_gpu_decode = stab.gpu_decoding.load(SeqCst);
-                // A render that's retried without the GPU decoder (see below) still reports that GPU decoding was wanted
+                let original_use_gpu = render_options.use_gpu;
+                // A render that's retried without the GPU decoder or encoder (see below) still reports that the GPU was wanted
                 let processing_info = move |mut info: rendering::ProcessingInfo| {
                     info.decoder_wanted_gpu = original_gpu_decode;
+                    info.encoder_wanted_gpu = original_use_gpu;
+                    if original_use_gpu && !info.encoder_gpu {
+                        info.encoder_note = rendering::gpu_encoding_failure_reason();
+                    }
                     processing_info(info);
                 };
                 'ranges: for range in ranges_to_render {
@@ -1305,6 +1310,13 @@ impl RenderQueue {
                             }
                             if original_gpu_decode && stab.gpu_decoding.load(SeqCst) && matches!(e, rendering::FFmpegError::GPUDecodingFailed) {
                                 stab.gpu_decoding.store(false, SeqCst);
+                                continue;
+                            }
+                            // The GPU encoder can't encode every size (eg. VAAPI on AMD only up to a height of 4352), encode on the CPU then
+                            if render_options.use_gpu && rendered_frames.load(SeqCst) == 0 && !rendering::gpu_encoding_failure_reason().is_empty() {
+                                ::log::info!("The GPU encoder can't encode this video, using the CPU encoder");
+                                render_options.use_gpu = false;
+                                i = 0;
                                 continue;
                             }
                             if rendered_frames.load(SeqCst) == 0 {
