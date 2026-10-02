@@ -1032,6 +1032,15 @@ Item {
                         }
                     }
                     Button { text: "]"; font.bold: true; onClicked: timeline.setTrimEnd(timeline.closestTrimRange(timeline.position, false), timeline.position); tooltip: qsTr("Trim end"); transparentOnMobile: true; }
+                    Button { iconName: "plus"; onClicked: timeline.addTrimRange(timeline.position); tooltip: qsTr("Add a trim range here, or split the one the playhead is in"); transparentOnMobile: true; }
+                    Button {
+                        iconName: "loop";
+                        accent: timeline.restrictTrim;
+                        enabled: timeline.trimActive;
+                        onClicked: timeline.restrictTrim = !timeline.restrictTrim;
+                        tooltip: timeline.restrictTrim? qsTr("Play the whole video") : qsTr("Play only the active trim range");
+                        transparentOnMobile: true;
+                    }
                     Button { visible: isMobile; iconName: "menu"; onClicked: timeline.toggleContextMenu(this); tooltip: qsTr("Show timeline menu"); transparentOnMobile: true; leftPadding: 10 * dpiScale; rightPadding: 10 * dpiScale; }
                 }
             }
@@ -1186,10 +1195,12 @@ Item {
                     controller.set_trim_ranges(timeline.trimRanges.map(x => x[0] + ":" + x[1]).join(";"));
                     restrictTrimChanged();
                 }
+                // Playback is restricted to the active trim range
+                onActiveTrimRangeChanged: if (restrictTrim) restrictTrimChanged();
                 onRestrictTrimChanged: {
                     if (restrictTrim) {
-                        const ranges = timeline.getTrimRanges();
-                        vid.setPlaybackRange(ranges[0][0] * vid.duration, ranges[ranges.length - 1][1] * vid.duration);
+                        const range = timeline.activeTrimRange >= 0? timeline.trimRanges[timeline.activeTrimRange] : [0.0, 1.0];
+                        vid.setPlaybackRange(range[0] * vid.duration, range[1] * vid.duration);
                     } else if (prevRestrictTrim != restrictTrim) {
                         vid.setPlaybackRange(0, -1);
                     }

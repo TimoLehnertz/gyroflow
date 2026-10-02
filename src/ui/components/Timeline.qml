@@ -21,7 +21,8 @@ Item {
     property var importedMarkers: [];
     property var prevTrimRanges: [];
     property bool trimActive: trimRanges.length > 0;
-    property bool restrictTrim: true;
+    // Playback is restricted to the active trim range
+    property bool restrictTrim: false;
 
     property real durationMs: 0;
     property real orgDurationMs: 0;
@@ -57,6 +58,11 @@ Item {
         return vid.timestamp * 1000;
     }
     function setPosition(pos: real): void {
+        // With the playback restricted to the active range, seeking into another range makes that one active first
+        if (restrictTrim) {
+            const range = trimRanges.findIndex(x => pos >= x[0] && pos <= x[1]);
+            if (range >= 0) activeTrimRange = range;
+        }
         const frame = frameAtPosition(pos);
         if (frame != vid.currentFrame) {
             vid.seekToFrame(frame, true);
@@ -117,6 +123,20 @@ Item {
             trimRanges = [[0.0, v]];
         }
         Qt.callLater(root.cleanupTrimRanges);
+    }
+    // Splits the range the position is in, otherwise adds a new range starting there (10 s, or until the next range)
+    function addTrimRange(pos: real): void {
+        const length = orgDurationMs > 0? 10000 / orgDurationMs : 0.1;
+        const inside = trimRanges.findIndex(x => pos > x[0] && pos < x[1]);
+        if (inside >= 0) {
+            trimRanges.splice(inside + 1, 0, [pos, trimRanges[inside][1]]);
+            trimRanges[inside][1] = pos;
+        } else {
+            const next = Math.min(1.0, ...trimRanges.map(x => x[0]).filter(x => x > pos));
+            if (next - pos < 0.001) return;
+            trimRanges.push([pos, Math.min(next, pos + length)]);
+        }
+        root.cleanupTrimRanges();
     }
     function addTrimStart(v: real): void {
         if (!trimRanges.length) return setTrimStart(-1, v);
@@ -809,10 +829,7 @@ Item {
                     Action {
                         iconName: "plus";
                         text: qsTr("Add new range");
-                        onTriggered: {
-                            root.trimRanges.push([root.position - 0.05, root.position + 0.05]);
-                            root.cleanupTrimRanges();
-                        }
+                        onTriggered: root.addTrimRange(root.position);
                     }
                     Action {
                         enabled: trimRangeMenu.currentTrimRange != -1;
@@ -833,7 +850,7 @@ Item {
                         enabled: root.trimActive;
                         checked: enabled && root.restrictTrim;
                         iconName: "loop";
-                        text: qsTr("Restrict playback to trim range");
+                        text: qsTr("Restrict playback to the active trim range");
                         onTriggered: root.restrictTrim = !root.restrictTrim;
                     }
                 }
