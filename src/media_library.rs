@@ -40,7 +40,6 @@ pub struct MediaItem {
     pub output_count: i32,
     pub lens_profile: QString,
     pub lens_warning: bool,
-    pub marker_unmatched: bool,
     pub scanning: bool,
     pub stabilized_state: i32,
     pub job_status: QString, // "" | queued | processing | rendering | done | error | question
@@ -79,7 +78,6 @@ struct Video {
     duration_ms: f64,
     lens_profile: String,
     lens_warning: bool,
-    marker_unmatched: bool,
     timeline_markers: Vec<marker_import::TimelineMarker>,
     scanning: bool,
     scan_queued: bool,
@@ -282,7 +280,6 @@ impl MediaLibrary {
             output_count: outputs.len() as i32,
             lens_profile: QString::from(v.lens_profile.as_str()),
             lens_warning: v.lens_warning,
-            marker_unmatched: v.marker_unmatched,
             scanning: v.scanning,
             stabilized_state: self.stabilized_state(v, &outputs),
             job_status: QString::from(job.status.as_str()),
@@ -934,9 +931,7 @@ impl MediaLibrary {
             Err(e) => return Self::marker_error(e),
         };
         let mut summary: serde_json::Value = serde_json::from_str(&self.marker_preview_json(&plan)).unwrap_or_else(|_| serde_json::json!({}));
-        let matched = plan.sections.iter().map(|s| s.video_id).collect::<std::collections::HashSet<_>>();
         for v in self.all_videos_mut() {
-            v.marker_unmatched = !matched.contains(&v.id);
             v.timeline_markers.clear();
         }
         for (id, marker) in plan.timeline {
@@ -1134,6 +1129,12 @@ impl MediaLibrary {
                     gyro.remove("filepath_bookmark");
                 }
             } else {
+                // The motion data is loaded from the file in `gyro_source`. Settings that weren't made in the main view
+                // (eg. trim ranges from imported markers) don't have it, then it's in the video itself
+                let gyro = o.entry("gyro_source").or_insert_with(|| serde_json::json!({ }));
+                if gyro.is_object() && gyro.get("filepath").and_then(|x| x.as_str()).map_or(true, |x| x.is_empty()) {
+                    gyro["filepath"] = serde_json::Value::String(url.clone());
+                }
                 o.insert("videofile".into(), serde_json::Value::String(url));
             }
         }
@@ -1666,6 +1667,18 @@ mod tests {
         })), vec![(0, "C0001-001.mp4".into()), (1, "second.mp4".into())]);
         // Joined into one video
         assert_eq!(outputs(serde_json::json!({ "trim_ranges_ms": [[0, 1000], [2000, 3000]], "output": { "export_trims_separately": false } })), vec![(-1, "C0001.mp4".into())]);
+    }
+
+    #[test]
+    fn motion_data_is_loaded_from_the_video_by_default() {
+        let mut lib = MediaLibrary::default();
+        lib.standalone.push(Video { id: 1, url: "file:///videos/GX012176.MP4".into(), settings: Some(serde_json::json!({ "trim_ranges_ms": [[0, 1000]] }).to_string()), ..Default::default() });
+        let obj: serde_json::Value = serde_json::from_str(&lib.get_project_data(1).to_string()).unwrap();
+        assert_eq!(obj["gyro_source"]["filepath"], "file:///videos/GX012176.MP4");
+        // A separate gyro file is kept
+        lib.standalone[0].settings = Some(serde_json::json!({ "gyro_source": { "filepath": "file:///videos/log.gcsv" } }).to_string());
+        let obj: serde_json::Value = serde_json::from_str(&lib.get_project_data(1).to_string()).unwrap();
+        assert_eq!(obj["gyro_source"]["filepath"], "file:///videos/log.gcsv");
     }
 
     #[test]

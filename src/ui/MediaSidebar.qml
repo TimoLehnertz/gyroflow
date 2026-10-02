@@ -816,7 +816,6 @@ ResizablePanel {
             property bool isInQueue: job_id > 0;
 
             color: selected?     "#33ffffff"
-                 : marker_unmatched && !dlg.isFolder? "#30f6a00b"
                  : isJobError?   "#30ed7676"
                  : isQuestion?   "#30" + styleAccentColor.toString().substring(1)
                  : stabilized_state == 1? "#3070e574"
@@ -994,17 +993,6 @@ ResizablePanel {
                         anchors.right: parent.right;
                         anchors.verticalCenter: parent.verticalCenter;
                         spacing: 3 * dpiScale;
-                        QQCI.IconImage {
-                            visible: marker_unmatched && !dlg.isFolder;
-                            name: "warning";
-                            source: "qrc:/resources/icons/svg/warning.svg";
-                            color: "#f6a00b";
-                            height: 14 * dpiScale;
-                            width: height;
-                            anchors.verticalCenter: parent.verticalCenter;
-                            ToolTip { visible: !isMobile && unmatchedMouse.containsMouse; text: qsTr("No imported trim range matched this video."); }
-                            MouseArea { id: unmatchedMouse; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton; }
-                        }
                         QQC.BusyIndicator {
                             visible: scanning;
                             height: 16 * dpiScale;
