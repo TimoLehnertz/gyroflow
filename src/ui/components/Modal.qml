@@ -217,7 +217,7 @@ Rectangle {
         }
     }
     Shortcut {
-        sequence: "Return";
+        sequences: ["Return", "Enter"];
         enabled: root.opened && (root.accentButton > -1 || btns.model?.length == 1);
         onActivated: if (root.opened) root.clicked(btns.model.length > 1? root.accentButton : 0, dontShowAgain.checked);
     }
