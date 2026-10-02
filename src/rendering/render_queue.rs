@@ -31,6 +31,8 @@ pub struct RenderQueueItem {
     pub end_timestamp: u64,
     pub error_string: QString,
     pub processing_progress: f64,
+    /// The previous item in the queue renders the same video (eg. another of its trim ranges), so they are shown as a group
+    pub same_video_as_previous: bool,
 
     frame_times: std::collections::VecDeque<(u64, u64)>,
 
@@ -419,15 +421,10 @@ impl RenderQueue {
                 let itm = q[old_index].clone();
                 q.remove(old_index);
                 q.insert(new_index, itm);
-
-                // Update all indices
-                for (i, v) in q.iter().enumerate() {
-                    if let Some(job) = self.jobs.get_mut(&v.job_id) {
-                        job.queue_index = i;
-                    }
-                }
             }
         }
+        // Update all indices
+        self.update_queue_indices();
         self.queue_changed();
     }
 
@@ -520,6 +517,7 @@ impl RenderQueue {
                 end_timestamp: 0,
                 processing_progress: 0.0,
                 error_string: QString::default(),
+                same_video_as_previous: false,
                 frame_times: Default::default(),
                 status: JobStatus::Queued,
             });
@@ -670,6 +668,17 @@ impl RenderQueue {
         for (i, v) in self.queue.borrow().iter().enumerate() {
             if let Some(job) = self.jobs.get_mut(&v.job_id) {
                 job.queue_index = i;
+            }
+        }
+        // The items of one video next to each other are shown as a group
+        if let Ok(mut q) = self.queue.try_borrow_mut() {
+            for i in 0..q.row_count() as usize {
+                let grouped = i > 0 && q[i - 1].input_file == q[i].input_file;
+                if q[i].same_video_as_previous != grouped {
+                    let mut itm = q[i].clone();
+                    itm.same_video_as_previous = grouped;
+                    q.change_line(i, itm);
+                }
             }
         }
     }

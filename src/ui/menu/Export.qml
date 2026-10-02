@@ -619,7 +619,7 @@ MenuItem {
         CheckBox {
             id: exportTrimsSeparately;
             text: qsTr("Export trim ranges as separate videos");
-            checked: false;
+            checked: true;
             width: parent.width;
             Component.onCompleted: contentItem.wrapMode = Text.WordWrap;
         }

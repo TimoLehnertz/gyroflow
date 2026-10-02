@@ -10,14 +10,16 @@ Rectangle {
 
     property real trimStartAdjustment: 0;
     property real trimEndAdjustment: 0;
+    // The range the playhead is in, or the last one it was in (whose settings and output path are shown)
+    property bool isActive: true;
 
     property bool active: rightTrimDrag.active || leftTrimDrag.active;
 
     x: parent.width * mapToVisibleArea(Math.max(0.0, trimStart + trimStartAdjustment));
     width: Math.max(10, parent.width * mapToVisibleArea(Math.min(1.0, trimEnd + trimEndAdjustment)) - x);
-    color: "#19ffffff";
+    color: isActive? Qt.rgba(styleAccentColor.r, styleAccentColor.g, styleAccentColor.b, 0.22) : "#12ffffff";
     border.width: 2 * dpiScale;
-    border.color: styleAccentColor;
+    border.color: isActive? styleAccentColor : Qt.rgba(styleAccentColor.r, styleAccentColor.g, styleAccentColor.b, 0.4);
     radius: 3 * dpiScale;
     clip: true;
     function mapToVisibleArea(v: real): real { return parent.parent.parent.mapToVisibleArea(v); }
@@ -27,6 +29,7 @@ Rectangle {
     signal changeTrimStart(real val);
     signal changeTrimEnd(real val);
     signal reset();
+
 
     Rectangle {
         color: parent.border.color;

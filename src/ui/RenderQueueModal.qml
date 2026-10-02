@@ -196,7 +196,9 @@ Item {
 
             delegate: Rectangle {
                 id: dlg;
-                width: lv.width;
+                // The items of one video (eg. its trim ranges) are indented below the first one
+                x: same_video_as_previous? 24 * dpiScale : 0;
+                width: lv.width - x;
                 height: 60 * dpiScale;
                 radius: 5 * dpiScale;
                 property real progress: total_frames > 0? current_frame / total_frames : 0;
@@ -331,8 +333,8 @@ Item {
                         BasicText {
                             width: parent.width;
                             leftPadding: 0;
-                            text: input_filename;
-                            font.bold: true;
+                            text: same_video_as_previous? output_filename : input_filename;
+                            font.bold: !same_video_as_previous;
                             font.pixelSize: 12 * dpiScale;
                             elide: Text.ElideMiddle;
                         }

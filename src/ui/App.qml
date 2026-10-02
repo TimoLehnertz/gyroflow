@@ -820,6 +820,8 @@ Rectangle {
         return {
             "output": exportSettings.item.getExportOptions(),
             "synchronization": sync.item.getSettings(),
+            // Output path of each trim range, in the order of `trim_ranges_ms`
+            "trim_range_info": videoArea.timeline.getTrimRangeInfo(),
 
             "muted": window.videoArea.vid.muted,
             "playback_speed": window.videoArea.vid.playbackRate

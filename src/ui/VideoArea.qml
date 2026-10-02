@@ -133,7 +133,9 @@ Item {
                     timeline.setTrimRanges([[obj.trim_start, obj.trim_end]]);
                 }
                 if (obj.hasOwnProperty("trim_ranges_ms")) {
-                    timeline.setTrimRanges(obj.trim_ranges_ms.map(x => [x[0] / duration_ms, (x[1] < 0? duration_ms + x[1] : x[1]) / duration_ms]));
+                    // The output path of each range is kept with it
+                    const info = obj.trim_range_info || [];
+                    timeline.setTrimRanges(obj.trim_ranges_ms.map((x, i) => [x[0] / duration_ms, (x[1] < 0? duration_ms + x[1] : x[1]) / duration_ms, info[i] || ({ })]));
                 } else if (obj.hasOwnProperty("trim_ranges")) {
                     timeline.setTrimRanges(obj.trim_ranges);
                 }

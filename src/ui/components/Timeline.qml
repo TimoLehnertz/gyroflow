@@ -10,6 +10,14 @@ import Gyroflow
 Item {
     id: root;
     property var trimRanges: [];
+    // The range the playhead is in, or the last one it was in. -1 if there are no ranges
+    property int activeTrimRange: -1;
+    function updateActiveTrimRange(): void {
+        if (!trimRanges.length) { activeTrimRange = -1; return; }
+        const inside = trimRanges.findIndex(x => position >= x[0] && position <= x[1]);
+        if (inside >= 0) activeTrimRange = inside;
+        else activeTrimRange = Math.max(0, Math.min(activeTrimRange, trimRanges.length - 1));
+    }
     property var importedMarkers: [];
     property var prevTrimRanges: [];
     property bool trimActive: trimRanges.length > 0;
@@ -32,6 +40,7 @@ Item {
     property real value: 0;
     readonly property real position: vid.timestamp / root.orgDurationMs;
     onPositionChanged: {
+        updateActiveTrimRange();
         if (ma.movingKeyframe && ma.holdingAlt) {
             let [keyframe, timestamp, name, value, id] = ma.movingKeyframe.split(":", 5);
             controller.set_keyframe_timestamp(keyframe, id, root.getTimestampUs());
@@ -72,6 +81,7 @@ Item {
             }
         }
         root.trimRangesChanged();
+        root.updateActiveTrimRange();
     }
 
     function closestTrimRange(pos: real, isStart: bool): int {
@@ -127,6 +137,16 @@ Item {
         }
         trimRanges = ranges;
         Qt.callLater(root.cleanupTrimRanges);
+    }
+    // Each trim range is [start, end, info], info has the output path of the range when they are exported as separate videos.
+    // It's kept with the range, so it follows it when the ranges are sorted or one of them is removed
+    function getTrimRangeInfo(): list<var> {
+        return trimRanges.map(x => x[2] || ({ }));
+    }
+    function setTrimRangeOutputPath(i: int, path: string): void {
+        if (i < 0 || i >= trimRanges.length) return;
+        trimRanges[i][2] = Object.assign({ }, trimRanges[i][2] || { }, { output_path: path });
+        root.trimRangesChanged();
     }
     function getTrimRanges(): list<var> {
         if (trimRanges.length > 0) {
@@ -849,6 +869,7 @@ Item {
                 TimelineRangeIndicator {
                     trimStart: modelData[0];
                     trimEnd: modelData[1];
+                    isActive: index == root.activeTrimRange;
                     y: (root.fullScreen || window.isMobileLayout? 0 : 35) * dpiScale;
                     height: parent.height - y;
 

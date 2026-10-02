@@ -21,7 +21,7 @@ const STALE:          i32 = 2;
 pub struct MediaItem {
     pub item_id: u32,
     pub parent_id: u32,
-    pub kind: QString, // folder | video | section
+    pub kind: QString, // folder | video
     pub depth: i32,
     pub name: QString,
     pub url: QString,
@@ -33,8 +33,10 @@ pub struct MediaItem {
     pub is_current: bool,
     pub created_at: u64,
     pub duration_ms: f64,
-    pub trim_start: f64,
-    pub trim_end: f64,
+    /// Trim ranges of the video, each of them is exported as its own file unless they are joined
+    pub range_count: i32,
+    /// Output files (and render jobs) of the video
+    pub output_count: i32,
     pub lens_profile: QString,
     pub lens_warning: bool,
     pub marker_unmatched: bool,
@@ -44,7 +46,9 @@ pub struct MediaItem {
     pub job_progress: f64,
     pub error_string: QString,
     pub job_message: QString,
+    /// First job of the video, all of them are returned by `get_item_jobs`
     pub job_id: u32,
+    pub job_count: i32,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -56,24 +60,13 @@ struct JobState {
     /// Informational note about the job, which doesn't change its status
     message: String,
     /// Hash of the stabilization settings this job was queued with
-    hash: String
+    hash: String,
+    /// The trim range the job renders, -1 if it renders the whole video (or all of its ranges joined)
+    range_index: i32
 }
 impl JobState {
     fn is_active(&self) -> bool { self.status == "queued" || self.status == "processing" || self.status == "rendering" }
     fn is_busy(&self) -> bool { self.status == "processing" || self.status == "rendering" }
-}
-
-#[derive(Default, Clone, Debug)]
-struct Section {
-    id: u32,
-    name: String,
-    trim_start: f64,
-    trim_end: f64,
-    settings: Option<String>,
-    output_path: String,
-    output_hash: Option<String>,
-    selected: bool,
-    job: JobState
 }
 
 #[derive(Default, Clone, Debug)]
@@ -91,11 +84,23 @@ struct Video {
     scan_queued: bool,
     settings: Option<String>,
     output_path: String,
-    output_hash: Option<String>,
+    /// Stabilization hash read from each existing output file, by its url (empty for files of older versions)
+    output_hashes: std::collections::HashMap<String, String>,
     expanded: bool,
     selected: bool,
-    sections: Vec<Section>,
-    job: JobState
+    /// One render job per output file
+    jobs: Vec<JobState>
+}
+
+/// A file the video is exported to: one per trim range if they are exported as separate videos, otherwise one for the whole video
+#[derive(Clone, Debug)]
+struct OutputFile {
+    range_index: i32,
+    folder: String,
+    filename: String
+}
+impl OutputFile {
+    fn url(&self) -> String { filesystem::get_file_url(&self.folder, &self.filename.replace("_%05d", "_00001"), false) }
 }
 
 #[derive(Default, Clone, Debug)]
@@ -144,8 +149,6 @@ pub struct MediaLibrary {
     get_item_kind: qt_method!(fn(&self, item_id: u32) -> QString),
     get_item_url: qt_method!(fn(&self, item_id: u32) -> QString),
     get_item_name: qt_method!(fn(&self, item_id: u32) -> QString),
-    get_trim_start: qt_method!(fn(&self, item_id: u32) -> f64),
-    get_trim_end: qt_method!(fn(&self, item_id: u32) -> f64),
     is_item_url: qt_method!(fn(&self, item_id: u32, url: QString) -> bool),
     find_by_url: qt_method!(fn(&self, url: QString) -> u32),
     get_item_index: qt_method!(fn(&self, item_id: u32) -> i32),
@@ -154,8 +157,6 @@ pub struct MediaLibrary {
     preview_markers: qt_method!(fn(&self, offset_seconds: f64) -> QString),
     import_markers: qt_method!(fn(&mut self, offset_seconds: f64) -> QString),
     get_timeline_markers: qt_method!(fn(&self, item_id: u32) -> QString),
-    add_section: qt_method!(fn(&mut self, video_id: u32, trim_start: f64, trim_end: f64) -> u32),
-    set_section_trim: qt_method!(fn(&mut self, item_id: u32, trim_start: f64, trim_end: f64)),
 
     save_settings: qt_method!(fn(&mut self, item_id: u32, data: QString)),
     get_project_data: qt_method!(fn(&self, item_id: u32) -> QString),
@@ -166,6 +167,7 @@ pub struct MediaLibrary {
     get_output_settings: qt_method!(fn(&self, item_id: u32) -> QString),
 
     get_output_path: qt_method!(fn(&self, item_id: u32) -> QString),
+    resolve_output_path: qt_method!(fn(&self, item_id: u32, path: QString, ext: QString) -> QVariantList),
     get_output_folder: qt_method!(fn(&self, item_id: u32) -> QString),
     get_output_filename: qt_method!(fn(&self, item_id: u32, ext: QString) -> QString),
     set_output_path: qt_method!(fn(&mut self, item_id: u32, path: QString)),
@@ -177,8 +179,13 @@ pub struct MediaLibrary {
     is_item_queued: qt_method!(fn(&self, item_id: u32) -> bool),
     retain_jobs: qt_method!(fn(&mut self, job_ids: QVariantList)),
     set_item_job: qt_method!(fn(&mut self, item_id: u32, job_id: u32)),
+    set_item_jobs: qt_method!(fn(&mut self, item_id: u32, job_ids: QVariantList, range_indexes: QVariantList)),
+    add_item_job: qt_method!(fn(&mut self, item_id: u32, job_id: u32, range_index: i32)),
     get_item_job: qt_method!(fn(&self, item_id: u32) -> u32),
+    get_item_jobs: qt_method!(fn(&self, item_id: u32) -> QVariantList),
+    get_item_outputs: qt_method!(fn(&self, item_id: u32, ext: QString) -> QString),
     get_item_job_status: qt_method!(fn(&self, item_id: u32) -> QString),
+    get_job_status: qt_method!(fn(&self, job_id: u32) -> QString),
     is_library_job: qt_method!(fn(&self, job_id: u32) -> bool),
     get_item_for_job: qt_method!(fn(&self, job_id: u32) -> u32),
     update_job_progress: qt_method!(fn(&mut self, job_id: u32, progress: f64, finished: bool)),
@@ -232,10 +239,7 @@ impl MediaLibrary {
         if search.is_empty() { return true; }
         if v.filename.to_lowercase().contains(&search) { return true; }
         if v.timeline_markers.iter().any(|m| m.name.to_lowercase().contains(&search)) { return true; }
-        if self.output_filename_of(&v.url, &v.output_path, &v.settings).to_lowercase().contains(&search) { return true; }
-        v.sections.iter().any(|s| {
-            s.name.to_lowercase().contains(&search) || self.output_filename_of(&v.url, &s.output_path, &s.settings).to_lowercase().contains(&search)
-        })
+        self.outputs(v, None).iter().any(|x| x.filename.to_lowercase().contains(&search))
     }
 
     fn sorted_videos<'a>(&self, videos: &'a [Video]) -> Vec<&'a Video> {
@@ -250,6 +254,8 @@ impl MediaLibrary {
 
     fn video_to_item(&self, v: &Video, parent_id: u32, depth: i32) -> MediaItem {
         let (folder, filename) = self.resolve_output(&v.url, &v.output_path, &v.settings, None);
+        let outputs = self.outputs(v, None);
+        let job = Self::job_summary(&v.jobs);
         MediaItem {
             item_id: v.id,
             parent_id,
@@ -258,68 +264,63 @@ impl MediaLibrary {
             name: QString::from(v.filename.as_str()),
             url: QString::from(v.url.as_str()),
             output_path: QString::from(self.output_path_or_default(&v.url, &v.output_path)),
-            display_output_path: QString::from(filesystem::display_folder_filename(&folder, &filename)),
+            display_output_path: QString::from(match outputs.as_slice() {
+                [one] => filesystem::display_folder_filename(&one.folder, &one.filename),
+                _ => filesystem::display_folder_filename(&folder, &filename)
+            }),
             expanded: v.expanded,
-            has_children: !v.sections.is_empty(),
+            has_children: false,
             selected: v.selected,
             is_current: self.current_item == v.id,
             created_at: v.created_at,
             duration_ms: v.duration_ms,
-            trim_start: 0.0,
-            trim_end: 1.0,
+            range_count: Self::range_info(&v.settings).0 as i32,
+            output_count: outputs.len() as i32,
             lens_profile: QString::from(v.lens_profile.as_str()),
             lens_warning: v.lens_warning,
             marker_unmatched: v.marker_unmatched,
             scanning: v.scanning,
-            stabilized_state: self.stabilized_state(&v.settings, &v.output_hash),
-            job_status: QString::from(v.job.status.as_str()),
-            job_progress: v.job.progress,
-            error_string: QString::from(v.job.error.as_str()),
-            job_message: QString::from(v.job.message.as_str()),
-            job_id: v.job.job_id,
+            stabilized_state: self.stabilized_state(v, &outputs),
+            job_status: QString::from(job.status.as_str()),
+            job_progress: job.progress,
+            error_string: QString::from(job.error.as_str()),
+            job_message: QString::from(job.message.as_str()),
+            job_id: job.job_id,
+            job_count: v.jobs.len() as i32,
         }
     }
-    fn section_to_item(&self, s: &Section, v: &Video, depth: i32) -> MediaItem {
-        let (folder, filename) = self.resolve_output(&v.url, &s.output_path, &s.settings, None);
-        MediaItem {
-            item_id: s.id,
-            parent_id: v.id,
-            kind: QString::from("section"),
-            depth,
-            name: QString::from(s.name.as_str()),
-            url: QString::from(v.url.as_str()),
-            output_path: QString::from(self.output_path_or_default(&v.url, &s.output_path)),
-            display_output_path: QString::from(filesystem::display_folder_filename(&folder, &filename)),
-            expanded: false,
-            has_children: false,
-            selected: s.selected,
-            is_current: self.current_item == s.id,
-            created_at: v.created_at,
-            duration_ms: v.duration_ms * (s.trim_end - s.trim_start).max(0.0),
-            trim_start: s.trim_start,
-            trim_end: s.trim_end,
-            lens_profile: QString::from(v.lens_profile.as_str()),
-            lens_warning: v.lens_warning,
-            marker_unmatched: false,
-            scanning: false,
-            stabilized_state: self.stabilized_state(&s.settings, &s.output_hash),
-            job_status: QString::from(s.job.status.as_str()),
-            job_progress: s.job.progress,
-            error_string: QString::from(s.job.error.as_str()),
-            job_message: QString::from(s.job.message.as_str()),
-            job_id: s.job.job_id,
-        }
+    /// The state of all jobs of a video, shown on its row: the first error or question, otherwise the furthest one in progress
+    fn job_summary(jobs: &[JobState]) -> JobState {
+        let Some(first) = jobs.first() else { return JobState::default(); };
+        let rank = |status: &str| match status { "error" => 6, "question" => 5, "rendering" => 4, "processing" => 3, "queued" => 2, "done" => 1, _ => 0 };
+        let mut ret = jobs.iter().max_by_key(|x| rank(&x.status)).cloned().unwrap_or_default();
+        // A video with some of its files done and others still queued is still queued
+        if ret.status == "done" && jobs.iter().any(|x| x.status != "done") { ret.status = "queued".into(); }
+        ret.progress = jobs.iter().map(|x| if x.status == "done" { 1.0 } else { x.progress }).sum::<f64>() / jobs.len() as f64;
+        ret.message = jobs.iter().map(|x| x.message.as_str()).find(|x| !x.is_empty()).unwrap_or_default().to_owned();
+        // An error or a question is answered for the job that has it, everything else is about the video
+        if ret.status != "error" && ret.status != "question" { ret.job_id = first.job_id; }
+        ret
+    }
+    /// Updates the job state shown on the row of the video
+    fn update_job_row(&mut self, video_id: u32) {
+        let Some(v) = self.video(video_id) else { return; };
+        let job = Self::job_summary(&v.jobs);
+        let count = v.jobs.len() as i32;
+        self.patch_row(video_id, |x| {
+            x.job_id = job.job_id;
+            x.job_count = count;
+            x.job_status = QString::from(job.status.as_str());
+            x.job_progress = job.progress;
+            x.error_string = QString::from(job.error.as_str());
+            x.job_message = QString::from(job.message.as_str());
+        });
     }
 
     fn build_items(&self) -> Vec<MediaItem> {
         let mut ret = Vec::new();
         let add_video = |ret: &mut Vec<MediaItem>, v: &Video, parent_id: u32, depth: i32| {
             ret.push(self.video_to_item(v, parent_id, depth));
-            if v.expanded {
-                for s in &v.sections {
-                    ret.push(self.section_to_item(s, v, depth + 1));
-                }
-            }
         };
 
         for v in self.sorted_videos(&self.standalone) {
@@ -384,32 +385,14 @@ impl MediaLibrary {
     fn video_mut(&mut self, id: u32) -> Option<&mut Video> {
         self.all_videos_mut().find(|v| v.id == id)
     }
-    /// Returns the video containing the section and the section itself
-    fn section(&self, id: u32) -> Option<(&Video, &Section)> {
-        for v in self.all_videos() {
-            if let Some(s) = v.sections.iter().find(|s| s.id == id) {
-                return Some((v, s));
-            }
-        }
-        None
-    }
-    fn section_mut(&mut self, id: u32) -> Option<&mut Section> {
-        self.all_videos_mut().find_map(|v| v.sections.iter_mut().find(|s| s.id == id))
-    }
     fn new_id(&mut self) -> u32 {
         self.next_id += 1;
         self.next_id
     }
 
-    /// Settings, output path and the job of any video or section
-    fn item_settings(&self, item_id: u32) -> Option<(&str, &Option<String>, &str, &JobState)> {
-        if let Some(v) = self.video(item_id) {
-            return Some((v.url.as_str(), &v.settings, v.output_path.as_str(), &v.job));
-        }
-        if let Some((v, s)) = self.section(item_id) {
-            return Some((v.url.as_str(), &s.settings, s.output_path.as_str(), &s.job));
-        }
-        None
+    /// Url, settings and output path of a video
+    fn item_settings(&self, item_id: u32) -> Option<(&str, &Option<String>, &str)> {
+        self.video(item_id).map(|v| (v.url.as_str(), &v.settings, v.output_path.as_str()))
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -516,8 +499,7 @@ impl MediaLibrary {
     pub fn remove_item(&mut self, item_id: u32) -> QVariantList {
         self.remove_ids(&[item_id])
     }
-    /// Folders and videos take precedence over their children so a selected video isn't left behind
-    /// after its sections are deleted, and a selected folder isn't left empty.
+    /// A selected folder is removed as a whole, so it isn't left empty
     pub fn get_removable_selection(&self) -> QVariantList {
         QVariantList::from_iter(self.removable_selection())
     }
@@ -526,11 +508,7 @@ impl MediaLibrary {
         self.remove_ids(&ids)
     }
     fn video_busy(v: &Video) -> bool {
-        v.job.is_busy() || v.sections.iter().any(|s| s.job.is_busy())
-    }
-    /// A video is removed as a whole when the video row is selected or every section is.
-    fn should_remove_video(v: &Video) -> bool {
-        v.selected || (!v.sections.is_empty() && v.sections.iter().all(|s| s.selected))
+        v.jobs.iter().any(|x| x.is_busy())
     }
     fn removable_selection(&self) -> Vec<u32> {
         let mut ids = Vec::new();
@@ -549,21 +527,12 @@ impl MediaLibrary {
         ids
     }
     fn push_removable_video(ids: &mut Vec<u32>, v: &Video) {
-        if Self::should_remove_video(v) && !Self::video_busy(v) {
+        if v.selected && !Self::video_busy(v) {
             ids.push(v.id);
-            return;
-        }
-        for s in &v.sections {
-            if s.selected && !s.job.is_busy() {
-                ids.push(s.id);
-            }
         }
     }
     fn collect_video_jobs(v: &Video, job_ids: &mut Vec<u32>) {
-        if v.job.job_id > 0 { job_ids.push(v.job.job_id); }
-        for s in &v.sections {
-            if s.job.job_id > 0 { job_ids.push(s.job.job_id); }
-        }
+        job_ids.extend(v.jobs.iter().map(|x| x.job_id).filter(|x| *x > 0));
     }
     fn remove_ids(&mut self, ids: &[u32]) -> QVariantList {
         if ids.is_empty() { return QVariantList::default(); }
@@ -578,12 +547,6 @@ impl MediaLibrary {
         for v in self.all_videos() {
             if idset.contains(&v.id) {
                 Self::collect_video_jobs(v, &mut job_ids);
-            } else {
-                for s in &v.sections {
-                    if idset.contains(&s.id) && s.job.job_id > 0 {
-                        job_ids.push(s.job.job_id);
-                    }
-                }
             }
         }
 
@@ -591,18 +554,11 @@ impl MediaLibrary {
         self.standalone.retain(|v| !idset.contains(&v.id));
         for f in self.folders.iter_mut() {
             f.videos.retain(|v| !idset.contains(&v.id));
-            for v in f.videos.iter_mut() {
-                v.sections.retain(|s| !idset.contains(&s.id));
-            }
-        }
-        for v in self.standalone.iter_mut() {
-            v.sections.retain(|s| !idset.contains(&s.id));
         }
 
         if self.current_item > 0
             && self.folders.iter().all(|f| f.id != self.current_item)
             && self.video(self.current_item).is_none()
-            && self.section(self.current_item).is_none()
         {
             self.current_item = 0;
             self.current_item_changed();
@@ -711,39 +667,26 @@ impl MediaLibrary {
 
     /// Checks which of the output files already exist and reads the stabilization hash from them
     pub fn refresh_outputs(&mut self) {
-        let mut to_check = Vec::new();
-        for v in self.all_videos() {
-            to_check.push((v.id, self.resolve_output(&v.url, &v.output_path, &v.settings, None)));
-            for s in &v.sections {
-                to_check.push((s.id, self.resolve_output(&v.url, &s.output_path, &s.settings, None)));
-            }
-        }
+        let to_check = self.all_videos().map(|v| (v.id, self.outputs(v, None).iter().map(|x| x.url()).collect::<Vec<_>>())).collect::<Vec<_>>();
         if to_check.is_empty() { return; }
 
-        let checked = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, (item_id, hash): (u32, Option<String>)| {
-            let mut settings = None;
-            if let Some(v) = this.video_mut(item_id) {
-                v.output_hash = hash;
-                settings = Some((v.settings.clone(), v.output_hash.clone()));
-            } else if let Some(s) = this.section_mut(item_id) {
-                s.output_hash = hash;
-                settings = Some((s.settings.clone(), s.output_hash.clone()));
-            }
-            if let Some((settings, hash)) = settings {
-                let state = this.stabilized_state(&settings, &hash);
-                this.patch_row(item_id, |x| x.stabilized_state = state);
-            }
+        let checked = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, (video_id, hashes): (u32, Vec<(String, Option<String>)>)| {
+            let Some(v) = this.video_mut(video_id) else { return; };
+            v.output_hashes = hashes.into_iter().filter_map(|(url, hash)| Some((url, hash?))).collect();
+            this.update_stabilized_row(video_id);
         });
 
         core::run_threaded(move || {
-            for (item_id, (folder, filename)) in to_check {
-                let url = filesystem::get_file_url(&folder, &filename.replace("_%05d", "_00001"), false);
-                if !url.is_empty() && filesystem::exists(&url) {
-                    let hash = rendering::render_queue::stabilization_hash_from_file(&url).unwrap_or_default();
-                    checked((item_id, Some(hash)));
-                } else {
-                    checked((item_id, None));
-                }
+            for (video_id, urls) in to_check {
+                let hashes = urls.into_iter().map(|url| {
+                    let hash = if !url.is_empty() && filesystem::exists(&url) {
+                        Some(rendering::render_queue::stabilization_hash_from_file(&url).unwrap_or_default())
+                    } else {
+                        None
+                    };
+                    (url, hash)
+                }).collect();
+                checked((video_id, hashes));
             }
         });
     }
@@ -765,7 +708,6 @@ impl MediaLibrary {
     /// the render queue. Being in the queue is tracked separately, by the job of the item.
     fn select_video(v: &mut Video, selected: bool) {
         v.selected = selected;
-        for s in v.sections.iter_mut() { s.selected = selected; }
     }
 
     pub fn set_selected(&mut self, item_id: u32, selected: bool) {
@@ -779,8 +721,6 @@ impl MediaLibrary {
             }
         } else if let Some(v) = self.video_mut(item_id) {
             Self::select_video(v, selected);
-        } else if let Some(s) = self.section_mut(item_id) {
-            s.selected = selected;
         }
     }
     /// Plain click: this item becomes the whole selection
@@ -795,8 +735,6 @@ impl MediaLibrary {
     pub fn toggle_selected(&mut self, item_id: u32) {
         let selected = if let Some(v) = self.video(item_id) {
             v.selected
-        } else if let Some((_, s)) = self.section(item_id) {
-            s.selected
         } else if let Some(f) = self.folders.iter().find(|f| f.id == item_id) {
             Self::is_folder_selected(f)
         } else {
@@ -846,7 +784,6 @@ impl MediaLibrary {
         }
         for v in self.all_videos() {
             states.push((v.id, v.selected));
-            for s in &v.sections { states.push((s.id, s.selected)); }
         }
         for (id, selected) in states {
             self.patch_row(id, |x| x.selected = selected);
@@ -854,13 +791,7 @@ impl MediaLibrary {
         self.items_changed();
     }
     pub fn selected_count(&self) -> usize {
-        self.all_videos().map(|v| {
-            if v.sections.is_empty() {
-                if v.selected { 1 } else { 0 }
-            } else {
-                v.sections.iter().filter(|s| s.selected).count()
-            }
-        }).sum()
+        self.all_videos().filter(|v| v.selected).count()
     }
 
     pub fn set_current_item(&mut self, item_id: u32) {
@@ -874,25 +805,21 @@ impl MediaLibrary {
     pub fn get_item_kind(&self, item_id: u32) -> QString {
         if self.folders.iter().any(|f| f.id == item_id) { return QString::from("folder"); }
         if self.video(item_id).is_some() { return QString::from("video"); }
-        if self.section(item_id).is_some() { return QString::from("section"); }
         QString::default()
     }
     pub fn get_item_url(&self, item_id: u32) -> QString {
         if let Some(f) = self.folders.iter().find(|f| f.id == item_id) { return QString::from(f.url.as_str()); }
-        self.item_settings(item_id).map(|(url, _, _, _)| QString::from(url)).unwrap_or_default()
+        self.item_settings(item_id).map(|(url, _, _)| QString::from(url)).unwrap_or_default()
     }
     pub fn get_item_name(&self, item_id: u32) -> QString {
         if let Some(f) = self.folders.iter().find(|f| f.id == item_id) { return QString::from(f.name.as_str()); }
         if let Some(v) = self.video(item_id) { return QString::from(v.filename.as_str()); }
-        if let Some((_, s)) = self.section(item_id) { return QString::from(s.name.as_str()); }
         QString::default()
     }
-    pub fn get_trim_start(&self, item_id: u32) -> f64 { self.section(item_id).map(|(_, s)| s.trim_start).unwrap_or(0.0) }
-    pub fn get_trim_end  (&self, item_id: u32) -> f64 { self.section(item_id).map(|(_, s)| s.trim_end)  .unwrap_or(1.0) }
 
     pub fn is_item_url(&self, item_id: u32, url: QString) -> bool {
         let url = Self::to_url(&url.to_string(), false);
-        !url.is_empty() && self.item_settings(item_id).map(|(x, _, _, _)| x == url).unwrap_or_default()
+        !url.is_empty() && self.item_settings(item_id).map(|(x, _, _)| x == url).unwrap_or_default()
     }
     pub fn find_by_url(&self, url: QString) -> u32 {
         let url = Self::to_url(&url.to_string(), false);
@@ -910,7 +837,7 @@ impl MediaLibrary {
     }
 
     // ---------------------------------------------------------------------------------------------
-    // ----------------------------------------- Sections ------------------------------------------
+    // --------------------------------------- Trim ranges -----------------------------------------
     // ---------------------------------------------------------------------------------------------
 
     fn marker_error(message: String) -> QString {
@@ -1013,8 +940,9 @@ impl MediaLibrary {
         }
         let mut queue_ids = Vec::new();
         for section in plan.sections {
-            let id = self.create_section(section.video_id, section.start, section.end, section.name, section.path);
-            if id > 0 { queue_ids.push(id); }
+            if self.add_trim_range(section.video_id, section.start, section.end, section.name, section.path) && !queue_ids.contains(&section.video_id) {
+                queue_ids.push(section.video_id);
+            }
         }
         self.rebuild();
         self.refresh_outputs();
@@ -1023,49 +951,85 @@ impl MediaLibrary {
     }
 
     pub fn get_timeline_markers(&self, item_id: u32) -> QString {
-        let video = self.video(item_id).or_else(|| self.section(item_id).map(|(v, _)| v));
+        let video = self.video(item_id);
         QString::from(serde_json::to_string(&video.map(|v| &v.timeline_markers).cloned().unwrap_or_default()).unwrap_or_else(|_| "[]".into()))
     }
 
-    fn create_section(&mut self, video_id: u32, trim_start: f64, trim_end: f64, name: Option<String>, path: Option<String>) -> u32 {
-        let id = self.new_id();
-        let suffix = self.default_suffix.to_string();
-        if let Some(v) = self.video_mut(video_id) {
-            let settings = v.sections.last().map(|s| s.settings.clone()).unwrap_or_else(|| v.settings.clone());
-            let num = v.sections.len() + 1;
-            let default_path = Self::filename_with_index(&Self::default_output_filename(&v.filename, &suffix), num);
-            // The extension is added when the path is resolved, it follows the codec
-            let named_path = name.as_ref().filter(|n| !n.trim().is_empty()).map(|name| name.trim().replace(['/', '\\'], "_"));
-            v.expanded = true;
-            v.sections.push(Section {
-                id,
-                name: name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| format!("Section {num}")),
-                trim_start,
-                trim_end,
-                settings,
-                output_path: path.or(named_path).unwrap_or(default_path),
-                ..Default::default()
-            });
-            id
-        } else {
-            0
+    /// Adds a trim range (normalized to 0..1) with an optional name and output path to the settings of the video.
+    /// An identical range is not added twice. Returns whether the video has the range now
+    fn add_trim_range(&mut self, video_id: u32, start: f64, end: f64, name: Option<String>, path: Option<String>) -> bool {
+        let base = self.video(video_id).map(|v| self.output_path_or_default(&v.url, &v.output_path)).unwrap_or_default();
+        let Some(v) = self.video_mut(video_id) else { return false; };
+        if v.duration_ms <= 0.0 || end <= start { return false; }
+        let (start_ms, end_ms) = (start * v.duration_ms, end * v.duration_ms);
+        let mut obj = v.settings.as_ref()
+            .and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok())
+            .filter(|x| x.is_object())
+            .unwrap_or_else(|| serde_json::json!({ "title": "Gyroflow data file", "version": 4, "videofile": v.url }));
+        let mut ranges = Self::trim_ranges_ms(&obj);
+        let mut info = Self::range_info_values(&obj, ranges.len());
+        if !ranges.iter().any(|r| (r.0 - start_ms).abs() < 1.0 && (r.1 - end_ms).abs() < 1.0) {
+            ranges.push((start_ms, end_ms));
+            // The output path of the marker, otherwise its name is added to the path of the video
+            let name = name.unwrap_or_default().trim().replace(['/', '\\'], "_");
+            let path = path.filter(|x| !x.trim().is_empty()).unwrap_or_else(|| if name.is_empty() { String::new() } else { format!("{base}-{name}") });
+            info.push(serde_json::json!({ "output_path": path }));
         }
+        // The timeline keeps the ranges sorted, keep the names with them
+        let mut combined = ranges.into_iter().zip(info).collect::<Vec<_>>();
+        combined.sort_by(|a, b| a.0.0.total_cmp(&b.0.0));
+        if let serde_json::Value::Object(ref mut o) = obj {
+            o.insert("trim_ranges_ms".into(), serde_json::json!(combined.iter().map(|x| [x.0.0, x.0.1]).collect::<Vec<_>>()));
+            o.insert("trim_range_info".into(), serde_json::json!(combined.into_iter().map(|x| x.1).collect::<Vec<_>>()));
+            o.remove("trim_ranges");
+        }
+        Self::assign_range_paths(&mut obj, &base);
+        v.settings = Some(obj.to_string());
+        true
     }
-
-    pub fn add_section(&mut self, video_id: u32, trim_start: f64, trim_end: f64) -> u32 {
-        let id = self.create_section(video_id, trim_start, trim_end, None, None);
-        if id > 0 {
-            self.rebuild();
-            self.refresh_outputs();
-        }
-        id
+    fn trim_ranges_ms(obj: &serde_json::Value) -> Vec<(f64, f64)> {
+        obj.get("trim_ranges_ms").and_then(|x| x.as_array()).map(|x| x.iter().filter_map(|r| {
+            let r = r.as_array()?;
+            Some((r.first()?.as_f64()?, r.get(1)?.as_f64()?))
+        }).collect()).unwrap_or_default()
     }
-    pub fn set_section_trim(&mut self, item_id: u32, trim_start: f64, trim_end: f64) {
-        if let Some(s) = self.section_mut(item_id) {
-            s.trim_start = trim_start;
-            s.trim_end = trim_end;
+    /// `trim_range_info` (name and output path of each trim range), as many entries as there are ranges
+    fn range_info_values(obj: &serde_json::Value, count: usize) -> Vec<serde_json::Value> {
+        let mut info = obj.get("trim_range_info").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+        info.resize(count, serde_json::json!({}));
+        info
+    }
+    /// Number of trim ranges, the output path of each, and whether they are exported as separate videos
+    fn range_info(settings: &Option<String>) -> (usize, Vec<String>, bool) {
+        let Some(obj) = settings.as_ref().and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok()) else { return (0, Vec::new(), true); };
+        let count = obj.get("trim_ranges_ms").or_else(|| obj.get("trim_ranges")).and_then(|x| x.as_array()).map(|x| x.len()).unwrap_or_default();
+        let paths = Self::range_info_values(&obj, count).iter().map(Self::range_path).collect();
+        let separate = obj.get("output").and_then(|x| x.get("export_trims_separately")).and_then(|x| x.as_bool()).unwrap_or(true);
+        (count, paths, separate)
+    }
+    fn range_path(info: &serde_json::Value) -> String {
+        info.get("output_path").and_then(|x| x.as_str()).unwrap_or_default().trim().to_owned()
+    }
+    /// Every trim range has its own output path. A range that doesn't have one yet gets the path of the video
+    /// with the next free number (`clip_stabilized-001`, `-002`, ...)
+    fn assign_range_paths(obj: &mut serde_json::Value, base: &str) {
+        let count = Self::trim_ranges_ms(obj).len().max(obj.get("trim_ranges").and_then(|x| x.as_array()).map(|x| x.len()).unwrap_or_default());
+        let mut info = Self::range_info_values(obj, count);
+        let mut used = info.iter().map(Self::range_path).filter(|x| !x.is_empty()).collect::<std::collections::HashSet<_>>();
+        let mut number = 1;
+        for x in info.iter_mut() {
+            if !Self::range_path(x).is_empty() { continue; }
+            let path = loop {
+                let path = format!("{base}-{number:0>3}");
+                number += 1;
+                if !used.contains(&path) { break path; }
+            };
+            used.insert(path.clone());
+            *x = serde_json::json!({ "output_path": path });
         }
-        self.rebuild();
+        if let serde_json::Value::Object(o) = obj {
+            if count > 0 { o.insert("trim_range_info".into(), serde_json::json!(info)); }
+        }
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -1088,7 +1052,7 @@ impl MediaLibrary {
         }
         // A lens profile loaded manually in the main view clears the warning of that video
         let lens_name = data.get("calibration_data").and_then(|x| x.get("name")).and_then(|x| x.as_str()).unwrap_or_default().to_owned();
-        let video_id = if self.video(item_id).is_some() { item_id } else { self.section(item_id).map(|(v, _)| v.id).unwrap_or_default() };
+        let video_id = item_id;
         if !lens_name.is_empty() {
             if let Some(v) = self.video_mut(video_id) {
                 if v.lens_warning {
@@ -1103,31 +1067,21 @@ impl MediaLibrary {
             });
         }
 
-        // The trim range of a section is edited in the timeline of the main view
-        let new_trim = self.section(item_id).and_then(|(v, _)| {
-            let ranges = data.get("trim_ranges_ms")?.as_array()?;
-            let range = ranges.first()?.as_array()?;
-            let duration_ms = if v.duration_ms > 0.0 { v.duration_ms } else { return None; };
-            Some((range.first()?.as_f64()? / duration_ms, range.get(1)?.as_f64()? / duration_ms))
-        });
-
-        let data = data.to_string();
-        if let Some(v) = self.video_mut(item_id) {
-            v.settings = Some(data);
-        } else if let Some(s) = self.section_mut(item_id) {
-            s.settings = Some(data);
-            if let Some((start, end)) = new_trim {
-                if end > start {
-                    s.trim_start = start;
-                    s.trim_end = end;
-                }
-            }
-        } else {
-            return;
+        if let Some(base) = self.video(item_id).map(|v| self.output_path_or_default(&v.url, &v.output_path)) {
+            Self::assign_range_paths(&mut data, &base);
         }
-        self.update_stabilized_row(item_id);
+        let data = data.to_string();
+        let Some(v) = self.video_mut(item_id) else { return; };
+        // The trim ranges (and with them the output files) are edited in the timeline of the main view
+        let outputs_changed = Self::range_info(&v.settings) != Self::range_info(&Some(data.clone()));
+        v.settings = Some(data);
         self.refresh_job_hash(item_id);
-        if new_trim.is_some() { self.rebuild(); }
+        if outputs_changed {
+            self.rebuild();
+            self.refresh_outputs();
+        } else {
+            self.update_stabilized_row(item_id);
+        }
     }
 
     /// Project data of the item, used to load it in the main view
@@ -1141,14 +1095,10 @@ impl MediaLibrary {
     }
 
     fn build_project_data(&self, item_id: u32, as_preset: bool) -> Option<String> {
-        let (url, settings, _, _) = self.item_settings(item_id)?;
+        let (url, settings, _) = self.item_settings(item_id)?;
         let url = url.to_owned();
-        let section = self.section(item_id).map(|(v, s)| (v.duration_ms, s.trim_start, s.trim_end));
-        let parsed = settings.as_ref().and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok()).filter(|x| x.is_object());
-        if parsed.is_none() && section.is_none() {
-            return None; // Nothing was configured for this video, load it as a plain video file
-        }
-        let mut obj = parsed.unwrap_or_else(|| serde_json::json!({ "title": "Gyroflow data file", "version": 4 }));
+        // Nothing was configured for this video, load it as a plain video file
+        let mut obj = settings.as_ref().and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok()).filter(|x| x.is_object())?;
         if let serde_json::Value::Object(ref mut o) = obj {
             // The output path is managed by the media library, but the other export settings (resolution, codec etc.) belong to the item
             if let Some(output) = o.get_mut("output") { Self::strip_output_path(output); }
@@ -1161,14 +1111,6 @@ impl MediaLibrary {
                 }
             } else {
                 o.insert("videofile".into(), serde_json::Value::String(url));
-            }
-            if let Some((duration_ms, start, end)) = section {
-                if duration_ms > 0.0 {
-                    o.insert("trim_ranges_ms".into(), serde_json::json!([[start * duration_ms, end * duration_ms]]));
-                } else {
-                    o.remove("trim_ranges_ms");
-                    o.insert("trim_ranges".into(), serde_json::json!([[start, end]]));
-                }
             }
         }
         Some(obj.to_string())
@@ -1184,7 +1126,7 @@ impl MediaLibrary {
     /// Export settings saved with the item, without the output path. Empty if the item wasn't configured yet
     pub fn get_output_settings(&self, item_id: u32) -> QString {
         self.item_settings(item_id)
-            .and_then(|(_, s, _, _)| s.as_ref())
+            .and_then(|(_, s, _)| s.as_ref())
             .and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok())
             .and_then(|x| x.get("output").cloned())
             .filter(|x| x.is_object())
@@ -1192,7 +1134,7 @@ impl MediaLibrary {
             .unwrap_or_default()
     }
 
-    /// Applies the stabilization settings (and only those) to all videos and sections in the library
+    /// Applies the stabilization settings (and only those) to all videos in the library
     pub fn apply_stabilization_to_all(&mut self, data: QString, except_item_id: u32) -> usize {
         let new_stab = match serde_json::from_str::<serde_json::Value>(&data.to_string()) {
             Ok(v) => v.get("stabilization").cloned().unwrap_or(v),
@@ -1218,12 +1160,6 @@ impl MediaLibrary {
             if v.id != except_item_id {
                 apply(&mut v.settings, &url, &new_stab);
                 ids.push(v.id);
-                count += 1;
-            }
-            for s in v.sections.iter_mut() {
-                if s.id == except_item_id { continue; }
-                apply(&mut s.settings, &url, &new_stab);
-                ids.push(s.id);
                 count += 1;
             }
         }
@@ -1268,15 +1204,9 @@ impl MediaLibrary {
         let mut ids = Vec::new();
         for v in self.all_videos_mut() {
             let url = v.url.clone();
-            if v.job.job_id > 0 && (v.job.status == "queued" || v.job.status == "processing") {
+            if v.jobs.iter().any(|x| x.job_id > 0 && (x.status == "queued" || x.status == "processing")) {
                 apply(&mut v.settings, &url, &new_data);
                 ids.push(v.id);
-            }
-            for s in v.sections.iter_mut() {
-                if s.job.job_id > 0 && (s.job.status == "queued" || s.job.status == "processing") {
-                    apply(&mut s.settings, &url, &new_data);
-                    ids.push(s.id);
-                }
             }
         }
         for &id in &ids {
@@ -1293,33 +1223,32 @@ impl MediaLibrary {
             .unwrap_or(serde_json::Value::Null)
     }
     pub fn settings_hash(&self, item_id: u32) -> QString {
-        let settings = self.item_settings(item_id).map(|(_, s, _, _)| s.clone()).unwrap_or_default();
+        let settings = self.item_settings(item_id).map(|(_, s, _)| s.clone()).unwrap_or_default();
         QString::from(rendering::render_queue::stabilization_settings_hash(&Self::effective_stabilization(&settings)))
     }
-    fn stabilized_state(&self, settings: &Option<String>, output_hash: &Option<String>) -> i32 {
-        match output_hash {
-            None => NOT_STABILIZED,
-            // Files rendered by older versions don't have the hash, we can't tell if they are up to date
-            Some(hash) if hash.is_empty() => STABILIZED,
-            Some(hash) => {
-                if *hash == rendering::render_queue::stabilization_settings_hash(&Self::effective_stabilization(settings)) { STABILIZED } else { STALE }
-            }
+    /// Stabilized when all output files exist and were rendered with the current settings, changed when one of them wasn't
+    fn stabilized_state(&self, v: &Video, outputs: &[OutputFile]) -> i32 {
+        let current = rendering::render_queue::stabilization_settings_hash(&Self::effective_stabilization(&v.settings));
+        let hashes = outputs.iter().map(|x| v.output_hashes.get(&x.url())).collect::<Vec<_>>();
+        // Files rendered by older versions don't have the hash, we can't tell if they are up to date
+        if hashes.iter().any(|x| x.map_or(false, |hash| !hash.is_empty() && *hash != current)) {
+            STALE
+        } else if !hashes.is_empty() && hashes.iter().all(|x| x.is_some()) {
+            STABILIZED
+        } else {
+            NOT_STABILIZED
         }
     }
-    /// The job of a queued item is kept in sync with its settings, so it also renders with the new hash
+    /// The jobs of a queued video are kept in sync with its settings, so they also render with the new hash
     fn refresh_job_hash(&mut self, item_id: u32) {
         let hash = self.settings_hash(item_id).to_string();
         if let Some(v) = self.video_mut(item_id) {
-            if v.job.status == "queued" { v.job.hash = hash; }
-        } else if let Some(s) = self.section_mut(item_id) {
-            if s.job.status == "queued" { s.job.hash = hash; }
+            for job in v.jobs.iter_mut().filter(|x| x.status == "queued") { job.hash = hash.clone(); }
         }
     }
     fn update_stabilized_row(&mut self, item_id: u32) {
-        if let Some((_, settings, _, _)) = self.item_settings(item_id) {
-            let settings = settings.clone();
-            let hash = if let Some(v) = self.video(item_id) { v.output_hash.clone() } else { self.section(item_id).and_then(|(_, s)| s.output_hash.clone()) };
-            let state = self.stabilized_state(&settings, &hash);
+        if let Some(v) = self.video(item_id) {
+            let state = self.stabilized_state(v, &self.outputs(v, None));
             self.patch_row(item_id, |x| x.stabilized_state = state);
         }
     }
@@ -1332,9 +1261,6 @@ impl MediaLibrary {
     fn default_output_filename(input_filename: &str, suffix: &str) -> String {
         let stem = input_filename.rfind('.').map_or(input_filename, |pos| &input_filename[..pos]);
         format!("{stem}{suffix}")
-    }
-    fn filename_with_index(filename: &str, index: usize) -> String {
-        format!("{filename}_{index}")
     }
     /// Extension of the rendered file, from the export settings saved with the item
     fn output_extension(input_url: &str, settings: &Option<String>) -> String {
@@ -1368,9 +1294,6 @@ impl MediaLibrary {
             output_path.to_owned()
         }
     }
-    fn output_filename_of(&self, input_url: &str, output_path: &str, settings: &Option<String>) -> String {
-        self.resolve_output(input_url, output_path, settings, None).1
-    }
     /// The output path can be either absolute, or relative to the export folder (which defaults to the input folder).
     /// The extension comes from `ext` if given, otherwise from the export settings of the item
     fn resolve_output(&self, input_url: &str, output_path: &str, settings: &Option<String>, ext: Option<&str>) -> (String, String) {
@@ -1396,29 +1319,58 @@ impl MediaLibrary {
         (folder, filename)
     }
 
+    /// The files the video is exported to: the output path of the video if it's exported as one file (no trim ranges, or
+    /// joined), otherwise the output path of each trim range
+    fn outputs(&self, v: &Video, ext: Option<&str>) -> Vec<OutputFile> {
+        let (count, paths, separate) = Self::range_info(&v.settings);
+        if count == 0 || !separate {
+            let (folder, filename) = self.resolve_output(&v.url, &v.output_path, &v.settings, ext);
+            return vec![OutputFile { range_index: -1, folder, filename }];
+        }
+        let base = self.output_path_or_default(&v.url, &v.output_path);
+        paths.iter().enumerate().map(|(i, path)| {
+            // Every range gets a path when the settings are saved, this is only for settings that never were
+            let path = if path.is_empty() { format!("{base}-{:0>3}", i + 1) } else { path.clone() };
+            let (folder, filename) = self.resolve_output(&v.url, &path, &v.settings, ext);
+            OutputFile { range_index: i as i32, folder, filename }
+        }).collect()
+    }
+    /// Folder and filename (with the extension of the codec) the output path resolves to for the video, for the output path field
+    pub fn resolve_output_path(&self, item_id: u32, path: QString, ext: QString) -> QVariantList {
+        let (ext, path) = (ext.to_string(), path.to_string());
+        let ext = Some(ext.as_str()).filter(|x| !x.is_empty());
+        let (folder, filename) = self.item_settings(item_id).map(|(url, settings, _)| self.resolve_output(url, &path, settings, ext)).unwrap_or_default();
+        QVariantList::from_iter([QString::from(folder), QString::from(filename)])
+    }
+    /// The output files of the video as JSON: `[{ range_index, output_folder, output_filename }]`, the way the render queue takes them
+    pub fn get_item_outputs(&self, item_id: u32, ext: QString) -> QString {
+        let ext = ext.to_string();
+        let ext = Some(ext.as_str()).filter(|x| !x.is_empty());
+        let outputs = self.video(item_id).map(|v| self.outputs(v, ext)).unwrap_or_default();
+        QString::from(serde_json::json!(outputs.iter().map(|x| serde_json::json!({
+            "range_index": x.range_index,
+            "output_folder": x.folder,
+            "output_filename": x.filename,
+        })).collect::<Vec<_>>()).to_string())
+    }
+
     pub fn get_output_path(&self, item_id: u32) -> QString {
-        self.item_settings(item_id).map(|(url, _, path, _)| QString::from(self.output_path_or_default(url, path))).unwrap_or_default()
+        self.item_settings(item_id).map(|(url, _, path)| QString::from(self.output_path_or_default(url, path))).unwrap_or_default()
     }
     pub fn get_output_folder(&self, item_id: u32) -> QString {
-        self.item_settings(item_id).map(|(url, settings, path, _)| QString::from(self.resolve_output(url, path, settings, None).0)).unwrap_or_default()
+        self.item_settings(item_id).map(|(url, settings, path)| QString::from(self.resolve_output(url, path, settings, None).0)).unwrap_or_default()
     }
     /// The extension follows `ext` (the codec selected in the main view) or, if it's empty, the export settings saved with the item
     pub fn get_output_filename(&self, item_id: u32, ext: QString) -> QString {
         let ext = ext.to_string();
         let ext = Some(ext.as_str()).filter(|x| !x.is_empty());
-        self.item_settings(item_id).map(|(url, settings, path, _)| QString::from(self.resolve_output(url, path, settings, ext).1)).unwrap_or_default()
+        self.item_settings(item_id).map(|(url, settings, path)| QString::from(self.resolve_output(url, path, settings, ext).1)).unwrap_or_default()
     }
     pub fn set_output_path(&mut self, item_id: u32, path: QString) {
         let path = path.to_string();
-        if let Some(v) = self.video_mut(item_id) {
-            v.output_path = path;
-            v.output_hash = None;
-        } else if let Some(s) = self.section_mut(item_id) {
-            s.output_path = path;
-            s.output_hash = None;
-        } else {
-            return;
-        }
+        let Some(v) = self.video_mut(item_id) else { return; };
+        v.output_path = path;
+        v.output_hashes.clear();
         self.rebuild();
         self.refresh_outputs();
     }
@@ -1428,7 +1380,7 @@ impl MediaLibrary {
         let folder = filesystem::normalize_url(&folder.to_string(), true);
         if filename.is_empty() { return; }
 
-        let input_url = self.item_settings(item_id).map(|(url, _, _, _)| url.to_owned()).unwrap_or_default();
+        let input_url = self.item_settings(item_id).map(|(url, _, _)| url.to_owned()).unwrap_or_default();
         if input_url.is_empty() { return; }
 
         let base = if self.export_folder.is_empty() { filesystem::get_folder(&input_url) } else { self.export_folder.to_string() };
@@ -1467,259 +1419,218 @@ impl MediaLibrary {
     // ------------------------------------------- Jobs --------------------------------------------
     // ---------------------------------------------------------------------------------------------
 
-    /// Ids of all items that should be rendered. A video with sections is rendered as its sections
+    /// Ids of all videos that should be rendered
     pub fn get_render_items(&self, selected_only: bool) -> QVariantList {
-        let mut ret = Vec::new();
-        for v in self.all_videos() {
-            if v.sections.is_empty() {
-                if v.selected || !selected_only { ret.push(v.id); }
-            } else {
-                for s in &v.sections {
-                    if s.selected || !selected_only { ret.push(s.id); }
-                }
-            }
-        }
-        QVariantList::from_iter(ret)
+        QVariantList::from_iter(self.all_videos().filter(|v| v.selected || !selected_only).map(|v| v.id).collect::<Vec<_>>())
     }
 
-    /// Selected items that can be added to the render queue, ie. the ones that don't have a job yet
+    /// Selected videos that can be added to the render queue, ie. the ones that don't have jobs yet
     pub fn get_queueable_selection(&self) -> QVariantList {
-        let mut ret = Vec::new();
-        for v in self.all_videos() {
-            if v.sections.is_empty() {
-                if v.selected && v.job.job_id == 0 { ret.push(v.id); }
-            } else {
-                for s in &v.sections {
-                    if s.selected && s.job.job_id == 0 { ret.push(s.id); }
-                }
-            }
-        }
-        QVariantList::from_iter(ret)
+        QVariantList::from_iter(self.all_videos().filter(|v| v.selected && v.jobs.is_empty()).map(|v| v.id).collect::<Vec<_>>())
     }
-    /// Selected items that are in the render queue and can be removed from it
+    /// Selected videos that are in the render queue and can be removed from it
     pub fn get_queued_selection(&self) -> QVariantList {
-        let mut ret = Vec::new();
-        for v in self.all_videos() {
-            if v.selected && v.job.job_id > 0 { ret.push(v.id); }
-            for s in &v.sections {
-                if s.selected && s.job.job_id > 0 { ret.push(s.id); }
-            }
-        }
-        QVariantList::from_iter(ret)
+        QVariantList::from_iter(self.all_videos().filter(|v| v.selected && !v.jobs.is_empty()).map(|v| v.id).collect::<Vec<_>>())
     }
     pub fn is_item_queued(&self, item_id: u32) -> bool {
-        self.item_settings(item_id).map(|(_, _, _, job)| job.job_id > 0).unwrap_or_default()
+        self.video(item_id).map(|v| !v.jobs.is_empty()).unwrap_or_default()
     }
-    /// The render queue is the single source of truth for what's queued: every item whose job is not in
-    /// it anymore (removed in the queue modal, cleared, ...) loses its job and its highlight in the list.
+    /// The render queue is the single source of truth for what's queued: every job that's not in it anymore
+    /// (removed in the queue modal, cleared, ...) is removed from its video, and so is the highlight in the list.
     pub fn retain_jobs(&mut self, job_ids: QVariantList) {
         let existing = job_ids.into_iter().filter_map(|x| x.to_qbytearray().to_string().parse::<u32>().ok()).collect::<std::collections::HashSet<_>>();
-        let mut removed = Vec::new();
+        let mut changed = Vec::new();
         for v in self.all_videos_mut() {
-            if v.job.job_id > 0 && !existing.contains(&v.job.job_id) { v.job = Default::default(); removed.push(v.id); }
-            for s in v.sections.iter_mut() {
-                if s.job.job_id > 0 && !existing.contains(&s.job.job_id) { s.job = Default::default(); removed.push(s.id); }
-            }
+            let count = v.jobs.len();
+            v.jobs.retain(|x| x.job_id > 0 && existing.contains(&x.job_id));
+            if v.jobs.len() != count { changed.push(v.id); }
         }
-        if removed.is_empty() { return; }
-        for id in removed {
-            self.patch_row(id, |x| {
-                x.job_id = 0;
-                x.job_status = QString::default();
-                x.job_progress = 0.0;
-                x.error_string = QString::default();
-                x.job_message = QString::default();
-            });
-        }
+        if changed.is_empty() { return; }
+        for id in changed { self.update_job_row(id); }
         self.items_changed();
     }
 
-    pub fn set_item_job(&mut self, item_id: u32, job_id: u32) {
-        let job = JobState {
+    fn new_job(&self, item_id: u32, job_id: u32, range_index: i32) -> JobState {
+        JobState {
             job_id,
-            status: if job_id > 0 { "queued".into() } else { String::new() },
-            progress: 0.0,
-            error: String::new(),
-            message: String::new(),
-            hash: self.settings_hash(item_id).to_string()
-        };
-        if let Some(v) = self.video_mut(item_id) {
-            v.job = job.clone();
-        } else if let Some(s) = self.section_mut(item_id) {
-            s.job = job.clone();
-        } else {
-            return;
+            status: "queued".into(),
+            hash: self.settings_hash(item_id).to_string(),
+            range_index,
+            ..Default::default()
         }
-        self.patch_row(item_id, |x| {
-            x.job_id = job.job_id;
-            x.job_status = QString::from(job.status.as_str());
-            x.job_progress = 0.0;
-            x.error_string = QString::default();
-            x.job_message = QString::default();
-        });
+    }
+    /// The video renders with this one job (or none if it's 0). It renders the whole video until it's split into its trim ranges
+    pub fn set_item_job(&mut self, item_id: u32, job_id: u32) {
+        let jobs = if job_id > 0 { vec![self.new_job(item_id, job_id, -1)] } else { Vec::new() };
+        self.set_jobs(item_id, jobs);
+    }
+    /// The jobs of the video after it was split into its trim ranges, `range_indexes` are the ranges of the jobs
+    pub fn set_item_jobs(&mut self, item_id: u32, job_ids: QVariantList, range_indexes: QVariantList) {
+        let parse = |x: &QVariant| x.to_qbytearray().to_string().parse::<i64>().unwrap_or(-1);
+        let ranges = range_indexes.into_iter().map(parse).collect::<Vec<_>>();
+        let jobs = job_ids.into_iter().map(parse).enumerate().filter(|(_, id)| *id > 0)
+            .map(|(i, id)| self.new_job(item_id, id as u32, ranges.get(i).copied().unwrap_or(-1) as i32))
+            .collect();
+        self.set_jobs(item_id, jobs);
+    }
+    /// A job of the video that was added to the render queue elsewhere (eg. restored from the previous session)
+    pub fn add_item_job(&mut self, item_id: u32, job_id: u32, range_index: i32) {
+        if job_id == 0 || self.is_library_job(job_id) { return; }
+        let job = self.new_job(item_id, job_id, range_index);
+        let Some(v) = self.video_mut(item_id) else { return; };
+        // A job of the whole video replaces the others, and the other way around
+        v.jobs.retain(|x| (x.range_index < 0) == (range_index < 0));
+        v.jobs.push(job);
+        self.update_job_row(item_id);
+        self.items_changed();
+    }
+    fn set_jobs(&mut self, item_id: u32, jobs: Vec<JobState>) {
+        let Some(v) = self.video_mut(item_id) else { return; };
+        v.jobs = jobs;
+        self.update_job_row(item_id);
         // Whether an item is queued is read from here in several places, let them know it changed
         self.items_changed();
     }
     pub fn get_item_job(&self, item_id: u32) -> u32 {
-        self.item_settings(item_id).map(|(_, _, _, job)| job.job_id).unwrap_or_default()
+        self.video(item_id).and_then(|v| v.jobs.first()).map(|x| x.job_id).unwrap_or_default()
     }
+    pub fn get_item_jobs(&self, item_id: u32) -> QVariantList {
+        QVariantList::from_iter(self.video(item_id).map(|v| v.jobs.iter().map(|x| x.job_id).collect::<Vec<_>>()).unwrap_or_default())
+    }
+    /// The status of the video, summarized over all of its jobs
     pub fn get_item_job_status(&self, item_id: u32) -> QString {
-        self.item_settings(item_id).map(|(_, _, _, job)| QString::from(job.status.as_str())).unwrap_or_default()
+        self.video(item_id).map(|v| QString::from(Self::job_summary(&v.jobs).status.as_str())).unwrap_or_default()
+    }
+    pub fn get_job_status(&self, job_id: u32) -> QString {
+        self.all_videos().find_map(|v| v.jobs.iter().find(|x| x.job_id == job_id)).map(|x| QString::from(x.status.as_str())).unwrap_or_default()
     }
     pub fn is_library_job(&self, job_id: u32) -> bool {
-        job_id > 0 && self.all_videos().any(|v| v.job.job_id == job_id || v.sections.iter().any(|s| s.job.job_id == job_id))
+        self.item_id_for_job(job_id) > 0
     }
     pub fn get_item_for_job(&self, job_id: u32) -> u32 {
         self.item_id_for_job(job_id)
     }
     fn item_id_for_job(&self, job_id: u32) -> u32 {
         if job_id == 0 { return 0; }
-        for v in self.all_videos() {
-            if v.job.job_id == job_id { return v.id; }
-            for s in &v.sections {
-                if s.job.job_id == job_id { return s.id; }
-            }
-        }
-        0
+        self.all_videos().find(|v| v.jobs.iter().any(|x| x.job_id == job_id)).map(|v| v.id).unwrap_or_default()
     }
     fn job_mut(&mut self, job_id: u32) -> Option<&mut JobState> {
         if job_id == 0 { return None; }
-        for v in self.standalone.iter_mut().chain(self.folders.iter_mut().flat_map(|f| f.videos.iter_mut())) {
-            if v.job.job_id == job_id { return Some(&mut v.job); }
-            if let Some(s) = v.sections.iter_mut().find(|s| s.job.job_id == job_id) {
-                return Some(&mut s.job);
-            }
-        }
-        None
+        self.all_videos_mut().find_map(|v| v.jobs.iter_mut().find(|x| x.job_id == job_id))
     }
 
     pub fn update_job_progress(&mut self, job_id: u32, progress: f64, finished: bool) {
         let item_id = self.item_id_for_job(job_id);
         if item_id == 0 { return; }
-        let mut is_error = false;
-        if let Some(job) = self.job_mut(job_id) {
-            is_error = job.status == "error" || job.status == "question";
-            if !is_error {
-                job.progress = progress;
-                job.status = if finished { "done".into() } else { "rendering".into() };
-            }
-        }
-        if is_error { return; }
-        let status = if finished { "done" } else { "rendering" };
-        self.patch_row(item_id, |x| {
-            x.job_progress = progress;
-            x.job_status = QString::from(status);
-        });
+        let Some(job) = self.job_mut(job_id) else { return; };
+        if job.status == "error" || job.status == "question" { return; }
+        job.progress = progress;
+        job.status = if finished { "done".into() } else { "rendering".into() };
+        let (hash, range_index) = (job.hash.clone(), job.range_index);
         if finished {
             // The rendered file contains the hash of the settings it was rendered with
-            let hash = self.job_mut(job_id).map(|x| x.hash.clone()).unwrap_or_default();
-            if let Some(v) = self.video_mut(item_id) {
-                v.output_hash = Some(hash);
-            } else if let Some(s) = self.section_mut(item_id) {
-                s.output_hash = Some(hash);
+            if let Some(v) = self.video(item_id) {
+                if let Some(output) = self.outputs(v, None).into_iter().find(|x| x.range_index == range_index) {
+                    let url = output.url();
+                    if let Some(v) = self.video_mut(item_id) { v.output_hashes.insert(url, hash); }
+                }
             }
             self.update_stabilized_row(item_id);
         }
+        self.update_job_row(item_id);
     }
     /// Progress of the loading and synchronization phase, before the rendering starts
     pub fn set_job_processing(&mut self, job_id: u32, progress: f64) {
         let item_id = self.item_id_for_job(job_id);
-        if item_id == 0 { return; }
-        let mut skip = true;
-        if let Some(job) = self.job_mut(job_id) {
-            skip = job.status == "error" || job.status == "question" || job.status == "done";
-            if !skip {
-                job.progress = progress;
-                job.status = "processing".into();
-            }
-        }
-        if skip { return; }
-        self.patch_row(item_id, |x| {
-            x.job_progress = progress;
-            x.job_status = QString::from("processing");
-        });
+        let Some(job) = self.job_mut(job_id) else { return; };
+        if job.status == "error" || job.status == "question" || job.status == "done" { return; }
+        job.progress = progress;
+        job.status = "processing".into();
+        self.update_job_row(item_id);
     }
     pub fn set_job_error(&mut self, job_id: u32, err: QString) {
         let item_id = self.item_id_for_job(job_id);
-        if item_id == 0 { return; }
-        let err = err.to_string();
-        if let Some(job) = self.job_mut(job_id) {
-            job.status = "error".into();
-            job.error = err.clone();
-        }
-        self.patch_row(item_id, |x| {
-            x.job_status = QString::from("error");
-            x.error_string = QString::from(err.as_str());
-        });
+        let Some(job) = self.job_mut(job_id) else { return; };
+        job.status = "error".into();
+        job.error = err.to_string();
+        self.update_job_row(item_id);
     }
     /// The error string of the render queue item, which can be an error, a question (`convert_format:`, `file_exists:`)
     /// or just an informational note (`uses_cpu`). An empty string clears the previous one.
     pub fn set_job_error_string(&mut self, job_id: u32, error_string: QString) {
         let item_id = self.item_id_for_job(job_id);
-        if item_id == 0 { return; }
         let err = error_string.to_string();
         let is_question = err.starts_with("convert_format:") || err.starts_with("file_exists:");
-
-        let job = match self.job_mut(job_id) {
-            Some(job) => {
-                if err == "uses_cpu" {
-                    job.message = err;
-                } else {
-                    job.message = String::new();
-                    job.error = err.clone();
-                    if is_question {
-                        job.status = "question".into();
-                    } else if !err.is_empty() {
-                        job.status = "error".into();
-                    } else if job.status == "error" || job.status == "question" {
-                        job.status = "queued".into();
-                    }
-                }
-                job.clone()
-            },
-            None => return
-        };
-        self.patch_row(item_id, |x| {
-            x.job_status = QString::from(job.status.as_str());
-            x.error_string = QString::from(job.error.as_str());
-            x.job_message = QString::from(job.message.as_str());
-        });
+        let Some(job) = self.job_mut(job_id) else { return; };
+        if err == "uses_cpu" {
+            job.message = err;
+        } else {
+            job.message = String::new();
+            job.error = err.clone();
+            if is_question {
+                job.status = "question".into();
+            } else if !err.is_empty() {
+                job.status = "error".into();
+            } else if job.status == "error" || job.status == "question" {
+                job.status = "queued".into();
+            }
+        }
+        self.update_job_row(item_id);
     }
     pub fn clear_job_statuses(&mut self) {
         let mut ids = Vec::new();
         for v in self.all_videos_mut() {
-            if v.job.status != "rendering" && v.job.status != "processing" { v.job = Default::default(); ids.push(v.id); }
-            for s in v.sections.iter_mut() {
-                if s.job.status != "rendering" && s.job.status != "processing" { s.job = Default::default(); ids.push(s.id); }
+            if !v.jobs.iter().any(|x| x.is_busy()) && !v.jobs.is_empty() {
+                v.jobs.clear();
+                ids.push(v.id);
             }
         }
-        for id in ids {
-            self.patch_row(id, |x| {
-                x.job_id = 0;
-                x.job_status = QString::default();
-                x.job_progress = 0.0;
-                x.error_string = QString::default();
-                x.job_message = QString::default();
-            });
-        }
+        for id in ids { self.update_job_row(id); }
         self.items_changed();
     }
     pub fn active_job_count(&self) -> usize {
-        self.all_videos().map(|v| {
-            (if v.job.is_active() { 1 } else { 0 }) + v.sections.iter().filter(|s| s.job.is_active()).count()
-        }).sum()
+        self.all_videos().map(|v| v.jobs.iter().filter(|x| x.is_active()).count()).sum()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::MediaLibrary;
+    use super::{ MediaLibrary, Video };
+
+    fn outputs(settings: serde_json::Value) -> Vec<(i32, String)> {
+        let lib = MediaLibrary::default();
+        let v = Video { url: "file:///videos/C0001.MP4".into(), filename: "C0001.MP4".into(), settings: Some(settings.to_string()), ..Default::default() };
+        lib.outputs(&v, Some(".mp4")).into_iter().map(|x| (x.range_index, x.filename)).collect()
+    }
+
+    #[test]
+    fn one_output_file_per_trim_range() {
+        // No trim ranges: the whole video
+        assert_eq!(outputs(serde_json::json!({ })), vec![(-1, "C0001.mp4".into())]);
+        // Each range has its own path
+        assert_eq!(outputs(serde_json::json!({
+            "trim_ranges_ms": [[0, 1000], [2000, 3000]],
+            "trim_range_info": [{ "output_path": "C0001-001" }, { "output_path": "runs/second" }]
+        })), vec![(0, "C0001-001.mp4".into()), (1, "second.mp4".into())]);
+        // Joined into one video
+        assert_eq!(outputs(serde_json::json!({ "trim_ranges_ms": [[0, 1000], [2000, 3000]], "output": { "export_trims_separately": false } })), vec![(-1, "C0001.mp4".into())]);
+    }
+
+    #[test]
+    fn ranges_without_a_path_get_the_next_free_number() {
+        let mut obj = serde_json::json!({
+            "trim_ranges_ms": [[0, 1000], [2000, 3000], [4000, 5000]],
+            "trim_range_info": [{ }, { "output_path": "clip_stabilized-001" }]
+        });
+        MediaLibrary::assign_range_paths(&mut obj, "clip_stabilized");
+        let paths = obj["trim_range_info"].as_array().unwrap().iter().map(|x| x["output_path"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert_eq!(paths, vec!["clip_stabilized-002", "clip_stabilized-001", "clip_stabilized-003"]);
+    }
 
     #[test]
     fn default_output_path_is_relative_without_extension() {
         assert_eq!(MediaLibrary::default_output_filename("C0001.MP4", "_stabilized"), "C0001_stabilized");
         assert_eq!(MediaLibrary::default_output_filename("my.clip.mov", "_stabilized"), "my.clip_stabilized");
-        assert_eq!(MediaLibrary::filename_with_index("my.clip_stabilized", 2), "my.clip_stabilized_2");
     }
 
     #[test]
