@@ -186,9 +186,47 @@ pub fn get_possible_encoders(codec: &str, use_gpu: bool) -> Vec<(&'static str, b
     encoders
 }
 
-pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &gyroflow_core::InputFile, render_options: &RenderOptions, gpu_decoder_index: i32, trim_range_ind: Option<usize>, cancel_flag: Arc<AtomicBool>, pause_flag: Arc<AtomicBool>, encoder_initialized: F2) -> Result<(), FFmpegError>
+/// What a render actually runs on, which can differ from the settings when the GPU can't be used for a video
+#[derive(Default, Clone, Debug)]
+pub struct ProcessingInfo {
+    /// The hardware decoding backend (eg. "VAAPI"), empty when the video is decoded on the CPU
+    pub decoder: String,
+    pub decoder_wanted_gpu: bool,
+    /// Why the GPU decoder wasn't used, from the FFmpeg log
+    pub decoder_note: String,
+    /// "OpenCL", "wgpu" or "CPU"
+    pub stabilization: String,
+    pub stabilization_wanted_gpu: bool,
+    pub encoder: String,
+    pub encoder_gpu: bool,
+    pub encoder_wanted_gpu: bool,
+}
+impl ProcessingInfo {
+    pub fn to_json(&self) -> String {
+        serde_json::json!({
+            "decoder": self.decoder, "decoder_wanted_gpu": self.decoder_wanted_gpu, "decoder_note": self.decoder_note,
+            "stabilization": self.stabilization, "stabilization_wanted_gpu": self.stabilization_wanted_gpu,
+            "encoder": self.encoder, "encoder_gpu": self.encoder_gpu, "encoder_wanted_gpu": self.encoder_wanted_gpu,
+        }).to_string()
+    }
+}
+
+/// The last message of the FFmpeg log about why the hardware decoder couldn't be used, eg. "Hardware does not support image size 5312x4648 (...)"
+fn gpu_decoding_failure_reason() -> String {
+    let tags = regex::Regex::new(r"<[^>]+>").unwrap();
+    let log = FFMPEG_LOG.read();
+    let lines: Vec<String> = log.lines().map(|line| tags.replace_all(line, "").trim().to_string()).collect();
+    let specific = lines.iter().rfind(|line| line.contains("Hardware does not support") || line.contains("failed to decode picture"));
+    specific.or_else(|| lines.iter().rfind(|line| line.contains("hwaccel")))
+        // Without the "[hevc @ 0x...]" prefix
+        .map(|line| match line.find("] ") { Some(i) if line.starts_with('[') => line[i + 2..].to_string(), _ => line.clone() })
+        .unwrap_or_default()
+}
+
+pub fn render<F, F2, F3>(stab: Arc<StabilizationManager>, progress: F, input_file: &gyroflow_core::InputFile, render_options: &RenderOptions, gpu_decoder_index: i32, trim_range_ind: Option<usize>, cancel_flag: Arc<AtomicBool>, pause_flag: Arc<AtomicBool>, encoder_initialized: F2, processing_info: F3) -> Result<(), FFmpegError>
     where F: Fn((f64, usize, usize, bool, bool)) + Send + Sync + Clone,
-          F2: Fn(String) + Send + Sync + Clone
+          F2: Fn(String) + Send + Sync + Clone,
+          F3: Fn(ProcessingInfo) + Send + Sync + Clone
 {
     log::debug!("ffmpeg_hw::supported_gpu_backends: {:?}", ffmpeg_hw::supported_gpu_backends());
 
@@ -428,7 +466,8 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
 
     let progress2 = progress.clone();
     let mut process_frame = 0;
-    if let Some(i) = trim_range_ind {
+    // Progress continues over the ranges of the job, a job of a single range starts at 0
+    if let Some(i) = trim_range_ind.filter(|_| render_options.trim_range_index.is_none()) {
         for x in 0..i {
             let x = org_trim_ranges[x];
             process_frame += ((x.1 - x.0) * total_frame_count as f64).round() as usize;
@@ -450,6 +489,19 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
     }
 
     let render_globals = Rc::new(RefCell::new(zero_copy::RenderGlobals::default()));
+
+    // Reported once the first frame is processed, when it's known what the decoder and the stabilization really use
+    let mut info = Some(ProcessingInfo {
+        decoder: proc.gpu_device.clone().unwrap_or_default(),
+        decoder_wanted_gpu: gpu_decoding,
+        stabilization_wanted_gpu: stab.params.read().current_device >= 0,
+        encoder: encoder.0.to_string(),
+        encoder_gpu: encoder.1,
+        encoder_wanted_gpu: render_options.use_gpu,
+        ..Default::default()
+    });
+    let hw_decoded = proc.video.hw_decoded.clone();
+    let stab_backend = Rc::new(std::cell::Cell::new(""));
 
     proc.on_frame(move |mut timestamp_us, input_frame, output_frame, converter, rate_control| {
         let fill_with_background = render_options.pad_with_black && !trim_ranges.is_empty() &&
@@ -517,6 +569,7 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
                     plane.init_size(org_sizes.0, org_sizes.1);
                     plane.set_compute_params(compute_params);
                     let render_globals = render_globals.clone();
+                    let stab_backend = stab_backend.clone();
                     $planes.push(Box::new(move |timestamp_us: i64, in_frame_data: &mut Video, out_frame_data: &mut Video, plane_index: usize, fill_with_background: bool| {
                         let mut g = render_globals.borrow_mut();
                         let wgpu_format = $t::wgpu_format().map(|x| x.0);
@@ -542,8 +595,9 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
                         if fill_with_background {
                             transform.kernel_params.flags |= KernelParamsFlags::FILL_WITH_BACKGROUND.bits();
                         }
-                        if let Err(e) = plane.process_pixels::<$t>(timestamp_us, None, &mut buffers, Some(&transform)) {
-                            ::log::error!("Failed to process pixels: {e:?}");
+                        match plane.process_pixels::<$t>(timestamp_us, None, &mut buffers, Some(&transform)) {
+                            Ok(info) => stab_backend.set(info.backend),
+                            Err(e) => ::log::error!("Failed to process pixels: {e:?}")
                         }
                     }));
                 })*
@@ -686,6 +740,17 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
         process_frame += 1;
         // log::debug!("process_frame: {}, timestamp_us: {}", process_frame, timestamp_us);
 
+        if let Some(mut info) = info.take() {
+            if !hw_decoded.load(std::sync::atomic::Ordering::Relaxed) {
+                info.decoder.clear();
+            }
+            if info.decoder.is_empty() && info.decoder_wanted_gpu {
+                info.decoder_note = gpu_decoding_failure_reason();
+            }
+            info.stabilization = stab_backend.get().to_string();
+            processing_info(info);
+        }
+
         Ok(())
     });
 
@@ -697,7 +762,8 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
             let _ = std::fs::create_dir_all(path);
         }
     }
-    if org_trim_ranges.len() > 1 {
+    // A job of a single trim range has its own, final output filename
+    if org_trim_ranges.len() > 1 && render_options.trim_range_index.is_none() {
         if let Some(ind) = trim_range_ind {
             if let Some(pos) = filename.rfind('.') {
                 filename.insert_str(pos, &format!("-{:0>3}", ind + 1));
@@ -728,7 +794,7 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
         ::log::debug!("Removing {output_url}");
         let _ = gyroflow_core::filesystem::remove_file(&output_url);
     }
-    if trim_range_ind.is_none() || trim_range_ind == Some(org_trim_ranges.len() - 1) {
+    if trim_range_ind.is_none() || trim_range_ind == Some(org_trim_ranges.len() - 1) || render_options.trim_range_index.is_some() {
         progress((1.0, render_frame_count, render_frame_count, true, false));
     }
 

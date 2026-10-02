@@ -196,9 +196,13 @@ Item {
 
             delegate: Rectangle {
                 id: dlg;
-                width: lv.width;
-                height: 60 * dpiScale;
-                radius: 5 * dpiScale;
+                // The items of one video (eg. its trim ranges) are indented below its name, each with its own output file
+                readonly property bool inGroup: same_video_as_previous || same_video_as_next;
+                readonly property bool groupStart: inGroup && !same_video_as_previous;
+                readonly property real headerHeight: groupStart? 24 * dpiScale : 0;
+                x: inGroup? 24 * dpiScale : 0;
+                width: lv.width - x;
+                height: (procInfo? 72 : 60) * dpiScale + headerHeight;
                 property real progress: total_frames > 0? current_frame / total_frames : 0;
                 property bool isFinished: current_frame >= total_frames && total_frames > 0;
                 property bool isQuestion: error_string.startsWith("convert_format:") || error_string.startsWith("file_exists:");
@@ -207,12 +211,35 @@ Item {
                 property bool isProcessing: processing_progress > 0.0 && processing_progress < 1.0;
                 property bool isRendering: !isFinished && !isError && !isQuestion && total_frames > 0 && (current_frame > 0 || isProcessing);
                 property bool dragging: false;
+                property real dragStartY: 0;
+                // What the render runs on, known once it started (see `rendering::ProcessingInfo`)
+                readonly property var procInfo: processing_info? JSON.parse(processing_info) : null;
 
-                color: isError?    "#30ed7676"
-                     : isQuestion? "#30" + styleAccentColor.toString().substring(1)
-                     : isFinished? "#3070e574"
-                     : "#15ffffff";
+                color: "transparent";
                 opacity: dragging? 0.5 : 1;
+
+                BasicText {
+                    visible: dlg.groupStart;
+                    x: -24 * dpiScale;
+                    y: 3 * dpiScale;
+                    width: lv.width;
+                    leftPadding: 0;
+                    text: input_filename;
+                    font.bold: true;
+                    font.pixelSize: 12 * dpiScale;
+                    elide: Text.ElideMiddle;
+                }
+                Rectangle {
+                    id: bg;
+                    y: dlg.headerHeight;
+                    width: parent.width;
+                    height: parent.height - y;
+                    radius: 5 * dpiScale;
+                    color: dlg.isError?    "#30ed7676"
+                         : dlg.isQuestion? "#30" + styleAccentColor.toString().substring(1)
+                         : dlg.isFinished? "#3070e574"
+                         : "#15ffffff";
+                }
                 Ease on opacity { duration: 200; }
 
                 Drag.active: dragging;
@@ -269,7 +296,7 @@ Item {
                 }
 
                 Row {
-                    anchors.fill: parent;
+                    anchors.fill: bg;
                     anchors.leftMargin: 5 * dpiScale;
                     anchors.rightMargin: 8 * dpiScale;
                     spacing: 8 * dpiScale;
@@ -298,16 +325,24 @@ Item {
                             drag.target: dlg.dragging? dlg : undefined;
                             drag.axis: Drag.YAxis;
                             onPressed: {
+                                dlg.dragStartY = dlg.y;
                                 dragIndicator.y = lv.mapFromItem(dlg, 0, 0).y;
                                 lv.isDragging = dlg.dragging = true;
                                 lv.dragTargetIndex = index;
                             }
                             onReleased: {
+                                // Dragging moved the item itself, put it back first. When it's moved in the queue, the list puts it in its new place
+                                dlg.y = dlg.dragStartY;
                                 if (dlg.dragging) {
                                     let diff = lv.dragTargetIndex - index;
                                     if (lv.dragTargetIndex > index) diff--;
                                     if (diff != 0) render_queue.move_item(job_id, diff);
                                 }
+                                lv.isDragging = dlg.dragging = false;
+                                lv.dragTargetIndex = -1;
+                            }
+                            onCanceled: {
+                                dlg.y = dlg.dragStartY;
                                 lv.isDragging = dlg.dragging = false;
                                 lv.dragTargetIndex = -1;
                             }
@@ -331,8 +366,8 @@ Item {
                         BasicText {
                             width: parent.width;
                             leftPadding: 0;
-                            text: input_filename;
-                            font.bold: true;
+                            text: dlg.inGroup? output_filename : input_filename;
+                            font.bold: !dlg.inGroup;
                             font.pixelSize: 12 * dpiScale;
                             elide: Text.ElideMiddle;
                         }
@@ -363,6 +398,50 @@ Item {
                                 : dlg.isFinished? qsTr("Done")
                                 : export_settings;
                         }
+                        BasicText {
+                            id: procInfoText;
+                            readonly property var info: dlg.procInfo;
+                            readonly property bool decodeGpu: !!info && info.decoder != "";
+                            readonly property bool stabGpu: !!info && info.stabilization != "CPU";
+                            readonly property bool encodeGpu: !!info && info.encoder_gpu;
+                            function stage(label: string, gpu: bool, name: string, wantedGpu: bool): string {
+                                const value = gpu? qsTr("GPU (%1)").arg(name) : qsTr("CPU");
+                                // CPU instead of the GPU is what makes a render slow, so that stands out
+                                return label + ": " + (!gpu && wantedGpu? "<font color=\"#f6a10c\">" + value + "</font>" : value);
+                            }
+                            width: parent.width;
+                            leftPadding: 0;
+                            font.pixelSize: 10 * dpiScale;
+                            opacity: 0.8;
+                            elide: Text.ElideRight;
+                            textFormat: Text.StyledText;
+                            visible: !!info;
+                            text: !info? "" : [
+                                stage(qsTr("Decoding"),      decodeGpu, info.decoder,       info.decoder_wanted_gpu),
+                                stage(qsTr("Stabilization"), stabGpu,   info.stabilization, info.stabilization_wanted_gpu),
+                                stage(qsTr("Encoding"),      encodeGpu, info.encoder,       info.encoder_wanted_gpu),
+                            ].join(" · ");
+                            readonly property string details: {
+                                if (!info) return "";
+                                let lines = [];
+                                if (!decodeGpu) {
+                                    if (!info.decoder_wanted_gpu)  lines.push(qsTr("GPU decoding is turned off in the advanced settings."));
+                                    else if (info.decoder_note)    lines.push(qsTr("The GPU can't decode this video, so it's decoded on the CPU: %1").arg(info.decoder_note));
+                                    else                           lines.push(qsTr("There's no GPU decoder for this video, so it's decoded on the CPU."));
+                                }
+                                if (!stabGpu) {
+                                    if (!info.stabilization_wanted_gpu) lines.push(qsTr("\"CPU only\" is selected as the device for video processing in the advanced settings."));
+                                    else                                lines.push(qsTr("The GPU couldn't be used for the stabilization, so it runs on the CPU."));
+                                }
+                                if (!encodeGpu) {
+                                    if (!info.encoder_wanted_gpu) lines.push(qsTr("GPU encoding is turned off in the export settings."));
+                                    else                          lines.push(qsTr("No GPU encoder could be used for this output, so it's encoded on the CPU."));
+                                }
+                                return lines.join("\n");
+                            }
+                            MouseArea { id: procInfoMa; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton; }
+                            ToolTip { visible: !isMobile && procInfoMa.containsMouse && procInfoText.details != ""; text: procInfoText.details; }
+                        }
                     }
 
                     Row {
@@ -387,19 +466,20 @@ Item {
                             leftPadding: 0; rightPadding: 0;
                             icon.width: 13 * dpiScale;
                             icon.height: 13 * dpiScale;
+                            // A started item can't be removed, but while the queue is paused it can be stopped (then removed)
+                            readonly property bool canStop: dlg.isRendering && render_queue.status == "paused";
                             textColor: "#f67575";
-                            enabled: !dlg.isRendering;
-                            iconName: "bin";
-                            tooltip: dlg.isRendering? qsTr("This item is already rendering.") : qsTr("Remove from the queue");
-                            onClicked: render_queue.remove(job_id);
+                            enabled: !dlg.isRendering || canStop;
+                            iconName: canStop? "close" : "bin";
+                            tooltip: canStop? qsTr("Stop") : dlg.isRendering? qsTr("This item is already rendering.") : qsTr("Remove from the queue");
+                            onClicked: if (canStop) render_queue.reset_job(job_id); else render_queue.remove(job_id);
                         }
                     }
                 }
             }
 
-            displaced: Transition {
-                NumberAnimation { properties: "y"; duration: 400; easing.type: Easing.OutExpo; }
-            }
+            // No transition when items are displaced: moving an item can change the height of the items around it (the name
+            // of the video above the first item of a group), and that during the transition left items on top of each other
         }
 
         // ------------------------------------- Footer -------------------------------------

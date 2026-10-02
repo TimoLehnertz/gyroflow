@@ -1,5 +1,11 @@
 # Todos
 
+## Status (branch `feature/multi-trim-ranges`, not merged into `master` yet)
+- Done: everything in "Todos", the multi trim ranges overhaul and "Other Todos" (left sidebar). Needs testing in the GUI before merging.
+- Separate config deviates from "Efficiency": every range with its own settings gets its own in-memory copy of the loaded stabilizer (nothing is reloaded), so the ranges can render in parallel.
+- Upstream PRs opened: 1 (#1238), 2 (#1239), 3 (#1240), 5 (#1241). All wait for the CLA to be signed.
+- Open: PR 4 (needs a discussion with the maintainer first), PR 6 and 7 (to be ported to upstream-based branches once the fork's version is tested).
+
 All branches mentioned in earlier versions of this file (`feature/better-multi-file` etc.) are already merged into `master`. New work starts from `master`.
 
 - Pressing the play button (start export) should open the queue modal
@@ -14,7 +20,7 @@ Right now, each video can have multiple sections in the media sidebar. And there
 ### Sidebar and marker import
 - Sections are removed from the media sidebar, it only lists videos.
 - Marker import creates trim ranges on the clip instead of sidebar sections.
-- Trim ranges get an optional name (eg. the marker name). When exporting ranges as separate videos, the name is used in the filename instead of the `-001`, `-002` numbering.
+- When the ranges are exported as separate videos, every range has exactly one output path, shown and edited in the output path field of the bottom bar while the range is active. New ranges get the path of the video with the next free number (`-001`, `-002`, ...), imported markers their path or the marker name. Joined into one video, there's one output path for the clip.
 
 ### Timeline
 - There must be a button to add a new trim range (needed because not all users know about the Ctrl+I / Ctrl+O shortcuts):
@@ -41,7 +47,7 @@ Details:
 - Switching Separate -> Shared: the config of the active range becomes the shared config.
 - Switching Shared -> Separate: every range starts with the current shared config.
 - When the active range changes (also while playing), the panels and the preview switch to its config. A short recompute at range boundaries is acceptable.
-- There must be a button to copy settings to the other ranges. Merge this with the pre-existing button to copy settings to other clips using a dropdown. Proposed names: "Apply to all ranges of this clip" and "Apply to other clips...".
+- There must be a button to copy settings to the other ranges. Merge this with the pre-existing button to copy settings to other clips using a dropdown. Names: "Apply to all ranges of this clip" and "Apply to all other clips".
 - Copying to another clip that is in separate config mode applies the settings to all of its ranges.
 - The per-range settings are saved in the `.gyroflow` project file as a new field. Upstream Gyroflow ignores it and uses the shared settings.
 

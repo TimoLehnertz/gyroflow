@@ -7,6 +7,7 @@ use super::ffmpeg_processor::Status;
 use super::ffmpeg_processor::FFmpegError;
 use super::ffmpeg_processor::FrameTimestamps;
 use super::ffmpeg_video_converter::Converter;
+use std::sync::{ Arc, atomic::{ AtomicBool, Ordering::Relaxed } };
 
 pub struct FrameBuffers {
     pub sw_frame: frame::Video,
@@ -61,6 +62,8 @@ pub struct VideoTranscoder<'a> {
     pub decode_only: bool,
     pub gpu_decoding: bool,
     pub gpu_encoding: bool,
+    /// Whether the last decoded frame came from the GPU. The decoder can fall back to the CPU even if a GPU device was set up for it
+    pub hw_decoded: Arc<AtomicBool>,
     pub clone_frames: bool,
 
     pub converter: Converter,
@@ -93,6 +96,11 @@ macro_rules! ffmpeg {
 }
 
 impl<'a> VideoTranscoder<'a> {
+    /// Software formats the hardware frames of the encoders take
+    fn is_hw_upload_format(format: format::Pixel) -> bool {
+        matches!(format, format::Pixel::NV12 | format::Pixel::P010LE | format::Pixel::P012LE | format::Pixel::P016LE)
+    }
+
     fn init_encoder(frame: &mut frame::Video, params: &EncoderParams, decoder: &mut decoder::Video, size: (u32, u32), bitrate_mbps: Option<f64>, octx: &mut format::context::Output, output_index: usize, hw_upload_format: &Option<format::Pixel>) -> Result<encoder::video::Video, FFmpegError> {
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
         let mut ost = octx.stream_mut(output_index).unwrap();
@@ -215,8 +223,10 @@ impl<'a> VideoTranscoder<'a> {
                     };
 
                     let mut hw_formats = None;
+                    let is_hw_frame = unsafe { !(*frame.as_mut_ptr()).hw_frames_ctx.is_null() };
+                    self.hw_decoded.store(is_hw_frame, Relaxed);
                     let input_frame =
-                        if unsafe { !(*frame.as_mut_ptr()).hw_frames_ctx.is_null() } {
+                        if is_hw_frame {
                             hw_formats = Some(unsafe { super::ffmpeg_hw::get_transfer_formats_from_gpu(frame.as_mut_ptr()) });
                             // log::debug!("Hardware transfer formats from GPU: {:?}", hw_formats);
                             // retrieve data from GPU to CPU
@@ -312,6 +322,15 @@ impl<'a> VideoTranscoder<'a> {
                             };
                             hw_upload_format = Some(target_format);
                             target_format = sw_format;
+                            self.encoder_params.pixel_format = Some(target_format);
+                        }
+                        // Frames from the CPU (eg. software decoding when the GPU can't decode the video) are uploaded to the hardware
+                        // frames of the encoder, which take the semi-planar formats, so convert eg. yuv420p10le to p010le first
+                        if hw_upload_format.is_some() && !Self::is_hw_upload_format(target_format) {
+                            let depth = unsafe { ffi::av_pix_fmt_desc_get(target_format.into()).as_ref().map(|x| x.comp[0].depth).unwrap_or(8) };
+                            target_format = super::ffmpeg_hw::find_best_matching_codec(target_format, &[format::Pixel::NV12, format::Pixel::P010LE])
+                                .unwrap_or(if depth > 8 { format::Pixel::P010LE } else { format::Pixel::NV12 });
+                            log::debug!("Uploading {:?} frames to the encoder as {:?}", in_format, target_format);
                             self.encoder_params.pixel_format = Some(target_format);
                         }
 

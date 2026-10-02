@@ -10,10 +10,19 @@ import Gyroflow
 Item {
     id: root;
     property var trimRanges: [];
+    // The range the playhead is in, or the last one it was in. -1 if there are no ranges
+    property int activeTrimRange: -1;
+    function updateActiveTrimRange(): void {
+        if (!trimRanges.length) { activeTrimRange = -1; return; }
+        const inside = trimRanges.findIndex(x => position >= x[0] && position <= x[1]);
+        if (inside >= 0) activeTrimRange = inside;
+        else activeTrimRange = Math.max(0, Math.min(activeTrimRange, trimRanges.length - 1));
+    }
     property var importedMarkers: [];
     property var prevTrimRanges: [];
     property bool trimActive: trimRanges.length > 0;
-    property bool restrictTrim: true;
+    // Playback is restricted to the active trim range
+    property bool restrictTrim: false;
 
     property real durationMs: 0;
     property real orgDurationMs: 0;
@@ -32,6 +41,7 @@ Item {
     property real value: 0;
     readonly property real position: vid.timestamp / root.orgDurationMs;
     onPositionChanged: {
+        updateActiveTrimRange();
         if (ma.movingKeyframe && ma.holdingAlt) {
             let [keyframe, timestamp, name, value, id] = ma.movingKeyframe.split(":", 5);
             controller.set_keyframe_timestamp(keyframe, id, root.getTimestampUs());
@@ -48,6 +58,11 @@ Item {
         return vid.timestamp * 1000;
     }
     function setPosition(pos: real): void {
+        // With the playback restricted to the active range, seeking into another range makes that one active first
+        if (restrictTrim) {
+            const range = trimRanges.findIndex(x => pos >= x[0] && pos <= x[1]);
+            if (range >= 0) activeTrimRange = range;
+        }
         const frame = frameAtPosition(pos);
         if (frame != vid.currentFrame) {
             vid.seekToFrame(frame, true);
@@ -72,6 +87,7 @@ Item {
             }
         }
         root.trimRangesChanged();
+        root.updateActiveTrimRange();
     }
 
     function closestTrimRange(pos: real, isStart: bool): int {
@@ -108,6 +124,20 @@ Item {
         }
         Qt.callLater(root.cleanupTrimRanges);
     }
+    // Splits the range the position is in, otherwise adds a new range starting there (10 s, or until the next range)
+    function addTrimRange(pos: real): void {
+        const length = orgDurationMs > 0? 10000 / orgDurationMs : 0.1;
+        const inside = trimRanges.findIndex(x => pos > x[0] && pos < x[1]);
+        if (inside >= 0) {
+            trimRanges.splice(inside + 1, 0, [pos, trimRanges[inside][1]]);
+            trimRanges[inside][1] = pos;
+        } else {
+            const next = Math.min(1.0, ...trimRanges.map(x => x[0]).filter(x => x > pos));
+            if (next - pos < 0.001) return;
+            trimRanges.push([pos, Math.min(next, pos + length)]);
+        }
+        root.cleanupTrimRanges();
+    }
     function addTrimStart(v: real): void {
         if (!trimRanges.length) return setTrimStart(-1, v);
         trimRanges.push([v, v + 0.05]);
@@ -127,6 +157,26 @@ Item {
         }
         trimRanges = ranges;
         Qt.callLater(root.cleanupTrimRanges);
+    }
+    // Each trim range is [start, end, info], info has the output path of the range when they are exported as separate videos.
+    // It's kept with the range, so it follows it when the ranges are sorted or one of them is removed
+    function getTrimRangeInfo(): list<var> {
+        return trimRanges.map(x => x[2] || ({ }));
+    }
+    // The info object of a range is changed in place, it identifies the range whose settings are shown (see VideoArea)
+    function trimRangeInfo(i: int): var {
+        if (!trimRanges[i][2]) trimRanges[i][2] = ({ });
+        return trimRanges[i][2];
+    }
+    function removeTrimRange(i: int): void {
+        if (i < 0 || i >= trimRanges.length) return;
+        trimRanges.splice(i, 1);
+        root.cleanupTrimRanges();
+    }
+    function setTrimRangeOutputPath(i: int, path: string): void {
+        if (i < 0 || i >= trimRanges.length) return;
+        trimRangeInfo(i).output_path = path;
+        root.trimRangesChanged();
     }
     function getTrimRanges(): list<var> {
         if (trimRanges.length > 0) {
@@ -623,6 +673,8 @@ Item {
             }
             onMouseYChanged: if (!pressed && keyframes.item) Qt.callLater(keyframes.item.handleMouseMove, mouseX, mouseY, false, 0);
             onPressed: (mouse) => {
+                // So the keyboard shortcuts (eg. Delete for the active range) apply here and not to the media list
+                root.forceActiveFocus();
                 panInit.x = mouse.x;
                 panInit.y = mouse.y;
                 panInit.visibleAreaLeft  = root.visibleAreaLeft;
@@ -789,19 +841,13 @@ Item {
                     Action {
                         iconName: "plus";
                         text: qsTr("Add new range");
-                        onTriggered: {
-                            root.trimRanges.push([root.position - 0.05, root.position + 0.05]);
-                            root.cleanupTrimRanges();
-                        }
+                        onTriggered: root.addTrimRange(root.position);
                     }
                     Action {
                         enabled: trimRangeMenu.currentTrimRange != -1;
                         iconName: "bin;#f67575";
                         text: qsTr("Delete this range");
-                        onTriggered: {
-                            root.trimRanges.splice(trimRangeMenu.currentTrimRange, 1);
-                            root.cleanupTrimRanges();
-                        }
+                        onTriggered: root.removeTrimRange(trimRangeMenu.currentTrimRange);
                     }
                     Action {
                         enabled: root.trimActive;
@@ -813,7 +859,7 @@ Item {
                         enabled: root.trimActive;
                         checked: enabled && root.restrictTrim;
                         iconName: "loop";
-                        text: qsTr("Restrict playback to trim range");
+                        text: qsTr("Restrict playback to the active trim range");
                         onTriggered: root.restrictTrim = !root.restrictTrim;
                     }
                 }
@@ -849,6 +895,7 @@ Item {
                 TimelineRangeIndicator {
                     trimStart: modelData[0];
                     trimEnd: modelData[1];
+                    isActive: index == root.activeTrimRange;
                     y: (root.fullScreen || window.isMobileLayout? 0 : 35) * dpiScale;
                     height: parent.height - y;
 

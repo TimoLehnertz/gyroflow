@@ -22,6 +22,16 @@ MenuItem {
     property alias croppingMode: croppingMode;
     property alias automaticHorizonLock: autoLockCb.checked;
 
+    // With separate settings for each trim range (chosen in the bottom bar), the ones of the active range are shown
+    BasicText {
+        visible: window.videoArea.separateRangeSettings && window.videoArea.timeline.trimRanges.length > 1 && window.videoArea.timeline.activeTrimRange >= 0;
+        width: parent.width;
+        wrapMode: Text.WordWrap;
+        font.pixelSize: 11 * dpiScale;
+        opacity: 0.8;
+        text: qsTr("These are the settings of trim range %1.").arg(window.videoArea.timeline.activeTrimRange + 1);
+    }
+
     Item {
         id: sett;
         property alias smoothingMethod: smoothingMethod.currentIndex;

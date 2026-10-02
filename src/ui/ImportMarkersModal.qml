@@ -230,7 +230,7 @@ Item {
 
                 CheckBox {
                     id: queueImported;
-                    text: qsTr("Add imported sections to the render queue");
+                    text: qsTr("Add the videos with imported trim ranges to the render queue");
                     font.pixelSize: 12 * dpiScale;
                     checked: true;
                 }
@@ -240,7 +240,7 @@ Item {
                     leftPadding: 0;
                     wrapMode: Text.WordWrap;
                     visible: root.hasFile;
-                    text: qsTr("%1 sections in %2 videos.").arg(root.preview.sections || 0).arg(root.preview.matched || 0)
+                    text: qsTr("%1 trim ranges in %2 videos.").arg(root.preview.sections || 0).arg(root.preview.matched || 0)
                         + " "
                         + qsTr("Unmatched markers: %1.").arg((root.preview.unmatched || []).length);
                     font.bold: true;
@@ -251,7 +251,7 @@ Item {
                     wrapMode: Text.WordWrap;
                     visible: root.hasFile && !(root.preview.sections > 0);
                     color: "#f6a00b";
-                    text: qsTr("No sections matched. Try a different offset.");
+                    text: qsTr("No trim ranges matched. Try a different offset.");
                 }
 
                 Repeater {
@@ -290,7 +290,7 @@ Item {
                                     opacity: 0.85;
                                     ToolTip {
                                         visible: !isMobile && ma.containsMouse;
-                                        text: modelData.label || modelData.path || modelData.name || qsTr("Section");
+                                        text: modelData.label || modelData.path || modelData.name || qsTr("Trim range");
                                     }
                                     MouseArea { id: ma; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton; }
                                 }

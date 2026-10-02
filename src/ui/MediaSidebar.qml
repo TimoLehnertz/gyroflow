@@ -30,6 +30,7 @@ ResizablePanel {
     // Job of the item loaded in the main view, so the bottom bar can show whether it's in the queue
     property int currentJobId: 0;
     property alias queueModal: queueModalLoader;
+    readonly property bool listHasFocus: lv.activeFocus;
     // Jobs queued from here, the user already decided to (re-)stabilize these items, so their output is always overwritten
     property var ownJobs: ({ });
     property var lastImport: null;
@@ -80,20 +81,60 @@ ResizablePanel {
 
     // The output path of the item loaded in the main view is edited in the bottom bar. It's stored as
     // written there: relative to the export folder by default, or absolute if the user picks a folder.
+    // When the trim ranges are exported as separate videos, every range has its own output path, and the
+    // bottom bar shows and edits the one of the active range (the one the playhead is in, or was in last).
     property bool updatingOutput: false;
     // The item in the main view is resolved with the extension of the codec selected there, which isn't saved with the item yet
     function outputFilename(itemId: int): string {
-        const ext = itemId == media_library.current_item && window.exportSettings? window.exportSettings.currentExtension() : "";
-        return media_library.get_output_filename(itemId, ext);
+        return media_library.get_output_filename(itemId, root.outputExtension(itemId));
+    }
+    function outputExtension(itemId: int): string {
+        return itemId == media_library.current_item && window.exportSettings? window.exportSettings.currentExtension() : "";
+    }
+    // The trim range whose output path is edited in the bottom bar, -1 if it's the output path of the video
+    function activeRange(): int {
+        const timeline = window.videoArea.timeline;
+        const separate = window.exportSettings && window.exportSettings.exportTrimsSeparately.checked;
+        return separate && timeline.trimRanges.length > 0? timeline.activeTrimRange : -1;
+    }
+    function currentOutputPath(itemId: int): string {
+        const range = root.activeRange();
+        if (range >= 0) return (window.videoArea.timeline.trimRanges[range][2] || { }).output_path || "";
+        return media_library.get_output_path(itemId);
+    }
+    // Shows the output path, the folder and filename it resolves to are what's rendered
+    function showOutputPath(itemId: int, path: string, updateText: bool): void {
+        const resolved = media_library.resolve_output_path(itemId, path, root.outputExtension(itemId));
+        window.outputFile.setResolvedPath(resolved[0], resolved[1], updateText? path : "");
+    }
+    // Every trim range of the loaded video has its own output path: the ones that don't have one yet
+    // get the path of the video with the next free number (clip_stabilized-001, -002, ...)
+    function assignRangePaths(): void {
+        const id = media_library.current_item;
+        const timeline = window.videoArea.timeline;
+        if (id <= 0 || !window.videoArea.vid.loaded || window.videoArea.videoLoader.active) return;
+        if (!media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString())) return;
+        const base = media_library.get_output_path(id);
+        const used = timeline.trimRanges.map(x => (x[2] || { }).output_path).filter(x => x);
+        let number = 1;
+        let changed = false;
+        for (let i = 0; i < timeline.trimRanges.length; ++i) {
+            const info = timeline.trimRangeInfo(i);
+            if (info.output_path) continue;
+            let path = "";
+            do { path = base + "-" + ("00" + number++).slice(-3); } while (used.includes(path));
+            used.push(path);
+            info.output_path = path;
+            changed = true;
+        }
+        if (changed) timeline.trimRangesChanged();
     }
     function updateOutputFile(): void {
         const id = media_library.current_item;
         // Don't type over the field while the user is editing it
         if (!window.outputFile || root.updatingOutput) return;
         root.updatingOutput = true;
-        if (id > 0) {
-            window.outputFile.setResolvedPath(media_library.get_output_folder(id), root.outputFilename(id), media_library.get_output_path(id));
-        }
+        if (id > 0) root.showOutputPath(id, root.currentOutputPath(id), true);
         window.outputFile.pathMode = id > 0;
         root.updatingOutput = false;
     }
@@ -102,18 +143,35 @@ ResizablePanel {
         const id = media_library.current_item;
         if (root.updatingOutput || id <= 0) return;
         root.updatingOutput = true;
-        media_library.set_output_path(id, path);
-        window.outputFile.setResolvedPath(media_library.get_output_folder(id), root.outputFilename(id), "");
+        const range = root.activeRange();
+        if (range >= 0) {
+            // It's part of the settings of the video, like the trim range itself
+            window.videoArea.timeline.setTrimRangeOutputPath(range, path);
+            root.showOutputPath(id, path, false);
+            root.saveCurrentSettings();
+        } else {
+            media_library.set_output_path(id, path);
+            root.showOutputPath(id, path, false);
+            root.updateQueuedJob(id);
+        }
         root.updatingOutput = false;
-        root.updateQueuedJob(id);
     }
     Connections {
         target: window.outputFile;
         function onPathEdited(path: string): void { root.pushOutputToItem(path); }
         function onResolveRequested(): void {
             const id = media_library.current_item;
-            if (id > 0) window.outputFile.setResolvedPath(media_library.get_output_folder(id), root.outputFilename(id), "");
+            if (id > 0) root.showOutputPath(id, root.currentOutputPath(id), false);
         }
+    }
+    Connections {
+        target: window.videoArea.timeline;
+        function onTrimRangesChanged(): void { root.assignRangePaths(); root.updateOutputFile(); }
+        function onActiveTrimRangeChanged(): void { root.updateOutputFile(); }
+    }
+    Connections {
+        target: window.exportSettings? window.exportSettings.exportTrimsSeparately : null;
+        function onCheckedChanged(): void { root.updateOutputFile(); }
     }
 
     property string pendingMarkerFile: "";
@@ -141,6 +199,7 @@ ResizablePanel {
             else rest.push(u);
         }
         for (const u of rest) media_library.add_url(u);
+        if (rest.length) root.rememberMediaFolder(rest[0].toString());
         if (jsons.length) root.openImportMarkers(jsons[0]);
     }
     function applyImportedMarkers(offsetHours: real, queue: bool): void {
@@ -155,7 +214,7 @@ ResizablePanel {
             for (const id of result.queue_ids || []) root.queueItem(id);
         }
         root.refreshState();
-        showNotification(Modal.Success, qsTr("Created %1 sections.").arg("<b>" + (result.sections || 0) + "</b>"));
+        showNotification(Modal.Success, qsTr("Added %1 trim ranges.").arg("<b>" + (result.sections || 0) + "</b>"));
     }
 
     function applyStabilizationToAll(): void {
@@ -165,7 +224,8 @@ ResizablePanel {
             return;
         }
         const allData = JSON.parse(controller.export_gyroflow_data("Simple", window.getAdditionalProjectData()));
-        const count = media_library.apply_stabilization_to_all(JSON.stringify({ stabilization: allData.stabilization }), 0);
+        // The current video keeps its settings, including the separate ones of its trim ranges
+        const count = media_library.apply_stabilization_to_all(JSON.stringify({ stabilization: allData.stabilization }), media_library.current_item);
         root.updateQueuedJobs();
         showNotification(Modal.Success, qsTr("Stabilization settings applied to %1 items.").arg("<b>" + count + "</b>"));
     }
@@ -214,11 +274,48 @@ ResizablePanel {
         render_queue.move_item(job_id, -1000000);
         render_queue.start();
     }
+    // All jobs of a video (one per output file), keeping their order
+    function prioritizeItem(itemId: int): void {
+        const jobs = media_library.get_item_jobs(itemId);
+        for (let i = jobs.length - 1; i >= 0; --i) render_queue.move_item(jobs[i], -1000000);
+        render_queue.start();
+    }
+    function moveItem(itemId: int, step: int): void {
+        let jobs = media_library.get_item_jobs(itemId);
+        if (step > 0) jobs = jobs.reverse();
+        for (const jobId of jobs) render_queue.move_item(jobId, step);
+    }
+    // The video is loaded by one job, which is split into one job per output file once it's ready (see onProcessing_done)
     function queueItem(itemId: int): void {
         const jobId = render_queue.add_file(media_library.get_item_url(itemId), "", JSON.stringify(root.jobData(itemId)));
         root.pendingJobs[jobId] = true;
         media_library.set_item_job(itemId, jobId);
         root.ownJobs[jobId] = true;
+    }
+    // Every output file of the video (one per trim range, unless they are joined) gets its own job.
+    // They share the loaded video, so it's synchronized and its smoothing computed only once.
+    function splitItemJobs(itemId: int, jobId: int): void {
+        const outputs = JSON.parse(media_library.get_item_outputs(itemId, ""));
+        if (!outputs.length) return;
+        const ids = render_queue.split_job_by_ranges(jobId, JSON.stringify(outputs));
+        for (const id of ids) root.ownJobs[id] = true;
+        media_library.set_item_jobs(itemId, ids, outputs.map(x => x.range_index));
+        root.applyRangeSettings(itemId, ids, outputs);
+        root.splitLayouts[itemId] = root.splitLayout(outputs);
+    }
+    // Which ranges the jobs of an item were split into, and which of them got their own copy of the video
+    property var splitLayouts: ({ });
+    function splitLayout(outputs: var): string {
+        return JSON.stringify(outputs.map(x => [x.range_index, !!x.own_settings]));
+    }
+    // Trim ranges with their own stabilization settings got their own copy of the loaded video, apply their settings to it
+    function applyRangeSettings(itemId: int, jobIds: var, outputs: var): void {
+        const additionalData = window.getAdditionalProjectDataJson();
+        for (let i = 0; i < jobIds.length && i < outputs.length; ++i) {
+            if (!outputs[i].own_settings) continue;
+            const data = media_library.get_range_settings(itemId, outputs[i].range_index);
+            if (data) render_queue.apply_to_all(data, additionalData, jobIds[i]);
+        }
     }
     // Render settings of the job, with the export settings, the output path and the settings hash of this item
     function jobData(itemId: int): var {
@@ -238,14 +335,41 @@ ResizablePanel {
         ad.output.metadata = Object.assign({ }, ad.output.metadata || { }, { stabilization_hash: media_library.settings_hash(itemId) });
         return ad;
     }
-    // An item can be edited while it's waiting in the queue, keep its job up to date until it starts rendering
+    // An item can be edited while it's waiting in the queue, keep its jobs up to date until they start rendering
     function updateQueuedJob(itemId: int): void {
-        const jobId = media_library.get_item_job(itemId);
-        if (jobId <= 0 || media_library.get_item_job_status(itemId) != "queued") return;
-        const settings = media_library.get_settings_for_job(jobId);
-        let data = settings? JSON.parse(settings) : ({ title: "Gyroflow data file", version: 4 });
-        data.output = root.jobData(itemId).output;
-        render_queue.apply_to_all(JSON.stringify(data), window.getAdditionalProjectDataJson(), jobId);
+        const jobIds = media_library.get_item_jobs(itemId);
+        if (!jobIds.length) return;
+        // A trim range with its own stabilization settings gets those
+        const settingsOf = (jobId) => { const x = media_library.get_settings_for_job(jobId); return x? JSON.parse(x) : ({ title: "Gyroflow data file", version: 4 }); };
+        let data = settingsOf(jobIds[0]);
+        const output = root.jobData(itemId).output;
+        const additionalData = window.getAdditionalProjectDataJson();
+        const outputs = JSON.parse(media_library.get_item_outputs(itemId, ""));
+        const ranges = jobIds.map(id => render_queue.get_job_range_index(id));
+        const allQueued = jobIds.every(id => media_library.get_job_status(id) == "queued");
+        const sameFiles = outputs.length == jobIds.length && outputs.every((x, i) => x.range_index == ranges[i])
+                       && (root.splitLayouts[itemId] || root.splitLayout(outputs)) == root.splitLayout(outputs);
+        if (!sameFiles && allQueued) {
+            // The trim ranges (or whether they have their own settings) changed: keep the first job, which has the video loaded, and split it again
+            for (const id of jobIds.slice(1)) render_queue.remove(id);
+            data.output = output;
+            render_queue.apply_to_all(JSON.stringify(data), additionalData, jobIds[0]);
+            root.splitItemJobs(itemId, jobIds[0]);
+            return;
+        }
+        // Each job keeps its own output file. Jobs that already started or finished are left as they are
+        for (let i = 0; i < jobIds.length; ++i) {
+            if (media_library.get_job_status(jobIds[i]) != "queued") continue;
+            const file = outputs.find(x => x.range_index == ranges[i]);
+            data = settingsOf(jobIds[i]);
+            // A range with its own settings keeps its own export settings, all of them render to their own file
+            const rangeOutput = file && file.own_settings? (data.output || { }) : { };
+            data.output = Object.assign({ }, output, rangeOutput, file? { output_folder: file.output_folder, output_filename: file.output_filename } : { });
+            // The metadata has the stabilization hash, which tells whether the rendered file is up to date
+            data.output.metadata = output.metadata;
+            render_queue.apply_to_all(JSON.stringify(data), additionalData, jobIds[i]);
+            render_queue.set_job_output(jobIds[i], ranges[i], "", "");
+        }
     }
     function updateQueuedJobs(): void {
         for (const id of media_library.get_render_items(false)) root.updateQueuedJob(id);
@@ -258,7 +382,7 @@ ResizablePanel {
         let libraryJobs = ({ });
         for (const id of media_library.apply_settings_to_queued(json)) {
             if (folder) media_library.set_output_url(id, folder, media_library.get_output_filename(id, ""));
-            libraryJobs[media_library.get_item_job(id)] = true;
+            for (const jobId of media_library.get_item_jobs(id)) libraryJobs[jobId] = true;
             root.updateQueuedJob(id);
         }
         // Jobs that were added outside of the library
@@ -268,16 +392,7 @@ ResizablePanel {
         }
     }
 
-    // A new section starts with the trim range of the main view if this video is loaded there, otherwise with the whole video
-    function addSection(videoId: int, fromItemId: int): void {
-        root.saveCurrentSettings();
-        const isLoaded = media_library.current_item == fromItemId && window.videoArea.vid.loaded;
-        const ranges = isLoaded? window.videoArea.timeline.getTrimRanges() : [[0.0, 1.0]];
-        const newId = media_library.add_section(videoId, ranges[0][0], ranges[0][1]);
-        if (newId > 0) root.loadItem(newId);
-    }
-
-    // The item of the video (or section) currently loaded in the main view, adding it to the list
+    // The item of the video currently loaded in the main view, adding it to the list
     // as a standalone entry if it isn't tracked in a watched folder yet. 0 if there's nothing loaded.
     function loadedItem(): int {
         const url = window.videoArea.loadedFileUrl.toString();
@@ -303,6 +418,31 @@ ResizablePanel {
         if (index >= 0) lv.positionViewAtIndex(index, ListView.Contain);
         return itemId;
     }
+    // The output files of the video loaded in the main view, with its current settings: one per trim range
+    // if they are exported as separate videos. Empty if it's not a video of the library
+    function loadedOutputs(): var {
+        const itemId = root.loadedItem();
+        if (itemId <= 0) return [];
+        root.saveCurrentSettings();
+        return JSON.parse(media_library.get_item_outputs(itemId, root.outputExtension(itemId)));
+    }
+    // "Stabilize now" renders the main view in one job, split it into one job per output file like the queue does.
+    // Returns the ids of the jobs, in the order of the trim ranges
+    function splitDirectJob(jobId: int): var {
+        const outputs = root.loadedOutputs();
+        if (outputs.length <= 1 && (!outputs.length || outputs[0].range_index < 0)) return [jobId];
+        const ids = render_queue.split_job_by_ranges(jobId, JSON.stringify(outputs));
+        root.applyRangeSettings(root.loadedItem(), ids, outputs);
+        return ids;
+    }
+    // Video information, lens profile and motion data are set up for the video in the main view, load it first
+    function showDetails(itemId: int): void {
+        if (itemId != media_library.current_item) {
+            media_library.select_only(itemId);
+            root.loadItem(itemId);
+        }
+        window.videoDetails.shown = true;
+    }
     function unqueueLoadedFile(): void {
         const itemId = root.loadedItem();
         if (itemId > 0) root.unqueueItem(itemId);
@@ -323,19 +463,19 @@ ResizablePanel {
         for (const jobId of jobs) render_queue.remove(jobId);
     }
     function cancelItem(itemId: int): void {
-        const jobId = media_library.get_item_job(itemId);
-        if (jobId > 0) {
-            render_queue.remove(jobId);
-            media_library.set_item_job(itemId, 0);
-        }
+        const jobIds = media_library.get_item_jobs(itemId);
+        if (!jobIds.length) return;
+        for (const jobId of jobIds) render_queue.remove(jobId);
+        media_library.set_item_job(itemId, 0);
     }
     function resetItem(itemId: int): void {
-        const jobId = media_library.get_item_job(itemId);
-        if (jobId <= 0) return;
+        const jobIds = media_library.get_item_jobs(itemId);
+        if (!jobIds.length) return;
         const status = media_library.get_item_job_status(itemId);
-        render_queue.reset_job(jobId);
-        media_library.set_item_job(itemId, jobId);
-        // A finished or failed job renders again with the settings the item has now, a running one is only stopped
+        const ranges = jobIds.map(id => render_queue.get_job_range_index(id));
+        for (const jobId of jobIds) render_queue.reset_job(jobId);
+        media_library.set_item_jobs(itemId, jobIds, ranges);
+        // Finished or failed jobs render again with the settings the item has now, running ones are only stopped
         if (status != "rendering" && status != "processing") root.updateQueuedJob(itemId);
     }
 
@@ -388,16 +528,18 @@ ResizablePanel {
             itemId = media_library.find_by_url(inputFile);
         }
         if (itemId <= 0) return;
-        // The job was configured elsewhere, take its settings and output path as the ones of the item
+        // The job was configured elsewhere, take its settings and output path as the ones of the item.
+        // A job of a single trim range has the output file of that range, not the one of the video
+        const rangeIndex = render_queue.get_job_range_index(jobId);
         const data = render_queue.get_gyroflow_data(jobId);
         if (data && data.includes("\"stabilization\"")) media_library.save_settings(itemId, data);
-        media_library.set_output_url(itemId, outputFolder, outputFilename);
-        media_library.set_item_job(itemId, jobId);
+        if (rangeIndex < 0) media_library.set_output_url(itemId, outputFolder, outputFilename);
+        media_library.add_item_job(itemId, jobId, rangeIndex);
     }
     function renameJobOutput(itemId: int, jobId: int, filename: string, folder: string, start: bool): void {
         const newName = window.renameOutput(filename, folder);
         render_queue.set_job_output_filename(jobId, newName, start);
-        if (itemId > 0) media_library.set_output_url(itemId, folder, newName);
+        if (itemId > 0 && render_queue.get_job_range_index(jobId) < 0) media_library.set_output_url(itemId, folder, newName);
     }
     // The error string of a queue item can be an error, a question (convert_format, file_exists) or just an informational note
     function updateJobState(jobId: int, errorString: string): void {
@@ -421,6 +563,9 @@ ResizablePanel {
             if (data) {
                 render_queue.apply_to_all(data, window.getAdditionalProjectDataJson(), job_id);
             }
+            // One job per output file, they share the loaded video
+            const itemId = media_library.get_item_for_job(job_id);
+            if (media_library.get_item_jobs(itemId).length == 1) root.splitItemJobs(itemId, job_id);
             // Queued jobs wait for the user to start the queue, but a running queue picks up the new ones
             if (render_queue.status == "active") render_queue.start();
         }
@@ -497,6 +642,18 @@ ResizablePanel {
 
         Item {
             width: parent.width;
+            height: logo.height + 12 * dpiScale;
+            Image {
+                id: logo;
+                source: "qrc:/resources/logo" + (style === "dark"? "_white" : "_black") + ".svg"
+                sourceSize.width: Math.min(220 * dpiScale, parent.width * 0.8);
+                anchors.centerIn: parent;
+            }
+        }
+        Hr { width: parent.width; }
+
+        Item {
+            width: parent.width;
             height: 34 * dpiScale;
             BasicText {
                 text: qsTr("Media");
@@ -514,7 +671,7 @@ ResizablePanel {
                     leftPadding: 0; rightPadding: 0;
                     iconName: "folder";
                     tooltip: qsTr("Add input folder");
-                    onClicked: folderDialog.open();
+                    onClicked: folderDialog.openInLastFolder();
                 }
                 LinkButton {
                     width: 32 * dpiScale;
@@ -522,7 +679,7 @@ ResizablePanel {
                     leftPadding: 0; rightPadding: 0;
                     iconName: "plus";
                     tooltip: qsTr("Add video files");
-                    onClicked: filesDialog.open2();
+                    onClicked: filesDialog.openInLastFolder();
                 }
                 LinkButton {
                     width: 32 * dpiScale;
@@ -622,7 +779,8 @@ ResizablePanel {
         Shortcut {
             sequences: ["Delete", "Backspace"];
             context: Qt.WidgetWithChildrenShortcut;
-            enabled: root.removableCount > 0;
+            // Only while the list has the focus, otherwise Delete removes the active trim range of the timeline
+            enabled: root.removableCount > 0 && lv.activeFocus;
             onActivated: root.removeSelected();
         }
         Keys.onPressed: (event) => {
@@ -650,7 +808,6 @@ ResizablePanel {
             height: itemCol.height + 10 * dpiScale;
             radius: 5 * dpiScale;
             property bool isFolder:  kind == "folder";
-            property bool isSection: kind == "section";
             property bool isRendering:  job_status == "rendering";
             property bool isProcessing: job_status == "processing";
             property bool isQueued:     job_status == "queued";
@@ -662,7 +819,6 @@ ResizablePanel {
             property bool isInQueue: job_id > 0;
 
             color: selected?     "#33ffffff"
-                 : marker_unmatched && !dlg.isSection && !dlg.isFolder? "#30f6a00b"
                  : isJobError?   "#30ed7676"
                  : isQuestion?   "#30" + styleAccentColor.toString().substring(1)
                  : stabilized_state == 1? "#3070e574"
@@ -711,12 +867,6 @@ ResizablePanel {
                 id: itemMenu;
                 font.pixelSize: 11.5 * dpiScale;
                 Action {
-                    iconName: "plus";
-                    text: qsTr("Add section");
-                    enabled: !dlg.isFolder;
-                    onTriggered: root.addSection(dlg.isSection? parent_id : item_id, item_id);
-                }
-                Action {
                     iconName: "queue";
                     text: qsTr("Add %1 selected to the render queue").arg(root.queueableCount);
                     enabled: root.queueableCount > 0;
@@ -732,12 +882,13 @@ ResizablePanel {
                     iconName: "play";
                     text: qsTr("Render now");
                     enabled: job_id > 0 && !dlg.isBusy && !dlg.isJobDone;
-                    onTriggered: root.prioritizeJob(job_id);
+                    onTriggered: root.prioritizeItem(item_id);
                 }
                 Action {
                     iconName: "pencil";
                     text: qsTr("Edit render settings");
-                    enabled: job_id > 0 && !dlg.isBusy;
+                    // The jobs of the trim ranges of a video are edited through the video itself
+                    enabled: job_id > 0 && job_count == 1 && !dlg.isBusy;
                     onTriggered: {
                         const data = render_queue.get_gyroflow_data(job_id);
                         if (data) window.videoArea.loadGyroflowData(JSON.parse(data), job_id);
@@ -747,13 +898,13 @@ ResizablePanel {
                     iconName: "arrow-up";
                     text: qsTr("Move up in the queue");
                     enabled: job_id > 0;
-                    onTriggered: render_queue.move_item(job_id, -1);
+                    onTriggered: root.moveItem(item_id, -1);
                 }
                 Action {
                     iconName: "arrow-down";
                     text: qsTr("Move down in the queue");
                     enabled: job_id > 0;
-                    onTriggered: render_queue.move_item(job_id, 1);
+                    onTriggered: root.moveItem(item_id, 1);
                 }
                 Action {
                     iconName: dlg.isBusy? "close" : "spinner";
@@ -768,6 +919,12 @@ ResizablePanel {
                     onTriggered: filesystem.open_file_externally(filesystem.get_file_url(media_library.get_output_folder(item_id), media_library.get_output_filename(item_id, ""), false));
                 }
                 Action {
+                    iconName: "info";
+                    text: qsTr("Video details");
+                    enabled: !dlg.isFolder;
+                    onTriggered: root.showDetails(item_id);
+                }
+                Action {
                     iconName: "folder";
                     text: qsTr("Open file location");
                     onTriggered: filesystem.open_file_externally(dlg.isFolder? url : filesystem.get_folder(url));
@@ -776,7 +933,6 @@ ResizablePanel {
                     iconName: "bin";
                     text: root.removableCount > 1? qsTr("Remove %1 selected").arg(root.removableCount)
                         : root.removableKind == "folder"? qsTr("Remove folder")
-                        : root.removableKind == "section"? qsTr("Delete section")
                         : qsTr("Remove video");
                     enabled: root.removableCount > 0;
                     onTriggered: root.removeSelected();
@@ -812,8 +968,8 @@ ResizablePanel {
                         anchors.left: parent.left;
                         anchors.leftMargin: 20 * dpiScale;
                         anchors.verticalCenter: parent.verticalCenter;
-                        name: dlg.isFolder? "folder" : dlg.isSection? "file-empty" : "video";
-                        source: "qrc:/resources/icons/svg/" + (dlg.isFolder? "folder" : dlg.isSection? "file-empty" : "video") + ".svg";
+                        name: dlg.isFolder? "folder" : "video";
+                        source: "qrc:/resources/icons/svg/" + (dlg.isFolder? "folder" : "video") + ".svg";
                         color: styleTextColor;
                         height: 14 * dpiScale;
                         width: height;
@@ -840,29 +996,6 @@ ResizablePanel {
                         anchors.right: parent.right;
                         anchors.verticalCenter: parent.verticalCenter;
                         spacing: 3 * dpiScale;
-                        LinkButton {
-                            visible: !dlg.isFolder;
-                            width: 20 * dpiScale;
-                            height: 20 * dpiScale;
-                            anchors.verticalCenter: parent.verticalCenter;
-                            leftPadding: 0; rightPadding: 0;
-                            icon.width: 10 * dpiScale;
-                            icon.height: 10 * dpiScale;
-                            iconName: "plus";
-                            tooltip: qsTr("Add a section of this video");
-                            onClicked: root.addSection(dlg.isSection? parent_id : item_id, item_id);
-                        }
-                        QQCI.IconImage {
-                            visible: marker_unmatched && !dlg.isSection && !dlg.isFolder;
-                            name: "warning";
-                            source: "qrc:/resources/icons/svg/warning.svg";
-                            color: "#f6a00b";
-                            height: 14 * dpiScale;
-                            width: height;
-                            anchors.verticalCenter: parent.verticalCenter;
-                            ToolTip { visible: !isMobile && unmatchedMouse.containsMouse; text: qsTr("No imported section matched this video."); }
-                            MouseArea { id: unmatchedMouse; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton; }
-                        }
                         QQC.BusyIndicator {
                             visible: scanning;
                             height: 16 * dpiScale;
@@ -870,6 +1003,19 @@ ResizablePanel {
                             padding: 0;
                             anchors.verticalCenter: parent.verticalCenter;
                             running: visible;
+                        }
+                        // Video information, lens profile and motion data of the video
+                        LinkButton {
+                            visible: !dlg.isFolder;
+                            width: 20 * dpiScale;
+                            height: 20 * dpiScale;
+                            anchors.verticalCenter: parent.verticalCenter;
+                            leftPadding: 0; rightPadding: 0;
+                            icon.width: 12 * dpiScale;
+                            icon.height: 12 * dpiScale;
+                            iconName: "info";
+                            tooltip: qsTr("Video information, lens profile and motion data");
+                            onClicked: root.showDetails(item_id);
                         }
                         QQCI.IconImage {
                             visible: lens_warning && !scanning && !dlg.isFolder;
@@ -882,8 +1028,8 @@ ResizablePanel {
                             layer.enabled: true;
                             layer.textureSize: Qt.size(height*2, height*2);
                             layer.smooth: true;
-                            ToolTip { visible: !isMobile && ma2.containsMouse; text: qsTr("No lens profile detected for this video."); }
-                            MouseArea { id: ma2; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton; }
+                            ToolTip { visible: !isMobile && ma2.containsMouse; text: qsTr("No lens profile detected for this video. Click to choose one."); }
+                            MouseArea { id: ma2; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.showDetails(item_id); }
                         }
                         BasicText {
                             visible: text.length > 0;
@@ -918,7 +1064,7 @@ ResizablePanel {
                     text: job_message? window.getReadableError(job_message) : "";
                 }
                 BasicText {
-                    visible: !dlg.isFolder && (dlg.isSection || duration_ms > 0);
+                    visible: !dlg.isFolder && duration_ms > 0;
                     width: parent.width;
                     leftPadding: 24 * dpiScale;
                     font.pixelSize: 10 * dpiScale;
@@ -927,8 +1073,8 @@ ResizablePanel {
                     text: {
                         let parts = [];
                         if (duration_ms > 0) parts.push(Math.floor(duration_ms / 60000) + ":" + ("0" + Math.floor((duration_ms % 60000) / 1000)).slice(-2));
-                        if (!dlg.isSection && created_at > 0) parts.push(new Date(created_at * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat));
-                        if (dlg.isSection) parts.push((trim_start * 100).toFixed(0) + "% - " + (trim_end * 100).toFixed(0) + "%");
+                        if (created_at > 0) parts.push(new Date(created_at * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat));
+                        if (range_count > 1) parts.push(output_count > 1? qsTr("%1 trim ranges, %2 files").arg(range_count).arg(output_count) : qsTr("%1 trim ranges").arg(range_count));
                         return parts.join("  |  ");
                     }
                 }
@@ -1061,16 +1207,6 @@ ResizablePanel {
 
         Item { width: 1; height: 2 * dpiScale; }
 
-        Button {
-            width: parent.width;
-            height: 30 * dpiScale;
-            font.pixelSize: 12 * dpiScale;
-            text: qsTr("Apply stabilization settings to all");
-            tooltip: qsTr("Applies the stabilization settings of the current video to all videos and sections. Lens profile and trim range are not changed.");
-            enabled: window.videoArea.vid.loaded;
-            onClicked: root.applyStabilizationToAll();
-        }
-
         // -------------------------------------- Render queue --------------------------------------
 
         Hr { width: parent.width; }
@@ -1085,7 +1221,7 @@ ResizablePanel {
             icon.height: 14 * dpiScale;
             font.pixelSize: 12 * dpiScale;
             enabled: root.queueableCount > 0 || root.queuedSelectedCount > 0;
-            tooltip: qsTr("Select the videos and sections in the list above, then add them to the render queue.");
+            tooltip: qsTr("Select the videos in the list above, then add them to the render queue.");
             text: root.queueableCount > 0? qsTr("Add %1 selected to the queue").arg(root.queueableCount)
                 : root.queuedSelectedCount > 0? qsTr("Remove %1 selected from the queue").arg(root.queuedSelectedCount)
                 : qsTr("Add selected to the queue");
@@ -1304,13 +1440,27 @@ ResizablePanel {
     // --------------------------------------- Dialogs -----------------------------------------
     // -----------------------------------------------------------------------------------------
 
+    // Both dialogs start in the folder something was last added from (also through drag and drop), across restarts
+    function rememberMediaFolder(url: string): void {
+        if (!url) return;
+        // A folder (eg. dropped) is remembered itself, a file by its folder
+        const folder = url.endsWith("/") || media_library.has_folder(url)? url : filesystem.get_folder(url).toString();
+        if (folder) settings.setValue("mediaLastFolder", folder);
+    }
     QQD.FolderDialog {
         id: folderDialog;
         title: qsTr("Select input folder");
+        function openInLastFolder(): void {
+            const last = settings.value("mediaLastFolder", "");
+            if (last) currentFolder = last;
+            open();
+        }
         onAccepted: {
             filesystem.folder_access_granted(selectedFolder);
             Qt.callLater(filesystem.save_allowed_folders);
             media_library.add_folder(selectedFolder.toString());
+            // The folder itself, so the next folder can be picked next to it or inside of it
+            settings.setValue("mediaLastFolder", selectedFolder.toString());
         }
     }
     FileDialog {
@@ -1319,8 +1469,14 @@ ResizablePanel {
         nameFilters: Qt.platform.os == "android"? undefined : [qsTr("Video files") + " (*." + fileDialog.extensions.concat(fileDialog.extensions.map(x => x.toUpperCase())).join(" *.") + ")"];
         type: "video";
         fileMode: FileDialog.OpenFiles;
+        function openInLastFolder(): void {
+            const last = settings.value("mediaLastFolder", "");
+            if (last) currentFolder = last;
+            open();
+        }
         onAccepted: {
             for (let i = 0; i < selectedFiles.length; i++) media_library.add_url(selectedFiles[i].toString());
+            if (selectedFiles.length) root.rememberMediaFolder(selectedFiles[0].toString());
         }
     }
 

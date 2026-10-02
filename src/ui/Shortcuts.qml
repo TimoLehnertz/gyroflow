@@ -4,6 +4,7 @@
 import QtQuick
 
 import Gyroflow
+import "components/"
 
 Item {
     property VideoArea videoArea;
@@ -80,6 +81,19 @@ Item {
         sequences: ["Ctrl+o", "Ctrl+]"];
         onActivated: {
             videoArea.timeline.addTrimEnd(videoArea.timeline.position);
+        }
+    }
+    // Delete the active trim range, after a confirmation (the media list uses the key itself while it has the focus)
+    Shortcut {
+        sequences: ["Delete", "Backspace"];
+        enabled: videoArea.timeline.trimRanges.length > 0 && videoArea.timeline.activeTrimRange >= 0 && !window.isDialogOpened
+                 && !(window.mediaPanel && window.mediaPanel.listHasFocus);
+        onActivated: {
+            const index = videoArea.timeline.activeTrimRange;
+            messageBox(Modal.Question, qsTr("Delete trim range %1?").arg(index + 1), [
+                { text: qsTr("Delete"), accent: true, clicked: () => videoArea.timeline.removeTrimRange(index) },
+                { text: qsTr("Cancel") },
+            ]);
         }
     }
     // Clear trim range
@@ -202,6 +216,8 @@ Item {
             const queueModal = window.mediaPanel? window.mediaPanel.queueModal.item : null;
             if (queueModal && queueModal.shown) {
                 queueModal.shown = false;
+            } else if (window.videoDetails && window.videoDetails.shown) {
+                window.videoDetails.shown = false;
             } else {
                 videoArea.fullScreen = 0;
             }

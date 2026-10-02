@@ -8,6 +8,8 @@ import QtQuick.Dialogs
 
 import "."
 import "components/"
+// `Menu` is the namespace of the side panels here, the menu component is `Components.Menu`
+import "components/" as Components
 import "menu/" as Menu
 
 Rectangle {
@@ -25,13 +27,11 @@ Rectangle {
     onIsLandscapeChanged: {
         if (isLandscape) {
             // Landscape layout
-            leftPanel.y = 0;
-            rightPanel.x = Qt.binding(() => window.mediaPanelWidth + (window.isMobileLayout? 0 : leftPanel.width) + videoAreaCol.width);
+            rightPanel.x = Qt.binding(() => window.mediaPanelWidth + videoAreaCol.width);
             rightPanel.y = 0;
-            videoAreaCol.x = Qt.binding(() => (videoArea.fullScreen? 0 : window.mediaPanelWidth + (window.isMobileLayout? 0 : leftPanel.width)));
-            videoAreaCol.width = Qt.binding(() => mainLayout.width - (videoArea.fullScreen? 0 : window.mediaPanelWidth + (window.isMobileLayout? 0 : leftPanel.width) + rightPanel.width));
+            videoAreaCol.x = Qt.binding(() => (videoArea.fullScreen? 0 : window.mediaPanelWidth));
+            videoAreaCol.width = Qt.binding(() => mainLayout.width - (videoArea.fullScreen? 0 : window.mediaPanelWidth + rightPanel.width));
             videoAreaCol.height = Qt.binding(() => mainLayout.height);
-            leftPanel.fixedWidth = 0;
             rightPanel.fixedWidth = 0;
         } else {
             // Portrait layout
@@ -39,10 +39,8 @@ Rectangle {
             videoAreaCol.x = 0;
             videoAreaCol.width = Qt.binding(() => window.width);
             videoAreaCol.height = Qt.binding(() => window.height * (videoArea.fullScreen? 1 : (window.isMobileLayout? (window.videoArea.vid.loaded && window.videoArea.vid.height > window.videoArea.vid.width? 0.6 : 0.4) : 0.5)));
-            leftPanel.fixedWidth = Qt.binding(() => window.width * 0.4);
-            rightPanel.fixedWidth = Qt.binding(() => window.width * (window.isMobileLayout? 1.0 : 0.6));
-            leftPanel.y = Qt.binding(() => videoAreaCol.height);
-            rightPanel.x = Qt.binding(() => window.isMobileLayout? 0 : leftPanel.width);
+            rightPanel.fixedWidth = Qt.binding(() => window.width);
+            rightPanel.x = 0;
             rightPanel.y = Qt.binding(() => videoAreaCol.height);
         }
     }
@@ -68,11 +66,11 @@ Rectangle {
             renderBtnRow   .parent = exportTab.inner;
             exportSettings .parent = exportTab.inner;
         } else {
-            vidInfo      .parent = leftPanel.col;
-            vidInfoHr    .parent = leftPanel.col;
-            lensProfile  .parent = leftPanel.col;
-            lensProfileHr.parent = leftPanel.col;
-            motionData   .parent = leftPanel.col;
+            vidInfo      .parent = videoDetails.col;
+            vidInfoHr    .parent = videoDetails.col;
+            lensProfile  .parent = videoDetails.col;
+            lensProfileHr.parent = videoDetails.col;
+            motionData   .parent = videoDetails.col;
 
             sync          .parent = rightPanel.col;
             syncHr        .parent = rightPanel.col;
@@ -91,6 +89,7 @@ Rectangle {
     property alias vidInfo: vidInfo.item;
     property alias videoArea: videoArea;
     property alias mediaPanel: mediaPanel;
+    property alias videoDetails: videoDetails;
     property alias motionData: motionData.item;
     property alias lensProfile: lensProfile.item;
     property alias outputFile: outputFile;
@@ -150,57 +149,16 @@ Rectangle {
         MediaSidebar {
             id: mediaPanel;
             visible: window.mediaPanelShown && !videoArea.fullScreen && !isMobileLayout && window.isLandscape;
-            maxWidth: parent.width - leftPanel.lastWidth - rightPanel.lastWidth - 50 * dpiScale;
+            maxWidth: parent.width - rightPanel.lastWidth - 50 * dpiScale;
             implicitWidth: settings.value("mediaPanelSize", defaultWidth);
             onWidthChanged: settings.setValue("mediaPanelSize", width);
-        }
-
-        SidePanel {
-            id: leftPanel;
-            direction: SidePanel.HandleRight;
-            topPadding: gflogo.height;
-            x: window.mediaPanelWidth;
-            visible: !videoArea.fullScreen && !isMobileLayout;
-            maxWidth: parent.width - window.mediaPanelWidth - rightPanel.lastWidth - 50 * dpiScale;
-            implicitWidth: settings.value("leftPanelSize", defaultWidth);
-            onWidthChanged: settings.setValue("leftPanelSize", width);
-            Column {
-                width: parent.width;
-                parent: leftPanel;
-                id: gflogo;
-
-                Item {
-                    width: parent.width;
-                    height: children[0].height * 1.5;
-                    Image {
-                        source: "qrc:/resources/logo" + (style === "dark"? "_white" : "_black") + ".svg"
-                        sourceSize.width: Math.min(300 * dpiScale, parent.width * 0.9);
-                        anchors.centerIn: parent;
-                    }
-                }
-                Hr { }
-            }
-
-            ItemLoader { id: vidInfo; sourceComponent: Component {
-                Menu.VideoInformation {
-                    onSelectFileRequest: fileDialog.open2();
-                }
-            } }
-            Hr { id: vidInfoHr; visible: window.stabilizationEnabled; }
-            ItemLoader { id: lensProfile; visible: status == Loader.Ready && window.stabilizationEnabled; sourceComponent: Component {
-                Menu.LensProfile { }
-            } }
-            Hr { id: lensProfileHr; visible: window.stabilizationEnabled; }
-            ItemLoader { id: motionData; visible: status == Loader.Ready && window.stabilizationEnabled; sourceComponent: Component {
-                Menu.MotionData { }
-            } }
         }
 
         Column {
             id: videoAreaCol;
             y: 0;
-            x: videoArea.fullScreen? 0 : window.mediaPanelWidth + leftPanel.width;
-            width: parent? parent.width - (videoArea.fullScreen? 0 : window.mediaPanelWidth + leftPanel.width + rightPanel.width) : 0;
+            x: videoArea.fullScreen? 0 : window.mediaPanelWidth;
+            width: parent? parent.width - (videoArea.fullScreen? 0 : window.mediaPanelWidth + rightPanel.width) : 0;
             height: parent? parent.height : 0;
             VideoArea {
                 id: videoArea;
@@ -218,14 +176,37 @@ Rectangle {
 
                 Hr { width: parent.width; }
 
-                Label {
+                // With trim ranges exported as separate videos, every range has its own output path,
+                // the one of the active range (the one the playhead is in, or was in last) is shown
+                readonly property int rangeCount: videoArea.timeline.trimRanges.length;
+                readonly property bool separateRanges: !!exportSettings.item && exportSettings.item.exportTrimsSeparately.checked;
+                ComboBox {
+                    id: rangesModeBox;
                     x: 10 * dpiScale;
+                    visible: exportbar.rangeCount > 1;
+                    anchors.verticalCenter: parent.verticalCenter;
+                    width: visible? 250 * dpiScale : 0;
+                    height: 28 * dpiScale;
+                    font.pixelSize: 12 * dpiScale;
+                    // Ranges with their own settings can only be exported as separate videos, so it's one choice
+                    model: [QT_TRANSLATE_NOOP("Popup", "One video per range"), QT_TRANSLATE_NOOP("Popup", "One video per range, separate settings"), QT_TRANSLATE_NOOP("Popup", "Join ranges into one video")];
+                    currentIndex: videoArea.separateRangeSettings? 1 : exportbar.separateRanges? 0 : 2;
+                    onActivated: (index) => {
+                        videoArea.setSeparateRangeSettings(index == 1);
+                        exportSettings.item.exportTrimsSeparately.checked = index != 2;
+                        currentIndex = Qt.binding(() => videoArea.separateRangeSettings? 1 : exportbar.separateRanges? 0 : 2);
+                    }
+                    tooltip: qsTr("Export every trim range as its own video, with the same or with its own stabilization and export settings, or all of them joined into one video");
+                }
+                Label {
+                    x: rangesModeBox.x + rangesModeBox.width + (rangesModeBox.visible? 10 : 0) * dpiScale;
                     id: outputPathLabel;
                     anchors.verticalCenter: (isMobileLayout? undefined : parent.verticalCenter);
                     anchors.verticalCenterOffset: -1 * dpiScale;
-                    text: qsTr("Output path:");
+                    text: exportbar.separateRanges && exportbar.rangeCount > 1 && videoArea.timeline.activeTrimRange >= 0?
+                          qsTr("Output of range %1:").arg(videoArea.timeline.activeTrimRange + 1) : qsTr("Output path:");
                     position: isMobileLayout? Label.TopPosition : Label.LeftPosition;
-                    width: parent.width - (isMobileLayout? 0 : renderBtnRow.width + 10 * dpiScale) - 2*x;
+                    width: parent.width - (isMobileLayout? 0 : renderBtnRow.width + 10 * dpiScale) - x - 10 * dpiScale;
                     OutputPathField {
                         id: outputFile;
                         onFolderUrlChanged: {
@@ -244,7 +225,6 @@ Rectangle {
                     spacing: 5 * dpiScale;
                     anchors.verticalCenter: (isMobileLayout? undefined : parent.verticalCenter);
                     anchors.horizontalCenter: (isMobileLayout? parent.horizontalCenter : undefined);
-                    anchors.horizontalCenterOffset: queueBtn.visible? (queueBtn.width + spacing) / 2 : 0;
 
                     // The queue and the direct export are separate, always visible buttons now, no dropdown.
                     // `renderBtn` is the shared logic of both, the buttons below only pick the action.
@@ -259,8 +239,10 @@ Rectangle {
                         property bool allowSync: false;
                         // "queue" adds it to the render queue, "now" renders it right away, overruling the queue
                         property string pendingAction: "queue";
-                        // Job started by "Stabilize now" and the queue state to restore when it's done
+                        // Job started by "Stabilize now" and the queue state to restore when it's done.
+                        // With trim ranges exported as separate videos, the jobs of the other ranges render after it
                         property int directJobId: 0;
+                        property var directNextJobs: [];
                         property bool resumeQueueAfter: false;
 
                         readonly property bool canExport: window.videoArea.vid.loaded && outputFile.filename.length > 3
@@ -287,7 +269,25 @@ Rectangle {
                         }
                         function stabilizeNow(): void { renderBtn.startAction("now"); }
                         // The direct render is done, let the queue continue where it was paused
+                        // Cancelled: the files of the other trim ranges aren't rendered either
+                        function cancelDirectRender(): void {
+                            for (const jobId of renderBtn.directNextJobs) render_queue.remove(jobId);
+                            renderBtn.directNextJobs = [];
+                            renderBtn.directRenderFinished();
+                        }
+                        // Hidden: it keeps rendering in the queue, and so do the files of the other trim ranges
+                        function hideDirectRender(): void {
+                            renderBtn.directNextJobs = [];
+                            renderBtn.directRenderFinished();
+                        }
                         function directRenderFinished(): void {
+                            if (renderBtn.directNextJobs.length) {
+                                const next = renderBtn.directNextJobs.shift();
+                                renderBtn.directJobId = next;
+                                render_queue.main_job_id = next;
+                                render_queue.render_job(next);
+                                return;
+                            }
                             renderBtn.directJobId = 0;
                             if (renderBtn.resumeQueueAfter) {
                                 renderBtn.resumeQueueAfter = false;
@@ -324,7 +324,10 @@ Rectangle {
                                 ]);
                                 return;
                             }
-                            const exists = filesystem.exists_in_folder(outputFile.folderUrl, outputFile.filename.replace("_%05d", "_00001"));
+                            // With trim ranges exported as separate videos, the bottom bar shows only the file of the active range
+                            const outputs = renderBtn.pendingAction == "now"? mediaPanel.loadedOutputs() : [];
+                            const exists = filesystem.exists_in_folder(outputFile.folderUrl, outputFile.filename.replace("_%05d", "_00001"))
+                                        || outputs.some(x => filesystem.exists_in_folder(x.output_folder, x.output_filename.replace("_%05d", "_00001")));
                             if ((exists || render_queue.file_exists_in_folder(outputFile.folderUrl, outputFile.filename)) && !allowFile) {
                                 function overwrite() {
                                     allowFile = true;
@@ -404,9 +407,12 @@ Rectangle {
                                         renderBtn.resumeQueueAfter = true;
                                     }
                                     const job_id = render_queue.add(window.getAdditionalProjectDataJson(), controller.image_to_b64(result.image));
-                                    renderBtn.directJobId = job_id;
-                                    render_queue.main_job_id = job_id;
-                                    render_queue.render_job(job_id);
+                                    // One job per output file, they share the loaded video and render one after another
+                                    const jobs = mediaPanel.splitDirectJob(job_id);
+                                    renderBtn.directNextJobs = jobs.slice(1);
+                                    renderBtn.directJobId = jobs[0];
+                                    render_queue.main_job_id = jobs[0];
+                                    render_queue.render_job(jobs[0]);
                                 }
                             }, Qt.size(50 * dpiScale * videoArea.vid.parent.ratio, 50 * dpiScale));
                         }
@@ -487,43 +493,41 @@ Rectangle {
                         text: qsTr("Stabilize now");
                         onClicked: renderBtn.stabilizeNow();
                     }
+                    // The actions that are used less often, so the bar stays compact
                     LinkButton {
+                        id: moreBtn;
                         height: 32 * dpiScale;
-                        font.pixelSize: 11 * dpiScale;
-                        text: qsTr("Export project file");
-                        onClicked: window.saveProject("WithGyroData");
-                    }
-                    LinkButton {
-                        height: 32 * dpiScale;
-                        font.pixelSize: 11 * dpiScale;
-                        visible: controller.project_file_url != "";
-                        text: qsTr("Save project file");
-                        onClicked: window.saveProject("");
-                    }
-                    LinkButton {
-                        height: 32 * dpiScale;
-                        font.pixelSize: 11 * dpiScale;
-                        text: qsTr("Create settings preset");
-                        onClicked: renderBtn.openSettingsSelector("preset");
-                    }
-                    LinkButton {
-                        height: 32 * dpiScale;
-                        font.pixelSize: 11 * dpiScale;
-                        visible: render_queue.queue.rowCount() > 0;
-                        text: qsTr("Apply settings to the queue");
-                        onClicked: renderBtn.openSettingsSelector("apply");
-                    }
-                    LinkButton {
-                        id: queueBtn;
-                        visible: !isMobileLayout && window.isLandscape;
-                        leftPadding: 10 * dpiScale;
-                        rightPadding: 10 * dpiScale;
-                        icon.width: 25 * dpiScale;
-                        icon.height: 25 * dpiScale;
-                        height: 32 * dpiScale;
-                        iconName: "queue";
-                        tooltip: window.mediaPanelShown? qsTr("Hide the media list") : qsTr("Show the media list");
-                        onClicked: window.mediaPanelShown = !window.mediaPanelShown;
+                        leftPadding: 8 * dpiScale;
+                        rightPadding: 8 * dpiScale;
+                        icon.width: 18 * dpiScale;
+                        icon.height: 18 * dpiScale;
+                        iconName: "menu";
+                        tooltip: qsTr("Project files, presets and applying the settings to other ranges, clips or the queue");
+                        onClicked: moreMenu.popup(moreBtn, 0, -moreMenu.height);
+                        Components.Menu {
+                            id: moreMenu;
+                            Action { iconName: "save"; text: qsTr("Export project file"); onTriggered: window.saveProject("WithGyroData"); }
+                            Action { iconName: "save"; text: qsTr("Save project file"); enabled: controller.project_file_url != ""; onTriggered: window.saveProject(""); }
+                            Action { iconName: "settings"; text: qsTr("Create settings preset"); onTriggered: renderBtn.openSettingsSelector("preset"); }
+                            Action { iconName: "queue"; text: qsTr("Apply settings to the queue"); enabled: render_queue.queue.rowCount() > 0; onTriggered: renderBtn.openSettingsSelector("apply"); }
+                            QQC.MenuSeparator { verticalPadding: 5 * dpiScale; }
+                            // The stabilization settings shown in the main view, to the other trim ranges of the video or to the other videos
+                            Action {
+                                iconName: "gyroflow";
+                                text: qsTr("Apply stabilization settings to all ranges of this clip");
+                                enabled: videoArea.separateRangeSettings;
+                                onTriggered: {
+                                    videoArea.applySettingsToAllRanges();
+                                    showNotification(Modal.Success, qsTr("Stabilization settings applied to all trim ranges of this video."));
+                                }
+                            }
+                            Action {
+                                iconName: "gyroflow";
+                                text: qsTr("Apply stabilization settings to all other clips");
+                                enabled: videoArea.vid.loaded;
+                                onTriggered: mediaPanel.applyStabilizationToAll();
+                            }
+                        }
                     }
                 }
             }
@@ -532,9 +536,9 @@ Rectangle {
         SidePanel {
             id: rightPanel;
             visible: !videoArea.fullScreen;
-            x: window.mediaPanelWidth + leftPanel.width + videoAreaCol.width;
+            x: window.mediaPanelWidth + videoAreaCol.width;
             direction: SidePanel.HandleLeft;
-            maxWidth: parent.width - window.mediaPanelWidth - leftPanel.lastWidth - 50 * dpiScale;
+            maxWidth: parent.width - window.mediaPanelWidth - 50 * dpiScale;
             implicitWidth: settings.value("rightPanelSize", defaultWidth);
             onWidthChanged: settings.setValue("rightPanelSize", width);
             col.visible: !isMobileLayout;
@@ -566,6 +570,27 @@ Rectangle {
 
     Shortcuts {
         videoArea: videoArea;
+    }
+
+    // Video information, lens profile and motion data are opened from the video, in the media list
+    VideoDetailsModal {
+        id: videoDetails;
+        anchors.fill: parent;
+        z: 100;
+
+        ItemLoader { id: vidInfo; sourceComponent: Component {
+            Menu.VideoInformation {
+                onSelectFileRequest: fileDialog.open2();
+            }
+        } }
+        Hr { id: vidInfoHr; visible: window.stabilizationEnabled; }
+        ItemLoader { id: lensProfile; visible: status == Loader.Ready && window.stabilizationEnabled; sourceComponent: Component {
+            Menu.LensProfile { }
+        } }
+        Hr { id: lensProfileHr; visible: window.stabilizationEnabled; }
+        ItemLoader { id: motionData; visible: status == Loader.Ready && window.stabilizationEnabled; sourceComponent: Component {
+            Menu.MotionData { }
+        } }
     }
 
     function handleDroppedUrls(urls) {
@@ -625,6 +650,8 @@ Rectangle {
         if (type == Modal.Success) play_sound("success");
 
         el = Qt.createComponent("components/Modal.qml").createObject(parent || window, { textFormat: textFormat, iconType: type, modalIdentifier: identifier || "" });
+        // Above the modals that cover the whole window (render queue, video details, marker import), they can ask questions too
+        if (!parent) el.z = 200;
         el.text = text;
         el.onClicked.connect((index, dontShowAgain) => {
             if (identifier && dontShowAgain) {
@@ -820,6 +847,9 @@ Rectangle {
         return {
             "output": exportSettings.item.getExportOptions(),
             "synchronization": sync.item.getSettings(),
+            // Output path of each trim range (and its stabilization settings if they are separate), in the order of `trim_ranges_ms`
+            "trim_range_info": (videoArea.storeDisplayedRangeSettings(), videoArea.timeline.getTrimRangeInfo()),
+            "trim_range_config": videoArea.separateRangeSettings? "separate" : "shared",
 
             "muted": window.videoArea.vid.muted,
             "playback_speed": window.videoArea.vid.playbackRate
