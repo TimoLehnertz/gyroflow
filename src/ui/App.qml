@@ -218,14 +218,32 @@ Rectangle {
 
                 Hr { width: parent.width; }
 
-                Label {
+                // With trim ranges exported as separate videos, every range has its own output path,
+                // the one of the active range (the one the playhead is in, or was in last) is shown
+                readonly property int rangeCount: videoArea.timeline.trimRanges.length;
+                readonly property bool separateRanges: !!exportSettings.item && exportSettings.item.exportTrimsSeparately.checked;
+                ComboBox {
+                    id: rangesModeBox;
                     x: 10 * dpiScale;
+                    visible: exportbar.rangeCount > 1;
+                    anchors.verticalCenter: parent.verticalCenter;
+                    width: visible? 175 * dpiScale : 0;
+                    height: 28 * dpiScale;
+                    font.pixelSize: 12 * dpiScale;
+                    model: [QT_TRANSLATE_NOOP("Popup", "One video per range"), QT_TRANSLATE_NOOP("Popup", "Join ranges into one video")];
+                    currentIndex: exportbar.separateRanges? 0 : 1;
+                    onActivated: (index) => { exportSettings.item.exportTrimsSeparately.checked = index == 0; }
+                    tooltip: qsTr("Export every trim range as its own video, or all of them joined into one video");
+                }
+                Label {
+                    x: rangesModeBox.x + rangesModeBox.width + (rangesModeBox.visible? 10 : 0) * dpiScale;
                     id: outputPathLabel;
                     anchors.verticalCenter: (isMobileLayout? undefined : parent.verticalCenter);
                     anchors.verticalCenterOffset: -1 * dpiScale;
-                    text: qsTr("Output path:");
+                    text: exportbar.separateRanges && exportbar.rangeCount > 1 && videoArea.timeline.activeTrimRange >= 0?
+                          qsTr("Output of range %1:").arg(videoArea.timeline.activeTrimRange + 1) : qsTr("Output path:");
                     position: isMobileLayout? Label.TopPosition : Label.LeftPosition;
-                    width: parent.width - (isMobileLayout? 0 : renderBtnRow.width + 10 * dpiScale) - 2*x;
+                    width: parent.width - (isMobileLayout? 0 : renderBtnRow.width + 10 * dpiScale) - x - 10 * dpiScale;
                     OutputPathField {
                         id: outputFile;
                         onFolderUrlChanged: {
@@ -513,31 +531,24 @@ Rectangle {
                         text: qsTr("Stabilize now");
                         onClicked: renderBtn.stabilizeNow();
                     }
+                    // The actions that are used less often, so the bar stays compact
                     LinkButton {
+                        id: moreBtn;
                         height: 32 * dpiScale;
-                        font.pixelSize: 11 * dpiScale;
-                        text: qsTr("Export project file");
-                        onClicked: window.saveProject("WithGyroData");
-                    }
-                    LinkButton {
-                        height: 32 * dpiScale;
-                        font.pixelSize: 11 * dpiScale;
-                        visible: controller.project_file_url != "";
-                        text: qsTr("Save project file");
-                        onClicked: window.saveProject("");
-                    }
-                    LinkButton {
-                        height: 32 * dpiScale;
-                        font.pixelSize: 11 * dpiScale;
-                        text: qsTr("Create settings preset");
-                        onClicked: renderBtn.openSettingsSelector("preset");
-                    }
-                    LinkButton {
-                        height: 32 * dpiScale;
-                        font.pixelSize: 11 * dpiScale;
-                        visible: render_queue.queue.rowCount() > 0;
-                        text: qsTr("Apply settings to the queue");
-                        onClicked: renderBtn.openSettingsSelector("apply");
+                        leftPadding: 8 * dpiScale;
+                        rightPadding: 8 * dpiScale;
+                        icon.width: 18 * dpiScale;
+                        icon.height: 18 * dpiScale;
+                        iconName: "menu";
+                        tooltip: qsTr("Project files, presets and applying the settings to the queue");
+                        onClicked: moreMenu.popup(moreBtn, 0, -moreMenu.height);
+                        Menu {
+                            id: moreMenu;
+                            Action { iconName: "save"; text: qsTr("Export project file"); onTriggered: window.saveProject("WithGyroData"); }
+                            Action { iconName: "save"; text: qsTr("Save project file"); enabled: controller.project_file_url != ""; onTriggered: window.saveProject(""); }
+                            Action { iconName: "settings"; text: qsTr("Create settings preset"); onTriggered: renderBtn.openSettingsSelector("preset"); }
+                            Action { iconName: "queue"; text: qsTr("Apply settings to the queue"); enabled: render_queue.queue.rowCount() > 0; onTriggered: renderBtn.openSettingsSelector("apply"); }
+                        }
                     }
                     LinkButton {
                         id: queueBtn;

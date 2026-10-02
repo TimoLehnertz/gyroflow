@@ -620,6 +620,8 @@ MenuItem {
             id: exportTrimsSeparately;
             text: qsTr("Export trim ranges as separate videos");
             checked: true;
+            // Chosen in the bottom bar, next to the output path
+            visible: false;
             width: parent.width;
             Component.onCompleted: contentItem.wrapMode = Text.WordWrap;
         }
