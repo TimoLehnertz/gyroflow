@@ -199,6 +199,7 @@ ResizablePanel {
             else rest.push(u);
         }
         for (const u of rest) media_library.add_url(u);
+        if (rest.length) root.rememberMediaFolder(rest[0].toString());
         if (jsons.length) root.openImportMarkers(jsons[0]);
     }
     function applyImportedMarkers(offsetHours: real, queue: bool): void {
@@ -670,7 +671,7 @@ ResizablePanel {
                     leftPadding: 0; rightPadding: 0;
                     iconName: "folder";
                     tooltip: qsTr("Add input folder");
-                    onClicked: folderDialog.open();
+                    onClicked: folderDialog.openInLastFolder();
                 }
                 LinkButton {
                     width: 32 * dpiScale;
@@ -678,7 +679,7 @@ ResizablePanel {
                     leftPadding: 0; rightPadding: 0;
                     iconName: "plus";
                     tooltip: qsTr("Add video files");
-                    onClicked: filesDialog.open2();
+                    onClicked: filesDialog.openInLastFolder();
                 }
                 LinkButton {
                     width: 32 * dpiScale;
@@ -1466,13 +1467,27 @@ ResizablePanel {
     // --------------------------------------- Dialogs -----------------------------------------
     // -----------------------------------------------------------------------------------------
 
+    // Both dialogs start in the folder something was last added from (also through drag and drop), across restarts
+    function rememberMediaFolder(url: string): void {
+        if (!url) return;
+        // A folder (eg. dropped) is remembered itself, a file by its folder
+        const folder = url.endsWith("/") || media_library.has_folder(url)? url : filesystem.get_folder(url).toString();
+        if (folder) settings.setValue("mediaLastFolder", folder);
+    }
     QQD.FolderDialog {
         id: folderDialog;
         title: qsTr("Select input folder");
+        function openInLastFolder(): void {
+            const last = settings.value("mediaLastFolder", "");
+            if (last) currentFolder = last;
+            open();
+        }
         onAccepted: {
             filesystem.folder_access_granted(selectedFolder);
             Qt.callLater(filesystem.save_allowed_folders);
             media_library.add_folder(selectedFolder.toString());
+            // The folder itself, so the next folder can be picked next to it or inside of it
+            settings.setValue("mediaLastFolder", selectedFolder.toString());
         }
     }
     FileDialog {
@@ -1481,8 +1496,14 @@ ResizablePanel {
         nameFilters: Qt.platform.os == "android"? undefined : [qsTr("Video files") + " (*." + fileDialog.extensions.concat(fileDialog.extensions.map(x => x.toUpperCase())).join(" *.") + ")"];
         type: "video";
         fileMode: FileDialog.OpenFiles;
+        function openInLastFolder(): void {
+            const last = settings.value("mediaLastFolder", "");
+            if (last) currentFolder = last;
+            open();
+        }
         onAccepted: {
             for (let i = 0; i < selectedFiles.length; i++) media_library.add_url(selectedFiles[i].toString());
+            if (selectedFiles.length) root.rememberMediaFolder(selectedFiles[0].toString());
         }
     }
 
