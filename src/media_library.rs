@@ -1028,7 +1028,8 @@ impl MediaLibrary {
                 if !used.contains(&path) { break path; }
             };
             used.insert(path.clone());
-            *x = serde_json::json!({ "output_path": path });
+            if !x.is_object() { *x = serde_json::json!({ }); }
+            x["output_path"] = serde_json::Value::String(path);
         }
         if let serde_json::Value::Object(o) = obj {
             if count > 0 { o.insert("trim_range_info".into(), serde_json::json!(info)); }
@@ -1105,6 +1106,12 @@ impl MediaLibrary {
         if range_index >= 0 {
             if let Some(stab) = Self::range_stabilization(&obj, range_index as usize) {
                 obj["stabilization"] = stab;
+            }
+            // The export settings of the range replace the ones of the video, the output path stays the one of the range
+            if let Some(serde_json::Value::Object(mut output)) = Self::range_output(&obj, range_index as usize) {
+                for k in ["output_path", "output_folder", "output_filename", "output_folder_bookmark"] { output.remove(k); }
+                if !obj["output"].is_object() { obj["output"] = serde_json::json!({ }); }
+                for (k, v) in output { obj["output"][k] = v; }
             }
         }
         QString::from(obj.to_string())
@@ -1247,8 +1254,15 @@ impl MediaLibrary {
     }
     /// Stabilization settings of a trim range, if the video has separate settings for each range
     fn range_stabilization(obj: &serde_json::Value, range_index: usize) -> Option<serde_json::Value> {
+        Self::range_setting(obj, range_index, "stabilization")
+    }
+    /// Export settings of a trim range (without the output path), if the video has separate settings for each range
+    fn range_output(obj: &serde_json::Value, range_index: usize) -> Option<serde_json::Value> {
+        Self::range_setting(obj, range_index, "output")
+    }
+    fn range_setting(obj: &serde_json::Value, range_index: usize, key: &str) -> Option<serde_json::Value> {
         if obj.get("trim_range_config").and_then(|x| x.as_str()) != Some("separate") { return None; }
-        obj.get("trim_range_info")?.get(range_index)?.get("stabilization").filter(|x| x.is_object()).cloned()
+        obj.get("trim_range_info")?.get(range_index)?.get(key).filter(|x| x.is_object()).cloned()
     }
     pub fn settings_hash(&self, item_id: u32) -> QString {
         let settings = self.item_settings(item_id).map(|(_, s, _)| s.clone()).unwrap_or_default();
@@ -1356,11 +1370,18 @@ impl MediaLibrary {
             return vec![OutputFile { range_index: -1, folder, filename, own_settings: false }];
         }
         let base = self.output_path_or_default(&v.url, &v.output_path);
+        let obj = v.settings.as_ref().and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok()).unwrap_or_default();
         paths.iter().enumerate().map(|(i, path)| {
             // Every range gets a path when the settings are saved, this is only for settings that never were
             let path = if path.is_empty() { format!("{base}-{:0>3}", i + 1) } else { path.clone() };
-            let (folder, filename) = self.resolve_output(&v.url, &path, &v.settings, ext);
-            let own_settings = v.settings.as_ref().and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok()).map_or(false, |obj| Self::range_stabilization(&obj, i).is_some());
+            let own_settings = Self::range_stabilization(&obj, i).is_some() || Self::range_output(&obj, i).is_some();
+            // A range with its own export settings gets the extension of its own codec
+            let range_ext = Self::range_output(&obj, i).map(|output| {
+                let mut options = rendering::render_queue::RenderOptions::default();
+                options.update_from_json(&output);
+                options.output_extension(&filesystem::get_filename(&v.url), None)
+            });
+            let (folder, filename) = self.resolve_output(&v.url, &path, &v.settings, range_ext.as_deref().or(ext));
             OutputFile { range_index: i as i32, folder, filename, own_settings }
         }).collect()
     }

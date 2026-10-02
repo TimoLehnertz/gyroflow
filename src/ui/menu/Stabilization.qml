@@ -22,22 +22,9 @@ MenuItem {
     property alias croppingMode: croppingMode;
     property alias automaticHorizonLock: autoLockCb.checked;
 
-    // With several trim ranges, each of them can have its own stabilization settings
-    CheckBox {
-        id: separateRangesCb;
-        visible: window.videoArea.timeline.trimRanges.length > 1;
-        width: parent.width;
-        text: qsTr("Separate settings for each trim range");
-        tooltip: qsTr("Every trim range gets its own stabilization settings, the ones of the active range are shown here.");
-        checked: window.videoArea.separateRangeSettings;
-        onClicked: {
-            window.videoArea.setSeparateRangeSettings(checked);
-            checked = Qt.binding(() => window.videoArea.separateRangeSettings);
-        }
-        Component.onCompleted: contentItem.wrapMode = Text.WordWrap;
-    }
+    // With separate settings for each trim range (chosen in the bottom bar), the ones of the active range are shown
     BasicText {
-        visible: separateRangesCb.visible && window.videoArea.separateRangeSettings && window.videoArea.timeline.activeTrimRange >= 0;
+        visible: window.videoArea.separateRangeSettings && window.videoArea.timeline.trimRanges.length > 1 && window.videoArea.timeline.activeTrimRange >= 0;
         width: parent.width;
         wrapMode: Text.WordWrap;
         font.pixelSize: 11 * dpiScale;

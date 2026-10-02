@@ -360,7 +360,11 @@ ResizablePanel {
             if (media_library.get_job_status(jobIds[i]) != "queued") continue;
             const file = outputs.find(x => x.range_index == ranges[i]);
             data = settingsOf(jobIds[i]);
-            data.output = Object.assign({ }, output, file? { output_folder: file.output_folder, output_filename: file.output_filename } : { });
+            // A range with its own settings keeps its own export settings, all of them render to their own file
+            const rangeOutput = file && file.own_settings? (data.output || { }) : { };
+            data.output = Object.assign({ }, output, rangeOutput, file? { output_folder: file.output_folder, output_filename: file.output_filename } : { });
+            // The metadata has the stabilization hash, which tells whether the rendered file is up to date
+            data.output.metadata = output.metadata;
             render_queue.apply_to_all(JSON.stringify(data), additionalData, jobIds[i]);
             render_queue.set_job_output(jobIds[i], ranges[i], "", "");
         }

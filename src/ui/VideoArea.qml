@@ -42,21 +42,30 @@ Item {
 
     property Menu.VideoInformation vidInfo: null;
 
-    // ------------------------------------ Stabilization settings per trim range ------------------------------------
-    // With separate settings, every trim range has its own stabilization settings, stored with the range (next to its
-    // output path). The panels show the ones of the active range: when it changes, the current ones are stored in the
-    // range they belong to, and the ones of the new active range are loaded.
+    // ---------------------------------------- Settings per trim range ----------------------------------------
+    // With separate settings, every trim range has its own stabilization and export settings, stored with the range
+    // (next to its output path). The panels show the ones of the active range: when it changes, the current ones are
+    // stored in the range they belong to, and the ones of the new active range are loaded.
     property bool separateRangeSettings: false;
     // Info object of the trim range whose settings are shown, it's changed in place so it identifies the range
     property var displayedRangeInfo: null;
-    function currentStabilization(): var {
-        return JSON.parse(controller.export_gyroflow_data("Simple", ({ }))).stabilization || ({ });
+    function currentRangeSettings(): var {
+        const stabilization = JSON.parse(controller.export_gyroflow_data("Simple", ({ }))).stabilization || ({ });
+        let output = window.exportSettings? JSON.parse(JSON.stringify(window.exportSettings.getExportOptions())) : ({ });
+        // The output path is the one of the range, and these belong to the video
+        for (const k of ["output_folder", "output_filename", "metadata", "export_trims_separately"]) delete output[k];
+        return { stabilization: stabilization, output: output };
+    }
+    function setRangeSettings(info: var, settings: var): void {
+        const copy = JSON.parse(JSON.stringify(settings));
+        info.stabilization = copy.stabilization;
+        info.output = copy.output;
     }
     function storeDisplayedRangeSettings(): void {
         if (!root.separateRangeSettings || !root.displayedRangeInfo || !vid.loaded) return;
         // The range could have been removed in the meantime
         if (!timeline.trimRanges.some(x => x[2] === root.displayedRangeInfo)) return;
-        root.displayedRangeInfo.stabilization = root.currentStabilization();
+        root.setRangeSettings(root.displayedRangeInfo, root.currentRangeSettings());
     }
     function showActiveRangeSettings(): void {
         if (!root.separateRangeSettings) { root.displayedRangeInfo = null; return; }
@@ -68,8 +77,9 @@ Item {
         root.displayedRangeInfo = info;
         if (info.stabilization) {
             root.loadGyroflowData({ title: "Gyroflow data file", version: 4, stabilization: info.stabilization }, 0);
+            if (info.output && window.exportSettings) window.exportSettings.loadGyroflow({ output: JSON.parse(JSON.stringify(info.output)) });
         } else {
-            info.stabilization = root.currentStabilization();
+            root.setRangeSettings(info, root.currentRangeSettings());
         }
     }
     // New ranges (eg. added or split off) start with the settings of the active one, ie. the ones that are shown
@@ -79,22 +89,25 @@ Item {
         for (let i = 0; i < timeline.trimRanges.length; ++i) {
             const info = timeline.trimRangeInfo(i);
             if (info.stabilization) continue;
-            if (!current) current = root.currentStabilization();
-            info.stabilization = JSON.parse(JSON.stringify(current));
+            if (!current) current = root.currentRangeSettings();
+            root.setRangeSettings(info, current);
         }
     }
     // Every range starts with the current settings. Turned off, the settings of the active range are the ones of the video
     function setSeparateRangeSettings(separate: bool): void {
         if (separate == root.separateRangeSettings) return;
         if (separate) {
-            const current = root.currentStabilization();
-            for (let i = 0; i < timeline.trimRanges.length; ++i) timeline.trimRangeInfo(i).stabilization = JSON.parse(JSON.stringify(current));
+            const current = root.currentRangeSettings();
+            for (let i = 0; i < timeline.trimRanges.length; ++i) root.setRangeSettings(timeline.trimRangeInfo(i), current);
             root.separateRangeSettings = true;
             root.displayedRangeInfo = timeline.activeTrimRange >= 0? timeline.trimRangeInfo(timeline.activeTrimRange) : null;
             // Ranges with different settings can't be joined into one video
             if (window.exportSettings) window.exportSettings.exportTrimsSeparately.checked = true;
         } else {
-            for (let i = 0; i < timeline.trimRanges.length; ++i) delete timeline.trimRangeInfo(i).stabilization;
+            for (let i = 0; i < timeline.trimRanges.length; ++i) {
+                delete timeline.trimRangeInfo(i).stabilization;
+                delete timeline.trimRangeInfo(i).output;
+            }
             root.separateRangeSettings = false;
             root.displayedRangeInfo = null;
         }
@@ -102,8 +115,8 @@ Item {
     }
     function applySettingsToAllRanges(): void {
         if (!root.separateRangeSettings) return;
-        const current = root.currentStabilization();
-        for (let i = 0; i < timeline.trimRanges.length; ++i) timeline.trimRangeInfo(i).stabilization = JSON.parse(JSON.stringify(current));
+        const current = root.currentRangeSettings();
+        for (let i = 0; i < timeline.trimRanges.length; ++i) root.setRangeSettings(timeline.trimRangeInfo(i), current);
         timeline.trimRangesChanged();
     }
 

@@ -185,15 +185,18 @@ Rectangle {
                     x: 10 * dpiScale;
                     visible: exportbar.rangeCount > 1;
                     anchors.verticalCenter: parent.verticalCenter;
-                    width: visible? 175 * dpiScale : 0;
+                    width: visible? 250 * dpiScale : 0;
                     height: 28 * dpiScale;
                     font.pixelSize: 12 * dpiScale;
-                    model: [QT_TRANSLATE_NOOP("Popup", "One video per range"), QT_TRANSLATE_NOOP("Popup", "Join ranges into one video")];
-                    currentIndex: exportbar.separateRanges? 0 : 1;
-                    // Ranges with their own stabilization settings can't be joined into one video
-                    enabled: !videoArea.separateRangeSettings;
-                    onActivated: (index) => { exportSettings.item.exportTrimsSeparately.checked = index == 0; }
-                    tooltip: qsTr("Export every trim range as its own video, or all of them joined into one video");
+                    // Ranges with their own settings can only be exported as separate videos, so it's one choice
+                    model: [QT_TRANSLATE_NOOP("Popup", "One video per range"), QT_TRANSLATE_NOOP("Popup", "One video per range, separate settings"), QT_TRANSLATE_NOOP("Popup", "Join ranges into one video")];
+                    currentIndex: videoArea.separateRangeSettings? 1 : exportbar.separateRanges? 0 : 2;
+                    onActivated: (index) => {
+                        videoArea.setSeparateRangeSettings(index == 1);
+                        exportSettings.item.exportTrimsSeparately.checked = index != 2;
+                        currentIndex = Qt.binding(() => videoArea.separateRangeSettings? 1 : exportbar.separateRanges? 0 : 2);
+                    }
+                    tooltip: qsTr("Export every trim range as its own video, with the same or with its own stabilization and export settings, or all of them joined into one video");
                 }
                 Label {
                     x: rangesModeBox.x + rangesModeBox.width + (rangesModeBox.visible? 10 : 0) * dpiScale;
