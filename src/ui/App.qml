@@ -646,6 +646,8 @@ Rectangle {
         if (type == Modal.Success) play_sound("success");
 
         el = Qt.createComponent("components/Modal.qml").createObject(parent || window, { textFormat: textFormat, iconType: type, modalIdentifier: identifier || "" });
+        // Above the modals that cover the whole window (render queue, video details, marker import), they can ask questions too
+        if (!parent) el.z = 200;
         el.text = text;
         el.onClicked.connect((index, dontShowAgain) => {
             if (identifier && dontShowAgain) {
