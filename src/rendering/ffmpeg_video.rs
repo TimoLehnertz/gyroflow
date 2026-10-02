@@ -7,6 +7,7 @@ use super::ffmpeg_processor::Status;
 use super::ffmpeg_processor::FFmpegError;
 use super::ffmpeg_processor::FrameTimestamps;
 use super::ffmpeg_video_converter::Converter;
+use std::sync::{ Arc, atomic::{ AtomicBool, Ordering::Relaxed } };
 
 pub struct FrameBuffers {
     pub sw_frame: frame::Video,
@@ -61,6 +62,8 @@ pub struct VideoTranscoder<'a> {
     pub decode_only: bool,
     pub gpu_decoding: bool,
     pub gpu_encoding: bool,
+    /// Whether the last decoded frame came from the GPU. The decoder can fall back to the CPU even if a GPU device was set up for it
+    pub hw_decoded: Arc<AtomicBool>,
     pub clone_frames: bool,
 
     pub converter: Converter,
@@ -220,8 +223,10 @@ impl<'a> VideoTranscoder<'a> {
                     };
 
                     let mut hw_formats = None;
+                    let is_hw_frame = unsafe { !(*frame.as_mut_ptr()).hw_frames_ctx.is_null() };
+                    self.hw_decoded.store(is_hw_frame, Relaxed);
                     let input_frame =
-                        if unsafe { !(*frame.as_mut_ptr()).hw_frames_ctx.is_null() } {
+                        if is_hw_frame {
                             hw_formats = Some(unsafe { super::ffmpeg_hw::get_transfer_formats_from_gpu(frame.as_mut_ptr()) });
                             // log::debug!("Hardware transfer formats from GPU: {:?}", hw_formats);
                             // retrieve data from GPU to CPU

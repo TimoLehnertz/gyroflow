@@ -202,7 +202,7 @@ Item {
                 readonly property real headerHeight: groupStart? 24 * dpiScale : 0;
                 x: inGroup? 24 * dpiScale : 0;
                 width: lv.width - x;
-                height: 60 * dpiScale + headerHeight;
+                height: (procInfo? 72 : 60) * dpiScale + headerHeight;
                 property real progress: total_frames > 0? current_frame / total_frames : 0;
                 property bool isFinished: current_frame >= total_frames && total_frames > 0;
                 property bool isQuestion: error_string.startsWith("convert_format:") || error_string.startsWith("file_exists:");
@@ -212,6 +212,8 @@ Item {
                 property bool isRendering: !isFinished && !isError && !isQuestion && total_frames > 0 && (current_frame > 0 || isProcessing);
                 property bool dragging: false;
                 property real dragStartY: 0;
+                // What the render runs on, known once it started (see `rendering::ProcessingInfo`)
+                readonly property var procInfo: processing_info? JSON.parse(processing_info) : null;
 
                 color: "transparent";
                 opacity: dragging? 0.5 : 1;
@@ -395,6 +397,50 @@ Item {
                                 : dlg.isQuestion? qsTr("Action needed")
                                 : dlg.isFinished? qsTr("Done")
                                 : export_settings;
+                        }
+                        BasicText {
+                            id: procInfoText;
+                            readonly property var info: dlg.procInfo;
+                            readonly property bool decodeGpu: !!info && info.decoder != "";
+                            readonly property bool stabGpu: !!info && info.stabilization != "CPU";
+                            readonly property bool encodeGpu: !!info && info.encoder_gpu;
+                            function stage(label: string, gpu: bool, name: string, wantedGpu: bool): string {
+                                const value = gpu? qsTr("GPU (%1)").arg(name) : qsTr("CPU");
+                                // CPU instead of the GPU is what makes a render slow, so that stands out
+                                return label + ": " + (!gpu && wantedGpu? "<font color=\"#f6a10c\">" + value + "</font>" : value);
+                            }
+                            width: parent.width;
+                            leftPadding: 0;
+                            font.pixelSize: 10 * dpiScale;
+                            opacity: 0.8;
+                            elide: Text.ElideRight;
+                            textFormat: Text.StyledText;
+                            visible: !!info;
+                            text: !info? "" : [
+                                stage(qsTr("Decoding"),      decodeGpu, info.decoder,       info.decoder_wanted_gpu),
+                                stage(qsTr("Stabilization"), stabGpu,   info.stabilization, info.stabilization_wanted_gpu),
+                                stage(qsTr("Encoding"),      encodeGpu, info.encoder,       info.encoder_wanted_gpu),
+                            ].join(" · ");
+                            readonly property string details: {
+                                if (!info) return "";
+                                let lines = [];
+                                if (!decodeGpu) {
+                                    if (!info.decoder_wanted_gpu)  lines.push(qsTr("GPU decoding is turned off in the advanced settings."));
+                                    else if (info.decoder_note)    lines.push(qsTr("The GPU can't decode this video, so it's decoded on the CPU: %1").arg(info.decoder_note));
+                                    else                           lines.push(qsTr("There's no GPU decoder for this video, so it's decoded on the CPU."));
+                                }
+                                if (!stabGpu) {
+                                    if (!info.stabilization_wanted_gpu) lines.push(qsTr("\"CPU only\" is selected as the device for video processing in the advanced settings."));
+                                    else                                lines.push(qsTr("The GPU couldn't be used for the stabilization, so it runs on the CPU."));
+                                }
+                                if (!encodeGpu) {
+                                    if (!info.encoder_wanted_gpu) lines.push(qsTr("GPU encoding is turned off in the export settings."));
+                                    else                          lines.push(qsTr("No GPU encoder could be used for this output, so it's encoded on the CPU."));
+                                }
+                                return lines.join("\n");
+                            }
+                            MouseArea { id: procInfoMa; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton; }
+                            ToolTip { visible: !isMobile && procInfoMa.containsMouse && procInfoText.details != ""; text: procInfoText.details; }
                         }
                     }
 

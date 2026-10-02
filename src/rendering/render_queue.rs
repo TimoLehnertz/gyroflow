@@ -35,6 +35,8 @@ pub struct RenderQueueItem {
     pub same_video_as_previous: bool,
     /// The next item renders the same video too, the first item of a group has the name of the video above it
     pub same_video_as_next: bool,
+    /// What the render runs on (GPU or CPU for decoding, stabilization and encoding), JSON of `rendering::ProcessingInfo`
+    pub processing_info: QString,
 
     frame_times: std::collections::VecDeque<(u64, u64)>,
 
@@ -497,6 +499,7 @@ impl RenderQueue {
                 itm.start_timestamp_frame = 0;
                 itm.end_timestamp = 0;
                 itm.error_string = QString::default();
+                itm.processing_info = QString::default();
                 itm.status = JobStatus::Queued;
                 itm.frame_times.clear();
             });
@@ -521,6 +524,7 @@ impl RenderQueue {
                 error_string: QString::default(),
                 same_video_as_previous: false,
                 same_video_as_next: false,
+                processing_info: QString::default(),
                 frame_times: Default::default(),
                 status: JobStatus::Queued,
             });
@@ -849,6 +853,7 @@ impl RenderQueue {
         }
         update_model!(self, job_id, itm {
             itm.error_string = QString::default();
+            itm.processing_info = QString::default();
             itm.current_frame = 0;
             itm.status = JobStatus::Queued;
         });
@@ -951,6 +956,7 @@ impl RenderQueue {
                         return;
                     }
                     itm.status = JobStatus::Rendering;
+                    itm.processing_info = QString::default();
                     //q.data_changed(job.queue_index);
                     q.change_line(job.queue_index, itm);
                 }
@@ -1027,6 +1033,11 @@ impl RenderQueue {
                     }
                 }
                 this.encoder_initialized(job_id, encoder_name);
+            });
+            let processing_info = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, info: rendering::ProcessingInfo| {
+                update_model!(this, job_id, itm {
+                    itm.processing_info = QString::from(info.to_json());
+                });
             });
 
             let err = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, (msg, mut arg): (String, String)| {
@@ -1258,6 +1269,11 @@ impl RenderQueue {
                     vec![None]
                 };
                 let original_gpu_decode = stab.gpu_decoding.load(SeqCst);
+                // A render that's retried without the GPU decoder (see below) still reports that GPU decoding was wanted
+                let processing_info = move |mut info: rendering::ProcessingInfo| {
+                    info.decoder_wanted_gpu = original_gpu_decode;
+                    processing_info(info);
+                };
                 'ranges: for range in ranges_to_render {
                     if cancel_flag.load(SeqCst) { break; }
                     if render_options.disable_stabilization {
@@ -1269,7 +1285,7 @@ impl RenderQueue {
                     }
                     let mut i = 0;
                     loop {
-                        let result = rendering::render(stab.clone(), progress.clone(), &input_file, &render_options, i, range, cancel_flag.clone(), pause_flag.clone(), encoder_initialized.clone());
+                        let result = rendering::render(stab.clone(), progress.clone(), &input_file, &render_options, i, range, cancel_flag.clone(), pause_flag.clone(), encoder_initialized.clone(), processing_info.clone());
                         if let Err(e) = result {
                             if let rendering::FFmpegError::PixelFormatNotSupported((fmt, supported, candidate)) = e {
                                 let candidate = if let Some(c) = candidate { format!("{c:?}").to_ascii_lowercase().to_string() } else { String::new() };
