@@ -211,6 +211,7 @@ Item {
                 property bool isProcessing: processing_progress > 0.0 && processing_progress < 1.0;
                 property bool isRendering: !isFinished && !isError && !isQuestion && total_frames > 0 && (current_frame > 0 || isProcessing);
                 property bool dragging: false;
+                property real dragStartY: 0;
 
                 color: "transparent";
                 opacity: dragging? 0.5 : 1;
@@ -322,16 +323,24 @@ Item {
                             drag.target: dlg.dragging? dlg : undefined;
                             drag.axis: Drag.YAxis;
                             onPressed: {
+                                dlg.dragStartY = dlg.y;
                                 dragIndicator.y = lv.mapFromItem(dlg, 0, 0).y;
                                 lv.isDragging = dlg.dragging = true;
                                 lv.dragTargetIndex = index;
                             }
                             onReleased: {
+                                // Dragging moved the item itself, put it back first. When it's moved in the queue, the list puts it in its new place
+                                dlg.y = dlg.dragStartY;
                                 if (dlg.dragging) {
                                     let diff = lv.dragTargetIndex - index;
                                     if (lv.dragTargetIndex > index) diff--;
                                     if (diff != 0) render_queue.move_item(job_id, diff);
                                 }
+                                lv.isDragging = dlg.dragging = false;
+                                lv.dragTargetIndex = -1;
+                            }
+                            onCanceled: {
+                                dlg.y = dlg.dragStartY;
                                 lv.isDragging = dlg.dragging = false;
                                 lv.dragTargetIndex = -1;
                             }
@@ -423,9 +432,8 @@ Item {
                 }
             }
 
-            displaced: Transition {
-                NumberAnimation { properties: "y"; duration: 400; easing.type: Easing.OutExpo; }
-            }
+            // No transition when items are displaced: moving an item can change the height of the items around it (the name
+            // of the video above the first item of a group), and that during the transition left items on top of each other
         }
 
         // ------------------------------------- Footer -------------------------------------
