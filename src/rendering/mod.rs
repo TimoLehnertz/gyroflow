@@ -428,7 +428,8 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
 
     let progress2 = progress.clone();
     let mut process_frame = 0;
-    if let Some(i) = trim_range_ind {
+    // Progress continues over the ranges of the job, a job of a single range starts at 0
+    if let Some(i) = trim_range_ind.filter(|_| render_options.trim_range_index.is_none()) {
         for x in 0..i {
             let x = org_trim_ranges[x];
             process_frame += ((x.1 - x.0) * total_frame_count as f64).round() as usize;
@@ -697,7 +698,8 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
             let _ = std::fs::create_dir_all(path);
         }
     }
-    if org_trim_ranges.len() > 1 {
+    // A job of a single trim range has its own, final output filename
+    if org_trim_ranges.len() > 1 && render_options.trim_range_index.is_none() {
         if let Some(ind) = trim_range_ind {
             if let Some(pos) = filename.rfind('.') {
                 filename.insert_str(pos, &format!("-{:0>3}", ind + 1));
@@ -728,7 +730,7 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
         ::log::debug!("Removing {output_url}");
         let _ = gyroflow_core::filesystem::remove_file(&output_url);
     }
-    if trim_range_ind.is_none() || trim_range_ind == Some(org_trim_ranges.len() - 1) {
+    if trim_range_ind.is_none() || trim_range_ind == Some(org_trim_ranges.len() - 1) || render_options.trim_range_index.is_some() {
         progress((1.0, render_frame_count, render_frame_count, true, false));
     }
 

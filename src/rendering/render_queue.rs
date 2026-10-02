@@ -56,7 +56,10 @@ struct Job {
     project_data: Option<String>,
     stab: Arc<StabilizationManager>,
     /// Settings were applied to the job, but the motion data wasn't processed with them yet. It's done when the job starts rendering
-    gyro_outdated: Arc<AtomicBool>
+    gyro_outdated: Arc<AtomicBool>,
+    /// Whether the stabilizer is ready to render (synchronized, smoothing and zooming computed). The jobs of the trim ranges
+    /// of one video share their stabilizer and this, so it's prepared once and never by two of them at the same time
+    prepared: Arc<parking_lot::Mutex<bool>>
 }
 
 #[derive(Default, Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -108,6 +111,8 @@ pub struct RenderOptions {
     pub audio_codec: String,
     pub interpolation: String,
     pub disable_stabilization: bool,
+    /// The job renders only this trim range, to its own output file (whose name is final, without the `-001` numbering)
+    pub trim_range_index: Option<usize>,
 }
 impl RenderOptions {
     pub fn settings_string(&self, fps: f64) -> String {
@@ -178,6 +183,7 @@ impl RenderOptions {
             if let Some(v) = obj.get("use_gpu")        .and_then(|x| x.as_bool()) { self.use_gpu = v; }
             if let Some(v) = obj.get("audio")          .and_then(|x| x.as_bool()) { self.audio = v; }
             if let Some(v) = obj.get("pixel_format")   .and_then(|x| x.as_str())  { self.pixel_format = v.to_string(); }
+            if let Some(v) = obj.get("trim_range_index") { self.trim_range_index = v.as_u64().map(|x| x as usize); }
 
             // Advanced
             if let Some(v) = obj.get("encoder_options")        .and_then(|x| x.as_str())  { self.encoder_options = v.to_string(); }
@@ -294,6 +300,9 @@ pub struct RenderQueue {
     get_prev_item_id: qt_method!(fn(&self, job_id: u32) -> u32),
     get_next_item_id: qt_method!(fn(&self, job_id: u32) -> u32),
     get_job_ids: qt_method!(fn(&self) -> QVariantList),
+    split_job_by_ranges: qt_method!(fn(&mut self, job_id: u32, outputs: String) -> QVariantList),
+    set_job_output: qt_method!(fn(&mut self, job_id: u32, range_index: i32, folder: String, filename: String)),
+    get_job_range_index: qt_method!(fn(&self, job_id: u32) -> i32),
     get_encoder_options: qt_method!(fn(&self, encoder: String) -> String),
     get_default_encoder: qt_method!(fn(&self, codec: String, gpu: bool) -> String),
     get_active_render_count: qt_method!(fn(&self) -> usize),
@@ -529,7 +538,8 @@ impl RenderQueue {
             cancel_flag: Default::default(),
             project_data,
             stab: stab.clone(),
-            gyro_outdated: Default::default()
+            gyro_outdated: Default::default(),
+            prepared: Default::default()
         });
         self.update_queue_indices();
 
@@ -585,6 +595,77 @@ impl RenderQueue {
             self.remove(job_id);
         }
     }
+    /// Makes `job_id` render only the first of `outputs` (`[{ range_index, output_folder, output_filename }]`) and adds a job for each
+    /// of the others right after it. They all share the stabilizer of `job_id`, so the video is loaded, synchronized and its smoothing
+    /// computed only once for all of its trim ranges. Returns the ids of the jobs, in the order of `outputs`
+    pub fn split_job_by_ranges(&mut self, job_id: u32, outputs: String) -> QVariantList {
+        let outputs = serde_json::from_str::<Vec<serde_json::Value>>(&outputs).unwrap_or_default();
+        let mut ids = Vec::new();
+        let (base_index, stab) = match self.jobs.get(&job_id) {
+            Some(job) => (job.queue_index, job.stab.clone()),
+            None => return QVariantList::default()
+        };
+        let base_item = match self.queue.borrow().iter().nth(base_index) { Some(x) => x.clone(), None => return QVariantList::default() };
+        for (n, output) in outputs.iter().enumerate() {
+            let range_index = output.get("range_index").and_then(|x| x.as_i64()).filter(|x| *x >= 0).map(|x| x as usize);
+            let folder   = output.get("output_folder").and_then(|x| x.as_str()).unwrap_or_default().to_owned();
+            let filename = output.get("output_filename").and_then(|x| x.as_str()).unwrap_or_default().to_owned();
+            let id = if n == 0 {
+                job_id
+            } else {
+                let new_id = fastrand::u32(1..2147483640);
+                let base = &self.jobs[&job_id];
+                let job = Job {
+                    queue_index: base_index + n,
+                    render_options: base.render_options.clone(),
+                    additional_data: base.additional_data.clone(),
+                    cancel_flag: Default::default(),
+                    project_data: None,
+                    stab: stab.clone(),
+                    gyro_outdated: base.gyro_outdated.clone(),
+                    prepared: base.prepared.clone()
+                };
+                self.jobs.insert(new_id, job);
+                let mut itm = base_item.clone();
+                itm.job_id = new_id;
+                self.queue.borrow_mut().insert(base_index + n, itm);
+                new_id
+            };
+            self.update_queue_indices();
+            self.set_job_output(id, range_index.map(|x| x as i32).unwrap_or(-1), folder, filename);
+            ids.push(id);
+        }
+        self.update_queue_indices();
+        self.queue_changed();
+        QVariantList::from_iter(ids)
+    }
+    /// The trim range a job renders (-1: all of them, the way `export_trims_separately` says) and its output file
+    pub fn set_job_output(&mut self, job_id: u32, range_index: i32, folder: String, filename: String) {
+        let Some(job) = self.jobs.get_mut(&job_id) else { return; };
+        job.render_options.trim_range_index = if range_index >= 0 { Some(range_index as usize) } else { None };
+        if !folder.is_empty() { job.render_options.output_folder = folder; }
+        if !filename.is_empty() { job.render_options.output_filename = filename; }
+        job.project_data = Self::get_gyroflow_data_internal(&job.stab, &job.additional_data, &job.render_options);
+
+        let params = job.stab.params.read();
+        let ratio = match job.render_options.trim_range_index.and_then(|i| params.trim_ranges.get(i)) {
+            Some(range) => (range.1 - range.0).max(0.0),
+            None => params.get_trim_ratio()
+        };
+        let total_frames = (params.frame_count as f64 * ratio).ceil() as u64;
+        let (folder, filename) = (job.render_options.output_folder.clone(), job.render_options.output_filename.clone());
+        drop(params);
+        update_model!(self, job_id, itm {
+            itm.output_folder = QString::from(folder.as_str());
+            itm.output_filename = QString::from(filename.as_str());
+            itm.display_output_path = QString::from(filesystem::display_folder_filename(&folder, &filename));
+            itm.total_frames = total_frames;
+        });
+    }
+    pub fn get_job_range_index(&self, job_id: u32) -> i32 {
+        self.jobs.get(&job_id).and_then(|x| x.render_options.trim_range_index).map(|x| x as i32).unwrap_or(-1)
+    }
+
     fn update_queue_indices(&mut self) {
         for (i, v) in self.queue.borrow().iter().enumerate() {
             if let Some(job) = self.jobs.get_mut(&v.job_id) {
@@ -1004,24 +1085,31 @@ impl RenderQueue {
 
             let processing2 = processing.clone();
             let gyro_outdated = job.gyro_outdated.clone();
+            let prepared = job.prepared.clone();
             core::run_threaded(move || {
-                if gyro_outdated.swap(false, SeqCst) {
-                    stab.recompute_gyro();
-                }
-                if !render_options.disable_stabilization {
-                    // Before the sync: motion data set aside has nothing to sync
-                    let optical = Self::optical_correction_requested(&stab);
-                    Self::do_autosync(stab.clone(), processing, &input_file, err2, proc_height);
-                    if optical {
-                        if let Err(e) = Self::do_optical_correction(&stab, processing2, cancel_flag.clone(), pause_flag.clone()) {
-                            return if cancel_flag.load(SeqCst) {
-                                err(("Optical analysis cancelled%1".to_string(), String::new()))
-                            } else {
-                                err(("An error occured: %1".to_string(), e))
-                            };
-                        }
+                {
+                    // Held while preparing, so the other jobs of the same video wait for it instead of preparing it as well
+                    let mut prepared = prepared.lock();
+                    if gyro_outdated.swap(false, SeqCst) {
+                        stab.recompute_gyro();
+                        *prepared = false;
                     }
-                    stab.recompute_blocking();
+                    if !*prepared && !render_options.disable_stabilization {
+                        // Before the sync: motion data set aside has nothing to sync
+                        let optical = Self::optical_correction_requested(&stab);
+                        Self::do_autosync(stab.clone(), processing, &input_file, err2, proc_height);
+                        if optical {
+                            if let Err(e) = Self::do_optical_correction(&stab, processing2, cancel_flag.clone(), pause_flag.clone()) {
+                                return if cancel_flag.load(SeqCst) {
+                                    err(("Optical analysis cancelled%1".to_string(), String::new()))
+                                } else {
+                                    err(("An error occured: %1".to_string(), e))
+                                };
+                            }
+                        }
+                        stab.recompute_blocking();
+                    }
+                    *prepared = true;
                 }
 
                 if let Some((opt, path, fields)) = export_metadata {
@@ -1140,7 +1228,9 @@ impl RenderQueue {
                 }
 
                 let num_ranges = stab.params.read().trim_ranges.len();
-                let ranges_to_render = if render_options.export_trims_separately && num_ranges > 0 {
+                let ranges_to_render = if let Some(i) = render_options.trim_range_index.filter(|i| *i < num_ranges) {
+                    vec![Some(i)]
+                } else if render_options.export_trims_separately && num_ranges > 0 {
                     (0..num_ranges).map(Some).collect::<Vec<_>>()
                 } else {
                     vec![None]
@@ -1730,6 +1820,27 @@ impl RenderQueue {
         let data = data.as_bytes();
         let data_vec = data.to_vec();
         let mut q = self.queue.borrow_mut();
+        // The jobs of the trim ranges of one video share their stabilizer. Don't change the settings under one of them that's
+        // rendering right now: all the queued ones that share it get their own copy, which they share between them again
+        {
+            let status = |job: &Job| if job.queue_index < q.row_count() as usize { Some(q[job.queue_index].status.clone()) } else { None };
+            let rendering = self.jobs.values().filter(|job| status(job) == Some(JobStatus::Rendering)).map(|job| Arc::as_ptr(&job.stab) as usize).collect::<std::collections::HashSet<_>>();
+            let mut detached: HashMap<usize, (Arc<StabilizationManager>, Arc<AtomicBool>, Arc<parking_lot::Mutex<bool>>)> = HashMap::new();
+            for (job_id, job) in self.jobs.iter() {
+                let ptr = Arc::as_ptr(&job.stab) as usize;
+                if (to_job_id == 0 || *job_id == to_job_id) && status(job) == Some(JobStatus::Queued) && rendering.contains(&ptr) && !detached.contains_key(&ptr) {
+                    detached.insert(ptr, (Arc::new(job.stab.get_cloned()), Arc::new(AtomicBool::new(true)), Default::default()));
+                }
+            }
+            for job in self.jobs.values_mut() {
+                if status(job) != Some(JobStatus::Queued) { continue; }
+                if let Some((stab, gyro_outdated, prepared)) = detached.get(&(Arc::as_ptr(&job.stab) as usize)) {
+                    job.stab = stab.clone();
+                    job.gyro_outdated = gyro_outdated.clone();
+                    job.prepared = prepared.clone();
+                }
+            }
+        }
         for (job_id, job) in self.jobs.iter_mut() {
             if to_job_id > 0 && *job_id != to_job_id { continue; }
             if job.queue_index < q.row_count() as usize {

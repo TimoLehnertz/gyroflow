@@ -45,7 +45,8 @@ pub fn render_trim_only<F>(stab: &StabilizationManager, progress: F, input_file:
             let _ = std::fs::create_dir_all(path);
         }
     }
-    if org_trim_ranges.len() > 1 {
+    // A job of a single trim range has its own, final output filename
+    if org_trim_ranges.len() > 1 && render_options.trim_range_index.is_none() {
         if let Some(ind) = trim_range_ind {
             if let Some(pos) = filename.rfind('.') {
                 filename.insert_str(pos, &format!("-{:0>3}", ind + 1));
@@ -240,7 +241,7 @@ pub fn render_trim_only<F>(stab: &StabilizationManager, progress: F, input_file:
         }
     }
 
-    if trim_range_ind.is_none() || trim_range_ind == Some(org_trim_ranges.len() - 1) {
+    if trim_range_ind.is_none() || trim_range_ind == Some(org_trim_ranges.len() - 1) || render_options.trim_range_index.is_some() {
         let total = frames.max(render_frame_count);
         progress((1.0, total, total, true, false));
     }
