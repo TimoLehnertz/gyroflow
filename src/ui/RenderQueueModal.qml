@@ -389,11 +389,13 @@ Item {
                             leftPadding: 0; rightPadding: 0;
                             icon.width: 13 * dpiScale;
                             icon.height: 13 * dpiScale;
+                            // A started item can't be removed, but while the queue is paused it can be stopped (then removed)
+                            readonly property bool canStop: dlg.isRendering && render_queue.status == "paused";
                             textColor: "#f67575";
-                            enabled: !dlg.isRendering;
-                            iconName: "bin";
-                            tooltip: dlg.isRendering? qsTr("This item is already rendering.") : qsTr("Remove from the queue");
-                            onClicked: render_queue.remove(job_id);
+                            enabled: !dlg.isRendering || canStop;
+                            iconName: canStop? "close" : "bin";
+                            tooltip: canStop? qsTr("Stop") : dlg.isRendering? qsTr("This item is already rendering.") : qsTr("Remove from the queue");
+                            onClicked: if (canStop) render_queue.reset_job(job_id); else render_queue.remove(job_id);
                         }
                     }
                 }
