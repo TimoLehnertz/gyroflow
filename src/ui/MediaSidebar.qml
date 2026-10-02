@@ -429,6 +429,14 @@ ResizablePanel {
         root.applyRangeSettings(root.loadedItem(), ids, outputs);
         return ids;
     }
+    // Video information, lens profile and motion data are set up for the video in the main view, load it first
+    function showDetails(itemId: int): void {
+        if (itemId != media_library.current_item) {
+            media_library.select_only(itemId);
+            root.loadItem(itemId);
+        }
+        window.videoDetails.shown = true;
+    }
     function unqueueLoadedFile(): void {
         const itemId = root.loadedItem();
         if (itemId > 0) root.unqueueItem(itemId);
@@ -625,6 +633,18 @@ ResizablePanel {
         x: 5 * dpiScale;
         y: 5 * dpiScale;
         spacing: 5 * dpiScale;
+
+        Item {
+            width: parent.width;
+            height: logo.height + 12 * dpiScale;
+            Image {
+                id: logo;
+                source: "qrc:/resources/logo" + (style === "dark"? "_white" : "_black") + ".svg"
+                sourceSize.width: Math.min(220 * dpiScale, parent.width * 0.8);
+                anchors.centerIn: parent;
+            }
+        }
+        Hr { width: parent.width; }
 
         Item {
             width: parent.width;
@@ -893,6 +913,12 @@ ResizablePanel {
                     onTriggered: filesystem.open_file_externally(filesystem.get_file_url(media_library.get_output_folder(item_id), media_library.get_output_filename(item_id, ""), false));
                 }
                 Action {
+                    iconName: "info";
+                    text: qsTr("Video details");
+                    enabled: !dlg.isFolder;
+                    onTriggered: root.showDetails(item_id);
+                }
+                Action {
                     iconName: "folder";
                     text: qsTr("Open file location");
                     onTriggered: filesystem.open_file_externally(dlg.isFolder? url : filesystem.get_folder(url));
@@ -983,6 +1009,19 @@ ResizablePanel {
                             anchors.verticalCenter: parent.verticalCenter;
                             running: visible;
                         }
+                        // Video information, lens profile and motion data of the video
+                        LinkButton {
+                            visible: !dlg.isFolder;
+                            width: 20 * dpiScale;
+                            height: 20 * dpiScale;
+                            anchors.verticalCenter: parent.verticalCenter;
+                            leftPadding: 0; rightPadding: 0;
+                            icon.width: 12 * dpiScale;
+                            icon.height: 12 * dpiScale;
+                            iconName: "info";
+                            tooltip: qsTr("Video information, lens profile and motion data");
+                            onClicked: root.showDetails(item_id);
+                        }
                         QQCI.IconImage {
                             visible: lens_warning && !scanning && !dlg.isFolder;
                             name: "warning";
@@ -994,8 +1033,8 @@ ResizablePanel {
                             layer.enabled: true;
                             layer.textureSize: Qt.size(height*2, height*2);
                             layer.smooth: true;
-                            ToolTip { visible: !isMobile && ma2.containsMouse; text: qsTr("No lens profile detected for this video."); }
-                            MouseArea { id: ma2; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton; }
+                            ToolTip { visible: !isMobile && ma2.containsMouse; text: qsTr("No lens profile detected for this video. Click to choose one."); }
+                            MouseArea { id: ma2; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.showDetails(item_id); }
                         }
                         BasicText {
                             visible: text.length > 0;

@@ -25,13 +25,11 @@ Rectangle {
     onIsLandscapeChanged: {
         if (isLandscape) {
             // Landscape layout
-            leftPanel.y = 0;
-            rightPanel.x = Qt.binding(() => window.mediaPanelWidth + (window.isMobileLayout? 0 : leftPanel.width) + videoAreaCol.width);
+            rightPanel.x = Qt.binding(() => window.mediaPanelWidth + videoAreaCol.width);
             rightPanel.y = 0;
-            videoAreaCol.x = Qt.binding(() => (videoArea.fullScreen? 0 : window.mediaPanelWidth + (window.isMobileLayout? 0 : leftPanel.width)));
-            videoAreaCol.width = Qt.binding(() => mainLayout.width - (videoArea.fullScreen? 0 : window.mediaPanelWidth + (window.isMobileLayout? 0 : leftPanel.width) + rightPanel.width));
+            videoAreaCol.x = Qt.binding(() => (videoArea.fullScreen? 0 : window.mediaPanelWidth));
+            videoAreaCol.width = Qt.binding(() => mainLayout.width - (videoArea.fullScreen? 0 : window.mediaPanelWidth + rightPanel.width));
             videoAreaCol.height = Qt.binding(() => mainLayout.height);
-            leftPanel.fixedWidth = 0;
             rightPanel.fixedWidth = 0;
         } else {
             // Portrait layout
@@ -39,10 +37,8 @@ Rectangle {
             videoAreaCol.x = 0;
             videoAreaCol.width = Qt.binding(() => window.width);
             videoAreaCol.height = Qt.binding(() => window.height * (videoArea.fullScreen? 1 : (window.isMobileLayout? (window.videoArea.vid.loaded && window.videoArea.vid.height > window.videoArea.vid.width? 0.6 : 0.4) : 0.5)));
-            leftPanel.fixedWidth = Qt.binding(() => window.width * 0.4);
-            rightPanel.fixedWidth = Qt.binding(() => window.width * (window.isMobileLayout? 1.0 : 0.6));
-            leftPanel.y = Qt.binding(() => videoAreaCol.height);
-            rightPanel.x = Qt.binding(() => window.isMobileLayout? 0 : leftPanel.width);
+            rightPanel.fixedWidth = Qt.binding(() => window.width);
+            rightPanel.x = 0;
             rightPanel.y = Qt.binding(() => videoAreaCol.height);
         }
     }
@@ -68,11 +64,11 @@ Rectangle {
             renderBtnRow   .parent = exportTab.inner;
             exportSettings .parent = exportTab.inner;
         } else {
-            vidInfo      .parent = leftPanel.col;
-            vidInfoHr    .parent = leftPanel.col;
-            lensProfile  .parent = leftPanel.col;
-            lensProfileHr.parent = leftPanel.col;
-            motionData   .parent = leftPanel.col;
+            vidInfo      .parent = videoDetails.col;
+            vidInfoHr    .parent = videoDetails.col;
+            lensProfile  .parent = videoDetails.col;
+            lensProfileHr.parent = videoDetails.col;
+            motionData   .parent = videoDetails.col;
 
             sync          .parent = rightPanel.col;
             syncHr        .parent = rightPanel.col;
@@ -91,6 +87,7 @@ Rectangle {
     property alias vidInfo: vidInfo.item;
     property alias videoArea: videoArea;
     property alias mediaPanel: mediaPanel;
+    property alias videoDetails: videoDetails;
     property alias motionData: motionData.item;
     property alias lensProfile: lensProfile.item;
     property alias outputFile: outputFile;
@@ -150,57 +147,16 @@ Rectangle {
         MediaSidebar {
             id: mediaPanel;
             visible: window.mediaPanelShown && !videoArea.fullScreen && !isMobileLayout && window.isLandscape;
-            maxWidth: parent.width - leftPanel.lastWidth - rightPanel.lastWidth - 50 * dpiScale;
+            maxWidth: parent.width - rightPanel.lastWidth - 50 * dpiScale;
             implicitWidth: settings.value("mediaPanelSize", defaultWidth);
             onWidthChanged: settings.setValue("mediaPanelSize", width);
-        }
-
-        SidePanel {
-            id: leftPanel;
-            direction: SidePanel.HandleRight;
-            topPadding: gflogo.height;
-            x: window.mediaPanelWidth;
-            visible: !videoArea.fullScreen && !isMobileLayout;
-            maxWidth: parent.width - window.mediaPanelWidth - rightPanel.lastWidth - 50 * dpiScale;
-            implicitWidth: settings.value("leftPanelSize", defaultWidth);
-            onWidthChanged: settings.setValue("leftPanelSize", width);
-            Column {
-                width: parent.width;
-                parent: leftPanel;
-                id: gflogo;
-
-                Item {
-                    width: parent.width;
-                    height: children[0].height * 1.5;
-                    Image {
-                        source: "qrc:/resources/logo" + (style === "dark"? "_white" : "_black") + ".svg"
-                        sourceSize.width: Math.min(300 * dpiScale, parent.width * 0.9);
-                        anchors.centerIn: parent;
-                    }
-                }
-                Hr { }
-            }
-
-            ItemLoader { id: vidInfo; sourceComponent: Component {
-                Menu.VideoInformation {
-                    onSelectFileRequest: fileDialog.open2();
-                }
-            } }
-            Hr { id: vidInfoHr; visible: window.stabilizationEnabled; }
-            ItemLoader { id: lensProfile; visible: status == Loader.Ready && window.stabilizationEnabled; sourceComponent: Component {
-                Menu.LensProfile { }
-            } }
-            Hr { id: lensProfileHr; visible: window.stabilizationEnabled; }
-            ItemLoader { id: motionData; visible: status == Loader.Ready && window.stabilizationEnabled; sourceComponent: Component {
-                Menu.MotionData { }
-            } }
         }
 
         Column {
             id: videoAreaCol;
             y: 0;
-            x: videoArea.fullScreen? 0 : window.mediaPanelWidth + leftPanel.width;
-            width: parent? parent.width - (videoArea.fullScreen? 0 : window.mediaPanelWidth + leftPanel.width + rightPanel.width) : 0;
+            x: videoArea.fullScreen? 0 : window.mediaPanelWidth;
+            width: parent? parent.width - (videoArea.fullScreen? 0 : window.mediaPanelWidth + rightPanel.width) : 0;
             height: parent? parent.height : 0;
             VideoArea {
                 id: videoArea;
@@ -571,9 +527,9 @@ Rectangle {
         SidePanel {
             id: rightPanel;
             visible: !videoArea.fullScreen;
-            x: window.mediaPanelWidth + leftPanel.width + videoAreaCol.width;
+            x: window.mediaPanelWidth + videoAreaCol.width;
             direction: SidePanel.HandleLeft;
-            maxWidth: parent.width - window.mediaPanelWidth - leftPanel.lastWidth - 50 * dpiScale;
+            maxWidth: parent.width - window.mediaPanelWidth - 50 * dpiScale;
             implicitWidth: settings.value("rightPanelSize", defaultWidth);
             onWidthChanged: settings.setValue("rightPanelSize", width);
             col.visible: !isMobileLayout;
@@ -605,6 +561,27 @@ Rectangle {
 
     Shortcuts {
         videoArea: videoArea;
+    }
+
+    // Video information, lens profile and motion data are opened from the video, in the media list
+    VideoDetailsModal {
+        id: videoDetails;
+        anchors.fill: parent;
+        z: 100;
+
+        ItemLoader { id: vidInfo; sourceComponent: Component {
+            Menu.VideoInformation {
+                onSelectFileRequest: fileDialog.open2();
+            }
+        } }
+        Hr { id: vidInfoHr; visible: window.stabilizationEnabled; }
+        ItemLoader { id: lensProfile; visible: status == Loader.Ready && window.stabilizationEnabled; sourceComponent: Component {
+            Menu.LensProfile { }
+        } }
+        Hr { id: lensProfileHr; visible: window.stabilizationEnabled; }
+        ItemLoader { id: motionData; visible: status == Loader.Ready && window.stabilizationEnabled; sourceComponent: Component {
+            Menu.MotionData { }
+        } }
     }
 
     function handleDroppedUrls(urls) {

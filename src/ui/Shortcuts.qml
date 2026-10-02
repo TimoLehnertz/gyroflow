@@ -202,6 +202,8 @@ Item {
             const queueModal = window.mediaPanel? window.mediaPanel.queueModal.item : null;
             if (queueModal && queueModal.shown) {
                 queueModal.shown = false;
+            } else if (window.videoDetails && window.videoDetails.shown) {
+                window.videoDetails.shown = false;
             } else {
                 videoArea.fullScreen = 0;
             }

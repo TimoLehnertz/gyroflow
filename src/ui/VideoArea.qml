@@ -1147,6 +1147,21 @@ Item {
                     bottomPadding: 8 * dpiScale;
                 }
 
+                // Video information, lens profile and motion data, also reachable when the media list is hidden
+                LinkButton {
+                    visible: !root.isCalibrator && !!window.videoDetails;
+                    height: Math.round(parent.height);
+                    anchors.verticalCenter: parent.verticalCenter;
+                    leftPadding: 6 * dpiScale;
+                    rightPadding: 6 * dpiScale;
+                    topPadding: 8 * dpiScale;
+                    bottomPadding: 8 * dpiScale;
+                    textColor: styleTextColor;
+                    iconName: "info";
+                    onClicked: window.videoDetails.shown = true;
+                    tooltip: qsTr("Video information, lens profile and motion data");
+                }
+
                 SmallLinkButton {
                     id: fovOverviewBtn;
                     iconName: "fov-overview";
