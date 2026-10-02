@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::sync::atomic::{ AtomicBool, AtomicUsize, Ordering::SeqCst };
 use std::cell::RefCell;
 
-const VIDEO_EXTENSIONS: &[&str] = &[ "mp4", "mov", "mxf", "mkv", "webm", "insv", "avi", "m4v", "mts", "m2ts", "lrv", "braw", "r3d", "nev" ];
+// Not .lrv: those are the low resolution copies GoPro cameras record next to every video, for previews in their app
+const VIDEO_EXTENSIONS: &[&str] = &[ "mp4", "mov", "mxf", "mkv", "webm", "insv", "avi", "m4v", "mts", "m2ts", "braw", "r3d", "nev" ];
 
 // Stabilized state
 const NOT_STABILIZED: i32 = 0;
@@ -1665,6 +1666,13 @@ mod tests {
         })), vec![(0, "C0001-001.mp4".into()), (1, "second.mp4".into())]);
         // Joined into one video
         assert_eq!(outputs(serde_json::json!({ "trim_ranges_ms": [[0, 1000], [2000, 3000]], "output": { "export_trims_separately": false } })), vec![(-1, "C0001.mp4".into())]);
+    }
+
+    #[test]
+    fn gopro_proxies_are_not_videos() {
+        assert!(MediaLibrary::is_video_file("GX012176.MP4"));
+        assert!(!MediaLibrary::is_video_file("GL012176.LRV"));
+        assert!(!MediaLibrary::is_video_file("GL012176.THM"));
     }
 
     #[test]
