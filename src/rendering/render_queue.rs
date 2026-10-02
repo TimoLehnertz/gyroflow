@@ -1605,14 +1605,7 @@ impl RenderQueue {
                                         }
                                     }
                                 }
-                                if let Some(output_dim) = stab.lens.read().output_dimension.clone() {
-                                    if !has_output_width {
-                                        render_options.output_width = output_dim.w;
-                                    }
-                                    if !has_output_height {
-                                        render_options.output_height = output_dim.h;
-                                    }
-                                }
+                                // Without an output size, the video is rendered in its own size ("Original"), not in the output size of the lens profile
 
                                 stab.set_size(video_size.0, video_size.1);
                                 stab.set_output_size(render_options.output_width, render_options.output_height);

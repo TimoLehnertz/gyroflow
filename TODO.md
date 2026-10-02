@@ -1,6 +1,5 @@
 # Todos
 
-- The default resolution should be changed to "original"
 ## Upstream PRs (gyroflow/gyroflow)
 
 Rules:

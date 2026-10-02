@@ -217,6 +217,11 @@ MenuItem {
         codec.updateGpuStatus();
     }
     function lensProfileLoaded(w: real, h: real): void {
+        // The default output size is the one of the video ("Original"), not the output size of the lens profile
+        if (root.originalWidth > 0 && root.originalHeight > 0) {
+            w = root.originalWidth;
+            h = root.originalHeight;
+        }
         setDefaultSize(w, h);
         Qt.callLater(notifySizeChanged);
     }
