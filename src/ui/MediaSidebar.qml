@@ -71,6 +71,8 @@ ResizablePanel {
         // Show the path of the item before loading, so the video area leaves the output path to the library
         root.updateOutputFile();
 
+        // Every clip starts with one video per range, unless its own settings say otherwise
+        if (window.exportSettings) window.exportSettings.exportTrimsSeparately.checked = true;
         const data = media_library.get_project_data(itemId);
         if (data) {
             window.videoArea.loadGyroflowData(JSON.parse(data), 0);

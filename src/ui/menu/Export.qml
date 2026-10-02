@@ -93,7 +93,6 @@ MenuItem {
         property alias keyframeDistance: keyframeDistance.value;
         property alias preserveOtherTracks: preserveOtherTracks.checked;
         property alias padWithBlack: padWithBlack.checked;
-        property alias exportTrimsSeparately: exportTrimsSeparately.checked;
         property alias useVulkanEncoder: useVulkanEncoder.checked;
         property alias useD3D12Encoder: useD3D12Encoder.checked;
         property alias metadataComment: metadataComment.text;
