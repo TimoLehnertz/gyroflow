@@ -1329,6 +1329,10 @@ impl MediaLibrary {
     }
     /// The extension of the output path is replaced with the one of the codec, so it's always valid for the export settings
     fn with_output_extension(filename: &str, input_url: &str, ext: &str) -> String {
+        format!("{}{ext}", Self::without_output_extension(filename, input_url))
+    }
+    /// The output path without the extension of a video or image sequence (or of the input file)
+    fn without_output_extension<'a>(filename: &'a str, input_url: &str) -> &'a str {
         let input_filename = filesystem::get_filename(input_url);
         let input_ext = input_filename.rfind('.').map(|pos| input_filename[pos + 1..].to_ascii_lowercase()).unwrap_or_default();
         let mut stem = filename;
@@ -1340,7 +1344,7 @@ impl MediaLibrary {
                 if let Some(p) = stem.rfind("_%0").filter(|&p| stem[p..].ends_with('d')) { stem = &stem[..p]; }
             }
         }
-        format!("{stem}{ext}")
+        stem
     }
     fn output_path_or_default(&self, input_url: &str, output_path: &str) -> String {
         if output_path.is_empty() {
@@ -1433,7 +1437,9 @@ impl MediaLibrary {
     pub fn set_output_path(&mut self, item_id: u32, path: QString) {
         let path = path.to_string();
         let Some(v) = self.video_mut(item_id) else { return; };
-        v.output_path = path;
+        // It's stored without the extension, which follows the codec. The output paths of the trim ranges are built from it
+        // (`clip_stabilized-001`), with the extension they would end up as `clip_stabilized.mp4-001.mp4`
+        v.output_path = Self::without_output_extension(&path, &v.url).to_owned();
         v.output_hashes.clear();
         self.rebuild();
         self.refresh_outputs();
@@ -1724,5 +1730,18 @@ mod tests {
         assert_eq!(MediaLibrary::with_output_extension("out.MP4", input, ".mp4"), "out.mp4");
         assert_eq!(MediaLibrary::with_output_extension("out_%05d.png", input, ".mp4"), "out.mp4");
         assert_eq!(MediaLibrary::with_output_extension("out", input, "_%05d.exr"), "out_%05d.exr");
+    }
+
+    #[test]
+    fn output_path_is_stored_without_extension() {
+        let mut lib = MediaLibrary::default();
+        lib.standalone.push(Video { id: 1, url: "file:///videos/C0003.MP4".into(), filename: "C0003.MP4".into(), ..Default::default() });
+        // The output file of a job restored from the previous session, its trim ranges get their own files next to it
+        lib.set_output_url(1, "file:///videos/".into(), "C0003_stabilized.mp4".into());
+        assert_eq!(lib.get_output_path(1).to_string(), "C0003_stabilized");
+        lib.set_output_path(1, "runs/clip.MOV".into());
+        assert_eq!(lib.get_output_path(1).to_string(), "runs/clip");
+        lib.set_output_path(1, "my.clip".into());
+        assert_eq!(lib.get_output_path(1).to_string(), "my.clip");
     }
 }
