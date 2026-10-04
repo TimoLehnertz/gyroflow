@@ -299,6 +299,13 @@ ResizablePanel {
     }
     // The video is loaded by one job, which is split into one job per output file once it's ready (see onProcessing_done)
     function queueItem(itemId: int): void {
+        // A video that's queued again (eg. by a marker import) gets new jobs instead of its old ones. Otherwise those would
+        // stay in the queue with the old settings, no longer linked to the video, and render the whole video too
+        if (media_library.is_item_queued(itemId)) {
+            const status = media_library.get_item_job_status(itemId);
+            if (status == "rendering" || status == "processing") return;
+            root.cancelItem(itemId);
+        }
         const jobId = render_queue.add_file(media_library.get_item_url(itemId), "", JSON.stringify(root.jobData(itemId)));
         root.pendingJobs[jobId] = true;
         media_library.set_item_job(itemId, jobId);
