@@ -58,7 +58,8 @@ ResizablePanel {
 
     function saveCurrentSettings(): void {
         const id = media_library.current_item;
-        if (id > 0 && window.videoArea.vid.loaded && !window.videoArea.videoLoader.active) {
+        // The main view can show another video than the current item (eg. while a new one is loading), its settings don't belong to this item
+        if (id > 0 && window.videoArea.vid.loaded && !window.videoArea.videoLoader.active && media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString())) {
             media_library.save_settings(id, controller.export_gyroflow_data("Simple", window.getAdditionalProjectData()));
             root.updateQueuedJob(id);
         }

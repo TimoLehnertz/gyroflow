@@ -120,6 +120,11 @@ Item {
         timeline.trimRangesChanged();
     }
 
+    // Both are parsed as urls the same way `loadFile` does it, so different encodings of the same path still match.
+    // Without a loaded url (eg. image sequences) the file name has to do
+    function isLoadedUrl(url: url): bool {
+        return !root.loadedFileUrl.toString() || url.toString() == root.loadedFileUrl.toString();
+    }
     function loadGyroflowData(obj: var, queueJobId: var): void {
         root.pendingGyroflowData = null;
         root.pendingQueueJobId = 0;
@@ -152,7 +157,8 @@ Item {
             return;
         }
 
-        const isCorrectVideoLoaded = urls[0] && vidInfo.filename == filesystem.get_filename(urls[0]);
+        // Cameras name their files the same way (C0001.MP4 on every card), so it's only the loaded video if its whole path matches
+        const isCorrectVideoLoaded = urls[0] && vidInfo.filename == filesystem.get_filename(urls[0]) && root.isLoadedUrl(urls[0]);
         const isCorrectGyroLoaded  = urls[1] && window.motionData.filename == filesystem.get_filename(urls[1]);
         console.log("Video path:", urls[0], "(" + (isCorrectVideoLoaded? "loaded" : "not loaded") + ")", "Gyro path:", urls[1], "(" + (isCorrectGyroLoaded? "loaded" : "not loaded") + ")");
 
