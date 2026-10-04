@@ -156,6 +156,7 @@ pub struct MediaLibrary {
 
     load_markers: qt_method!(fn(&mut self, url: QString) -> QString),
     preview_markers: qt_method!(fn(&self, offset_seconds: f64) -> QString),
+    nearby_marker_matches: qt_method!(fn(&self, offset_seconds: f64) -> QString),
     import_markers: qt_method!(fn(&mut self, offset_seconds: f64) -> QString),
     get_timeline_markers: qt_method!(fn(&self, item_id: u32) -> QString),
 
@@ -932,6 +933,14 @@ impl MediaLibrary {
             Ok(plan) => QString::from(self.marker_preview_json(&plan)),
             Err(e) => Self::marker_error(e),
         }
+    }
+
+    /// Whether an offset 1 to 12 whole hours more (`later`) or less (`earlier`) than this one matches any trim range.
+    pub fn nearby_marker_matches(&self, offset_seconds: f64) -> QString {
+        let matches = |sign: f64| (1..=12).any(|hours| {
+            self.marker_plan(offset_seconds + sign * hours as f64 * 3600.0).map(|plan| !plan.sections.is_empty()).unwrap_or_default()
+        });
+        QString::from(serde_json::json!({ "later": matches(1.0), "earlier": matches(-1.0) }).to_string())
     }
 
     /// Apply cached markers to the library. Returns a JSON summary for the UI.

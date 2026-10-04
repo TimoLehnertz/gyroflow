@@ -15,6 +15,9 @@ Item {
     property var preview: ({ videos: [], unmatched: [], untouched: [], sections: 0, matched: 0 });
     property bool hasFile: root.fileName.length > 0;
     property real offsetHours: 0;
+    // An offset up to 12 whole hours more / less matches trim ranges, which the + / - buttons show
+    property bool matchesLater: false;
+    property bool matchesEarlier: false;
 
     opacity: shown? 1 : 0;
     visible: opacity > 0;
@@ -46,6 +49,9 @@ Item {
         root.refresh();
     }
     function refresh(): void {
+        const nearby = root.hasFile? JSON.parse(media_library.nearby_marker_matches(root.offsetHours * 3600)) : {};
+        root.matchesLater = !!nearby.later;
+        root.matchesEarlier = !!nearby.earlier;
         if (!root.hasFile) {
             root.preview = { videos: [], unmatched: [], untouched: [], sections: 0, matched: 0 };
             videoModel.clear();
@@ -152,12 +158,13 @@ Item {
             boundsBehavior: Flickable.StopAtBounds;
             contentWidth: width;
             contentHeight: col.height;
-            QQC.ScrollBar.vertical: QQC.ScrollBar { }
+            // Only when it scrolls, and next to the content: over it, it took the clicks on the right edge (the + button)
+            QQC.ScrollBar.vertical: QQC.ScrollBar { id: bodyScroll; visible: body.contentHeight > body.height; }
             property real implicitHeight: col.height;
 
             Column {
                 id: col;
-                width: parent.width;
+                width: parent.width - (bodyScroll.visible? bodyScroll.width : 0);
                 spacing: 10 * dpiScale;
 
                 BasicText {
@@ -197,13 +204,26 @@ Item {
                         height: 25 * dpiScale;
                         Slider {
                             id: offsetSlider;
-                            width: parent.width - offsetField.width - parent.spacing;
+                            width: parent.width - offsetField.width - 2 * offsetMinus.width - 3 * parent.spacing;
                             anchors.verticalCenter: parent.verticalCenter;
                             from: -12;
                             to: 12;
                             live: true;
                             property bool preventChange: false;
                             onValueChanged: if (!preventChange) offsetField.value = value;
+                        }
+                        Button {
+                            id: offsetMinus;
+                            width: 25 * dpiScale;
+                            height: 25 * dpiScale;
+                            anchors.verticalCenter: parent.verticalCenter;
+                            leftPadding: 0; rightPadding: 0; topPadding: 0; bottomPadding: 0;
+                            accent: root.matchesEarlier;
+                            iconName: "minus";
+                            icon.width: 12 * dpiScale;
+                            icon.height: 12 * dpiScale;
+                            tooltip: root.matchesEarlier? qsTr("One hour less — an offset up to 12 hours less matches trim ranges") : qsTr("One hour less");
+                            onClicked: offsetField.value = Math.max(offsetField.from, Math.min(offsetField.to, offsetField.value - 1));
                         }
                         NumberField {
                             id: offsetField;
@@ -223,6 +243,19 @@ Item {
                                 root.offsetHours = value;
                                 root.refresh();
                             }
+                        }
+                        Button {
+                            id: offsetPlus;
+                            width: 25 * dpiScale;
+                            height: 25 * dpiScale;
+                            anchors.verticalCenter: parent.verticalCenter;
+                            leftPadding: 0; rightPadding: 0; topPadding: 0; bottomPadding: 0;
+                            accent: root.matchesLater;
+                            iconName: "plus";
+                            icon.width: 12 * dpiScale;
+                            icon.height: 12 * dpiScale;
+                            tooltip: root.matchesLater? qsTr("One hour more — an offset up to 12 hours more matches trim ranges") : qsTr("One hour more");
+                            onClicked: offsetField.value = Math.max(offsetField.from, Math.min(offsetField.to, offsetField.value + 1));
                         }
                     }
                 }
