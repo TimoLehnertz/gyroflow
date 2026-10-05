@@ -125,10 +125,15 @@ Item {
         for (let i = 0; i < timeline.trimRanges.length; ++i) root.setRangeSettings(timeline.trimRangeInfo(i), current);
     }
 
-    // Both are parsed as urls the same way `loadFile` does it, so different encodings of the same path still match.
+    // Whether `url` is the video in the main view, with any encoding of the same path.
     // Without a loaded url (eg. image sequences) the file name has to do
-    function isLoadedUrl(url: url): bool {
-        return !root.loadedFileUrl.toString() || url.toString() == root.loadedFileUrl.toString();
+    function isLoadedUrl(url: var): bool {
+        const loaded = root.loadedFileUrl.toString();
+        if (!loaded) return true;
+        // Compared decoded: the property decodes the url (eg. %20 is a space), but Qt 6.4 passes a string argument on as it
+        // is, encoded. Clips with saved settings in a folder with spaces were then never loaded, and loaded again forever
+        const decoded = (x) => { try { return decodeURIComponent(x); } catch (e) { return x; } };
+        return decoded(url.toString()) == decoded(loaded);
     }
     function loadGyroflowData(obj: var, queueJobId: var): void {
         root.pendingGyroflowData = null;
