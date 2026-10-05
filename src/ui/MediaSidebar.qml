@@ -207,7 +207,7 @@ ResizablePanel {
             if (u.split("?")[0].toLowerCase().endsWith(".json")) jsons.push(u);
             else rest.push(u);
         }
-        for (const u of rest) media_library.add_url(u);
+        if (rest.length) media_library.add_dropped(rest.join("\n"));
         if (rest.length) root.rememberMediaFolder(rest[0].toString());
         if (jsons.length) root.openImportMarkers(jsons[0]);
     }
@@ -885,79 +885,84 @@ ResizablePanel {
                     itemMenu.popup(dlg, mx, my);
                 }
             }
-            Menu {
+            // Created on the first right click: a menu in every row made adding videos slow, all rows are created at once
+            ContextMenuLoader {
                 id: itemMenu;
-                font.pixelSize: 11.5 * dpiScale;
-                Action {
-                    iconName: "queue";
-                    text: qsTr("Add %1 selected to the render queue").arg(root.queueableCount);
-                    enabled: root.queueableCount > 0;
-                    onTriggered: root.queueSelected();
-                }
-                Action {
-                    iconName: "close";
-                    text: qsTr("Remove %1 selected from the render queue").arg(root.queuedSelectedCount);
-                    enabled: root.queuedSelectedCount > 0;
-                    onTriggered: root.unqueueSelected();
-                }
-                Action {
-                    iconName: "play";
-                    text: qsTr("Render now");
-                    enabled: job_id > 0 && !dlg.isBusy && !dlg.isJobDone;
-                    onTriggered: root.prioritizeItem(item_id);
-                }
-                Action {
-                    iconName: "pencil";
-                    text: qsTr("Edit render settings");
-                    // The jobs of the trim ranges of a video are edited through the video itself
-                    enabled: job_id > 0 && job_count == 1 && !dlg.isBusy;
-                    onTriggered: {
-                        const data = render_queue.get_gyroflow_data(job_id);
-                        if (data) window.videoArea.loadGyroflowData(JSON.parse(data), job_id);
+                sourceComponent: Component {
+                    Menu {
+                        font.pixelSize: 11.5 * dpiScale;
+                        Action {
+                            iconName: "queue";
+                            text: qsTr("Add %1 selected to the render queue").arg(root.queueableCount);
+                            enabled: root.queueableCount > 0;
+                            onTriggered: root.queueSelected();
+                        }
+                        Action {
+                            iconName: "close";
+                            text: qsTr("Remove %1 selected from the render queue").arg(root.queuedSelectedCount);
+                            enabled: root.queuedSelectedCount > 0;
+                            onTriggered: root.unqueueSelected();
+                        }
+                        Action {
+                            iconName: "play";
+                            text: qsTr("Render now");
+                            enabled: job_id > 0 && !dlg.isBusy && !dlg.isJobDone;
+                            onTriggered: root.prioritizeItem(item_id);
+                        }
+                        Action {
+                            iconName: "pencil";
+                            text: qsTr("Edit render settings");
+                            // The jobs of the trim ranges of a video are edited through the video itself
+                            enabled: job_id > 0 && job_count == 1 && !dlg.isBusy;
+                            onTriggered: {
+                                const data = render_queue.get_gyroflow_data(job_id);
+                                if (data) window.videoArea.loadGyroflowData(JSON.parse(data), job_id);
+                            }
+                        }
+                        Action {
+                            iconName: "arrow-up";
+                            text: qsTr("Move up in the queue");
+                            enabled: job_id > 0;
+                            onTriggered: root.moveItem(item_id, -1);
+                        }
+                        Action {
+                            iconName: "arrow-down";
+                            text: qsTr("Move down in the queue");
+                            enabled: job_id > 0;
+                            onTriggered: root.moveItem(item_id, 1);
+                        }
+                        Action {
+                            iconName: dlg.isBusy? "close" : "spinner";
+                            text: dlg.isBusy? qsTr("Stop") : qsTr("Reset status");
+                            enabled: job_id > 0 && (dlg.isBusy || dlg.isJobError || dlg.isQuestion || dlg.isJobDone);
+                            onTriggered: root.resetItem(item_id);
+                        }
+                        Action {
+                            iconName: "play";
+                            text: qsTr("Open rendered file");
+                            enabled: !dlg.isFolder && stabilized_state > 0 && Qt.platform.os != "ios";
+                            onTriggered: filesystem.open_file_externally(filesystem.get_file_url(media_library.get_output_folder(item_id), media_library.get_output_filename(item_id, ""), false));
+                        }
+                        Action {
+                            iconName: "info";
+                            text: qsTr("Video details");
+                            enabled: !dlg.isFolder;
+                            onTriggered: root.showDetails(item_id);
+                        }
+                        Action {
+                            iconName: "folder";
+                            text: qsTr("Open file location");
+                            onTriggered: filesystem.open_file_externally(dlg.isFolder? url : filesystem.get_folder(url));
+                        }
+                        Action {
+                            iconName: "bin";
+                            text: root.removableCount > 1? qsTr("Remove %1 selected").arg(root.removableCount)
+                                : root.removableKind == "folder"? qsTr("Remove folder")
+                                : qsTr("Remove video");
+                            enabled: root.removableCount > 0;
+                            onTriggered: root.removeSelected();
+                        }
                     }
-                }
-                Action {
-                    iconName: "arrow-up";
-                    text: qsTr("Move up in the queue");
-                    enabled: job_id > 0;
-                    onTriggered: root.moveItem(item_id, -1);
-                }
-                Action {
-                    iconName: "arrow-down";
-                    text: qsTr("Move down in the queue");
-                    enabled: job_id > 0;
-                    onTriggered: root.moveItem(item_id, 1);
-                }
-                Action {
-                    iconName: dlg.isBusy? "close" : "spinner";
-                    text: dlg.isBusy? qsTr("Stop") : qsTr("Reset status");
-                    enabled: job_id > 0 && (dlg.isBusy || dlg.isJobError || dlg.isQuestion || dlg.isJobDone);
-                    onTriggered: root.resetItem(item_id);
-                }
-                Action {
-                    iconName: "play";
-                    text: qsTr("Open rendered file");
-                    enabled: !dlg.isFolder && stabilized_state > 0 && Qt.platform.os != "ios";
-                    onTriggered: filesystem.open_file_externally(filesystem.get_file_url(media_library.get_output_folder(item_id), media_library.get_output_filename(item_id, ""), false));
-                }
-                Action {
-                    iconName: "info";
-                    text: qsTr("Video details");
-                    enabled: !dlg.isFolder;
-                    onTriggered: root.showDetails(item_id);
-                }
-                Action {
-                    iconName: "folder";
-                    text: qsTr("Open file location");
-                    onTriggered: filesystem.open_file_externally(dlg.isFolder? url : filesystem.get_folder(url));
-                }
-                Action {
-                    iconName: "bin";
-                    text: root.removableCount > 1? qsTr("Remove %1 selected").arg(root.removableCount)
-                        : root.removableKind == "folder"? qsTr("Remove folder")
-                        : qsTr("Remove video");
-                    enabled: root.removableCount > 0;
-                    onTriggered: root.removeSelected();
                 }
             }
 
@@ -1497,7 +1502,7 @@ ResizablePanel {
             open();
         }
         onAccepted: {
-            for (let i = 0; i < selectedFiles.length; i++) media_library.add_url(selectedFiles[i].toString());
+            if (selectedFiles.length) media_library.add_dropped(Array.from(selectedFiles, x => x.toString()).join("\n"));
             if (selectedFiles.length) root.rememberMediaFolder(selectedFiles[0].toString());
         }
     }

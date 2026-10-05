@@ -570,7 +570,7 @@ Item {
             }
             const dlg = messageBox(Modal.Question, qsTr("You have opened multiple files. What do you want to do?"), [
                 { text: qsTr("Add to the file list"), accent: true, clicked: () => {
-                    for (let i = 0; i < urlsCopy.length; i++) media_library.add_url(urlsCopy[i].toString());
+                    media_library.add_dropped(urlsCopy.map(x => x.toString()).join("\n"));
                 } },
                 { text: qsTr("Merge them into one video"), clicked: () => {
                     dlg.btnsRow.children[0].enabled = false;

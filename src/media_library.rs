@@ -18,7 +18,7 @@ const NOT_STABILIZED: i32 = 0;
 const STABILIZED:     i32 = 1;
 const STALE:          i32 = 2;
 
-#[derive(Default, Clone, SimpleListItem, Debug)]
+#[derive(Default, Clone, PartialEq, SimpleListItem, Debug)]
 pub struct MediaItem {
     pub item_id: u32,
     pub parent_id: u32,
@@ -130,7 +130,7 @@ pub struct MediaLibrary {
     add_folder: qt_method!(fn(&mut self, url: QString)),
     add_files: qt_method!(fn(&mut self, urls: QStringList)),
     add_url: qt_method!(fn(&mut self, url: QString)),
-    add_dropped: qt_method!(fn(&mut self, urls: QStringList)),
+    add_dropped: qt_method!(fn(&mut self, urls: QString)),
     remove_item: qt_method!(fn(&mut self, item_id: u32) -> QVariantList),
     remove_selected: qt_method!(fn(&mut self) -> QVariantList),
     get_removable_selection: qt_method!(fn(&self) -> QVariantList),
@@ -352,9 +352,30 @@ impl MediaLibrary {
         ret
     }
 
+    /// Updates the rows in place where it can, instead of resetting the model: after a reset the list creates every row
+    /// again, and dropping files did that for every file and again after every scan, which froze the UI for seconds
     fn rebuild(&mut self) {
         let items = self.build_items();
-        self.items.borrow_mut().reset_data(items);
+        {
+            let mut q = self.items.borrow_mut();
+            let new_ids = items.iter().map(|x| x.item_id).collect::<std::collections::HashSet<_>>();
+            let mut i = 0;
+            while i < q.row_count() as usize {
+                if new_ids.contains(&q[i].item_id) { i += 1; } else { q.remove(i); }
+            }
+            // Then row by row: unchanged rows stay as they are, new ones are inserted, and only the rows that moved (eg.
+            // sorted by the creation time the scan read) are created again
+            for (i, itm) in items.into_iter().enumerate() {
+                if i < q.row_count() as usize && q[i].item_id == itm.item_id {
+                    if q[i] != itm { q.change_line(i, itm); }
+                    continue;
+                }
+                if let Some(j) = (i + 1..q.row_count() as usize).find(|&j| q[j].item_id == itm.item_id) {
+                    q.remove(j);
+                }
+                q.insert(i, itm);
+            }
+        }
         self.items_changed();
     }
 
@@ -456,11 +477,12 @@ impl MediaLibrary {
         self.add_url_impl(&url.to_string(), true);
     }
 
-    /// Adds dropped urls, folders are added as input folders and files as standalone videos
-    pub fn add_dropped(&mut self, urls: QStringList) {
-        let n = urls.len();
-        for i in 0..n {
-            self.add_url_impl(&urls[i].to_string(), false);
+    /// Adds dropped urls, one per line (see `add_url` why not a list): folders are added as input folders and files as
+    /// standalone videos. All of them at once, so the list is updated once and they are scanned in one task, instead of
+    /// one per file, which each took a thread of the pool (that loading the clicked video needs) only to wait for the others
+    pub fn add_dropped(&mut self, urls: QString) {
+        for url in urls.to_string().lines() {
+            self.add_url_impl(url, false);
         }
         self.rebuild();
         self.scan_pending();
