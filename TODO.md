@@ -1,13 +1,9 @@
 # Todos
 
-- Add the feature send the cursor to the next / prev start / end of a sequence if there is one. This kills the +- 10 frames jump.
-- The feature "Render now" should be a dropdown if the clip has multiple ranges and the ranges will not be merged into one file, to select if We want to render all the ranges now or only the active one.
 - Review the code for the render now feature. I think today gyroflow behaved weird after using it. It continued the que in a weird way afterwards.
 - Improve the qued highlight for clips in the media sidebar. It should shange the background color to something. Blue maybe.
-- Applying settings to other clips / ranges must be more efficient. It must be instant and only update config. Not recompute anything
-- Reordering Items in the que did not work on mac.
-- While dragging videos into gyroflow, gyroflow or the entire system hangs for a while. While dragging is in process, nothing is allowed to block for substantial time.
 - Output path input should be editable with text
+- There should be a system settings modal that combines all settings that are independant of videos
 
 ## Upstream PRs (gyroflow/gyroflow)
 
