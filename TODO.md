@@ -7,6 +7,7 @@
 - Applying settings to other clips / ranges must be more efficient. It must be instant and only update config. Not recompute anything
 - Reordering Items in the que did not work on mac.
 - While dragging videos into gyroflow, gyroflow or the entire system hangs for a while. While dragging is in process, nothing is allowed to block for substantial time.
+- Output path input should be editable with text
 
 ## Upstream PRs (gyroflow/gyroflow)
 
