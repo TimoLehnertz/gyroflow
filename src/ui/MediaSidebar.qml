@@ -42,6 +42,7 @@ ResizablePanel {
         // The same question wherever the videos were added from (the main view adds them here too), unless the answer
         // was remembered, which the queue settings show and change
         function onSplit_recordings_found(names: string): void {
+            root.joinPending = true;
             const remembered = +settings.value("dontShowAgain-join-split-recordings", 0);
             if (remembered) {
                 root.joinSplitRecordings(remembered == 1);
@@ -57,14 +58,18 @@ ResizablePanel {
             if (r.errors.length) {
                 messageBox(Modal.Error, qsTr("Failed to join the files: %1").arg(r.errors.join("\n")), [ { text: qsTr("Ok") } ]);
             }
-            // The video in the main view was one of the files, it continues as the joined one
-            const joined = r.joined.find(x => x.replaced.includes(root.itemBeforeJoin));
+            root.joinPending = false;
+            // The video in the main view (or a dropped one waiting to be opened) was one of the files, it continues as the joined one
+            const joined = r.joined.find(x => x.replaced.includes(root.itemBeforeJoin) || x.replaced.includes(root.openAfterJoin));
             root.itemBeforeJoin = 0;
             if (joined) {
+                root.openAfterJoin = 0;
                 media_library.select_only(joined.id);
                 root.lastClickedId = joined.id;
                 media_library.set_current_item(joined.id);
                 root.loadItemSettings(joined.id);
+            } else {
+                root.openDroppedAfterJoin();
             }
         }
     }
@@ -81,10 +86,28 @@ ResizablePanel {
         onTriggered: if (!window.videoArea.pendingGyroflowData) root.saveCurrentSettings();
     }
     property int itemBeforeJoin: 0;
+    // Between finding a split recording and joining it: a dropped video is opened after that, as the joined one if it's one of its files
+    property bool joinPending: false;
+    property int openAfterJoin: 0;
     function joinSplitRecordings(join: bool): void {
+        // The current item, which can still be loading (eg. a video opened when it was dropped)
         const loaded = window.videoArea.loadedFileUrl.toString();
-        root.itemBeforeJoin = loaded? media_library.find_by_url(loaded) : 0;
+        root.itemBeforeJoin = media_library.current_item > 0? media_library.current_item : (loaded? media_library.find_by_url(loaded) : 0);
         media_library.join_split_recordings(join);
+        if (!join) {
+            root.joinPending = false;
+            root.openDroppedAfterJoin();
+        }
+    }
+    function openDroppedAfterJoin(): void {
+        const id = root.openAfterJoin;
+        root.openAfterJoin = 0;
+        if (id > 0 && media_library.get_item_kind(id)) root.openItem(id);
+    }
+    function openItem(itemId: int): void {
+        media_library.select_only(itemId);
+        root.lastClickedId = itemId;
+        root.loadItem(itemId);
     }
     function refreshState(): void {
         root.selectedCount      = media_library.selected_count();
@@ -263,9 +286,9 @@ ResizablePanel {
         // A dropped video is opened right away (a dropped folder is only added to the list)
         const openId = rest.map(u => media_library.find_by_url(u)).find(x => x > 0);
         if (openId) {
-            media_library.select_only(openId);
-            root.lastClickedId = openId;
-            root.loadItem(openId);
+            // Files of a split recording are opened once it's clear whether they are joined
+            if (root.joinPending) root.openAfterJoin = openId;
+            else root.openItem(openId);
         }
         if (jsons.length) root.openImportMarkers(jsons[0]);
     }

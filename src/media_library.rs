@@ -535,6 +535,8 @@ impl MediaLibrary {
     // ---------------------------------------------------------------------------------------------
 
     pub fn is_video_file(filename: &str) -> bool {
+        // Hidden files, eg. the `._` files macOS writes next to every file on a memory card, which only hold its metadata
+        if filename.starts_with('.') { return false; }
         if let Some(pos) = filename.rfind('.') {
             let ext = filename[pos + 1..].to_ascii_lowercase();
             return VIDEO_EXTENSIONS.contains(&ext.as_str());
@@ -583,6 +585,7 @@ impl MediaLibrary {
         for i in 0..n {
             self.add_url_impl(&urls[i].to_string(), false);
         }
+        self.remove_joined_parts();
         self.rebuild();
         self.scan_pending();
         self.detect_split_recordings();
@@ -601,6 +604,7 @@ impl MediaLibrary {
         for url in urls.to_string().lines() {
             self.add_url_impl(url, false);
         }
+        self.remove_joined_parts();
         self.rebuild();
         self.scan_pending();
         self.detect_split_recordings();
@@ -621,9 +625,21 @@ impl MediaLibrary {
         let video = self.new_video(url, filename);
         self.standalone.push(video);
         if rebuild {
+            self.remove_joined_parts();
             self.rebuild();
             self.scan_pending();
             self.detect_split_recordings();
+        }
+    }
+
+    /// The files of a joined video are listed below it and not on their own, also when they were added together with it
+    /// (eg. all files of a folder dropped at once) or one of them was added again
+    fn remove_joined_parts(&mut self) {
+        let part_urls = self.all_videos().flat_map(|v| v.parts.iter().map(|x| x.url.clone())).collect::<std::collections::HashSet<_>>();
+        if part_urls.is_empty() { return; }
+        self.standalone.retain(|v| !part_urls.contains(&v.url));
+        for f in self.folders.iter_mut() {
+            f.videos.retain(|v| !part_urls.contains(&v.url));
         }
     }
 
@@ -2142,6 +2158,26 @@ impl MediaLibrary {
 mod tests {
     use qmetaobject::QString;
     use super::{ MediaLibrary, Video };
+
+    #[test]
+    fn hidden_files_are_not_videos() {
+        assert!(MediaLibrary::is_video_file("GX012216.MP4"));
+        assert!(MediaLibrary::is_video_file("GX012216_joined.ffconcat"));
+        assert!(!MediaLibrary::is_video_file("._GX012216_joined.ffconcat"));
+        assert!(!MediaLibrary::is_video_file("._GX032218.MP4"));
+    }
+
+    #[test]
+    fn files_of_a_joined_video_added_with_it_are_not_listed_alone() {
+        let mut lib = MediaLibrary::default();
+        let part = |url: &str| super::JoinedPart { url: url.into(), ..Default::default() };
+        lib.standalone.push(Video { id: 1, url: "file:///a/GX012216_joined.ffconcat".into(), parts: vec![part("file:///a/GX012216.MP4"), part("file:///a/GX022216.MP4")], ..Default::default() });
+        lib.standalone.push(Video { id: 2, url: "file:///a/GX012216.MP4".into(), ..Default::default() });
+        lib.standalone.push(Video { id: 3, url: "file:///a/GX022216.MP4".into(), ..Default::default() });
+        lib.standalone.push(Video { id: 4, url: "file:///a/GX012217.MP4".into(), ..Default::default() });
+        lib.remove_joined_parts();
+        assert_eq!(lib.standalone.iter().map(|v| v.id).collect::<Vec<_>>(), vec![1, 4]);
+    }
 
     fn outputs(settings: serde_json::Value) -> Vec<(i32, String)> {
         let lib = MediaLibrary::default();
