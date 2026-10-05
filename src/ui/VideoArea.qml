@@ -490,7 +490,8 @@ Item {
                 return;
             }
             let sequenceList;
-            if (sequenceList = detectVideoSequence(folder, filename)) {
+            // In the main window the media list asks about split recordings, for every way videos are added
+            if (isCalibrator && (sequenceList = detectVideoSequence(folder, filename))) {
                 const list = "<b>" + sequenceList.join(", ") + "</b>";
                 const dlg = messageBox(Modal.Info, qsTr("Split recording has been detected, do you want to automatically join the files (%1) to create one full clip?").arg(list), [
                     { text: qsTr("Yes"), accent: true, clicked: function() {
