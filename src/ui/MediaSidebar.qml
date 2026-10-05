@@ -59,7 +59,7 @@ ResizablePanel {
     function saveCurrentSettings(): void {
         const id = media_library.current_item;
         // The main view can show another video than the current item (eg. while a new one is loading), its settings don't belong to this item
-        if (id > 0 && window.videoArea.vid.loaded && !window.videoArea.videoLoader.active && media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString())) {
+        if (id > 0 && window.videoArea.vid.loaded && !window.videoArea.videoLoader.active && !controller.loading_gyro_in_progress && media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString())) {
             media_library.save_settings(id, controller.export_gyroflow_data("Simple", window.getAdditionalProjectData()));
             root.updateQueuedJob(id);
         }
@@ -82,6 +82,8 @@ ResizablePanel {
         if (data) {
             window.videoArea.loadGyroflowData(JSON.parse(data), 0);
         } else {
+            // An item clicked before, still waiting for the previous video to finish loading, would be loaded after this one
+            window.videoArea.pendingGyroflowData = null;
             window.videoArea.loadFile(media_library.get_item_url(itemId), true);
         }
     }
@@ -119,7 +121,7 @@ ResizablePanel {
     function assignRangePaths(): void {
         const id = media_library.current_item;
         const timeline = window.videoArea.timeline;
-        if (id <= 0 || !window.videoArea.vid.loaded || window.videoArea.videoLoader.active) return;
+        if (id <= 0 || !window.videoArea.vid.loaded || window.videoArea.videoLoader.active || controller.loading_gyro_in_progress) return;
         if (!media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString())) return;
         const base = media_library.get_output_path(id);
         const used = timeline.trimRanges.map(x => (x[2] || { }).output_path).filter(x => x);
@@ -220,7 +222,7 @@ ResizablePanel {
         // The video in the main view doesn't have the new trim ranges yet, and saving its settings would drop them again.
         // Its settings were saved when the import was opened, so load it again with the ranges.
         const current = media_library.current_item;
-        if ((result.queue_ids || []).includes(current) && window.videoArea.vid.loaded && !window.videoArea.videoLoader.active) {
+        if ((result.queue_ids || []).includes(current) && window.videoArea.vid.loaded && !window.videoArea.videoLoader.active && !controller.loading_gyro_in_progress) {
             root.loadItemSettings(current);
         }
         if (queue) {
