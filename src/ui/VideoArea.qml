@@ -1092,7 +1092,7 @@ Item {
                                 if (mouse.modifiers & Qt.ShiftModifier) {
                                     timeline.jumpToPrevKeyframe("");
                                 } else if (mouse.modifiers & Qt.ControlModifier) {
-                                    vid.seekToFrameDelta(-10);
+                                    timeline.jumpToPrevTrimBoundary();
                                 } else {
                                     vid.seekToFrameDelta(-1);
                                 }
@@ -1115,7 +1115,7 @@ Item {
                                 if (mouse.modifiers & Qt.ShiftModifier) {
                                     timeline.jumpToNextKeyframe("");
                                 } else if (mouse.modifiers & Qt.ControlModifier) {
-                                    vid.seekToFrameDelta(10);
+                                    timeline.jumpToNextTrimBoundary();
                                 } else {
                                     vid.seekToFrameDelta(1);
                                 }

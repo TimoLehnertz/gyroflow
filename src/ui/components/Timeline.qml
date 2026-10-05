@@ -273,6 +273,25 @@ Item {
         }
     }
 
+    // Frames of the starts and ends of all trim ranges, the same frames as "Go to trim start / end"
+    function trimBoundaryFrames(): list<var> {
+        const maxFrame = Math.max(0, vid.frameCount - 1);
+        let frames = [];
+        for (const [start, end] of getTrimRanges()) {
+            frames.push(Math.min(maxFrame, frameAtPosition(start) + 1));
+            frames.push(Math.max(0, frameAtPosition(end) - 1));
+        }
+        return frames.sort((a, b) => a - b);
+    }
+    function jumpToNextTrimBoundary(): void {
+        const frame = trimBoundaryFrames().find(f => f > vid.currentFrame);
+        if (frame !== undefined) vid.currentFrame = frame;
+    }
+    function jumpToPrevTrimBoundary(): void {
+        const frame = trimBoundaryFrames().reverse().find(f => f < vid.currentFrame);
+        if (frame !== undefined) vid.currentFrame = frame;
+    }
+
     function addAutoSyncPoint(pos: real): void {
         controller.start_autosync(pos.toString(), window.sync.getSettingsJson(), "synchronize");
     }
