@@ -243,6 +243,8 @@ Rectangle {
                         // With trim ranges exported as separate videos, the jobs of the other ranges render after it
                         property int directJobId: 0;
                         property var directNextJobs: [];
+                        // The trim range "Stabilize now" renders, -1 for all of them
+                        property int directRange: -1;
                         property bool resumeQueueAfter: false;
 
                         readonly property bool canExport: window.videoArea.vid.loaded && outputFile.filename.length > 3
@@ -267,7 +269,13 @@ Rectangle {
                                 renderBtn.startAction("queue");
                             }
                         }
-                        function stabilizeNow(): void { renderBtn.startAction("now"); }
+                        function stabilizeNow(): void { renderBtn.stabilizeRange(-1); }
+                        function stabilizeRange(range: int): void {
+                            renderBtn.directRange = range;
+                            renderBtn.startAction("now");
+                        }
+                        // With several trim ranges exported as separate videos, "Stabilize now" asks if it's all of them or only the active one
+                        readonly property bool canChooseRange: exportbar.separateRanges && exportbar.rangeCount > 1 && videoArea.timeline.activeTrimRange >= 0;
                         // The direct render is done, let the queue continue where it was paused
                         // Cancelled: the files of the other trim ranges aren't rendered either
                         function cancelDirectRender(): void {
@@ -325,7 +333,7 @@ Rectangle {
                                 return;
                             }
                             // With trim ranges exported as separate videos, the bottom bar shows only the file of the active range
-                            const outputs = renderBtn.pendingAction == "now"? mediaPanel.loadedOutputs() : [];
+                            const outputs = renderBtn.pendingAction == "now"? mediaPanel.loadedOutputs(renderBtn.directRange) : [];
                             const exists = filesystem.exists_in_folder(outputFile.folderUrl, outputFile.filename.replace("_%05d", "_00001"))
                                         || outputs.some(x => filesystem.exists_in_folder(x.output_folder, x.output_filename.replace("_%05d", "_00001")));
                             if ((exists || render_queue.file_exists_in_folder(outputFile.folderUrl, outputFile.filename)) && !allowFile) {
@@ -408,7 +416,7 @@ Rectangle {
                                     }
                                     const job_id = render_queue.add(window.getAdditionalProjectDataJson(), controller.image_to_b64(result.image));
                                     // One job per output file, they share the loaded video and render one after another
-                                    const jobs = mediaPanel.splitDirectJob(job_id);
+                                    const jobs = mediaPanel.splitDirectJob(job_id, renderBtn.directRange);
                                     renderBtn.directNextJobs = jobs.slice(1);
                                     renderBtn.directJobId = jobs[0];
                                     render_queue.main_job_id = jobs[0];
@@ -491,7 +499,21 @@ Rectangle {
                         enabled: renderBtn.canExport;
                         tooltip: qsTr("Renders this video right away, before everything else in the render queue. The queue is resumed afterwards.");
                         text: qsTr("Stabilize now");
-                        onClicked: renderBtn.stabilizeNow();
+                        rightPadding: renderBtn.canChooseRange? 30 * dpiScale : leftPadding;
+                        onClicked: {
+                            if (renderBtn.canChooseRange) stabilizeNowMenu.popup(stabilizeNowBtn, 0, -stabilizeNowMenu.height);
+                            else renderBtn.stabilizeNow();
+                        }
+                        DropdownChevron { visible: renderBtn.canChooseRange; opened: stabilizeNowMenu.visible; color: stabilizeNowBtn.textColor; }
+                        Components.Menu {
+                            id: stabilizeNowMenu;
+                            Action { iconName: "video"; text: qsTr("All %1 ranges").arg(exportbar.rangeCount); onTriggered: renderBtn.stabilizeRange(-1); }
+                            Action {
+                                iconName: "video";
+                                text: qsTr("Only the active range (%1)").arg(videoArea.timeline.activeTrimRange + 1);
+                                onTriggered: renderBtn.stabilizeRange(videoArea.timeline.activeTrimRange);
+                            }
+                        }
                     }
                     // The actions that are used less often, so the bar stays compact
                     LinkButton {

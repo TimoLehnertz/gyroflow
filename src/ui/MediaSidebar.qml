@@ -439,17 +439,20 @@ ResizablePanel {
         return itemId;
     }
     // The output files of the video loaded in the main view, with its current settings: one per trim range
-    // if they are exported as separate videos. Empty if it's not a video of the library
-    function loadedOutputs(): var {
+    // if they are exported as separate videos, only the one of `onlyRange` if it's >= 0. Empty if it's not a video of the library
+    function loadedOutputs(onlyRange: int): var {
         const itemId = root.loadedItem();
         if (itemId <= 0) return [];
         root.saveCurrentSettings();
-        return JSON.parse(media_library.get_item_outputs(itemId, root.outputExtension(itemId)));
+        const outputs = JSON.parse(media_library.get_item_outputs(itemId, root.outputExtension(itemId)));
+        if (onlyRange < 0) return outputs;
+        const own = outputs.filter(x => x.range_index == onlyRange);
+        return own.length? own : outputs;
     }
-    // "Stabilize now" renders the main view in one job, split it into one job per output file like the queue does.
-    // Returns the ids of the jobs, in the order of the trim ranges
-    function splitDirectJob(jobId: int): var {
-        const outputs = root.loadedOutputs();
+    // "Stabilize now" renders the main view in one job, split it into one job per output file like the queue does,
+    // or into the job of `onlyRange` if it's >= 0. Returns the ids of the jobs, in the order of the trim ranges
+    function splitDirectJob(jobId: int, onlyRange: int): var {
+        const outputs = root.loadedOutputs(onlyRange);
         if (outputs.length <= 1 && (!outputs.length || outputs[0].range_index < 0)) return [jobId];
         const ids = render_queue.split_job_by_ranges(jobId, JSON.stringify(outputs));
         root.applyRangeSettings(root.loadedItem(), ids, outputs);
