@@ -84,7 +84,12 @@ Item {
             if (start >= end) {
                 trimRanges.splice(i, 1);
                 i--;
+                continue;
             }
+            // Every range has an id, which stays with it when the ranges are sorted or others are added or removed. Its
+            // job in the render queue is found by it (see `JobState::seq` in media_library.rs)
+            const info = trimRangeInfo(i);
+            if (!info.uid) info.uid = (Date.now() * 4096 + Math.floor(Math.random() * 4096)).toString(16).padStart(16, "0").slice(-16);
         }
         root.trimRangesChanged();
         root.updateActiveTrimRange();
@@ -918,6 +923,8 @@ Item {
                     trimStart: modelData[0];
                     trimEnd: modelData[1];
                     isActive: index == root.activeTrimRange;
+                    // Its key in the render queue (by its id), or the one of the whole video when the ranges are joined into one
+                    queueStatus: window.mediaPanel? (window.mediaPanel.keyStates[(modelData[2] || { }).uid || "-"] || window.mediaPanel.keyStates[""] || "") : "";
                     y: (root.fullScreen || window.isMobileLayout? 0 : 35) * dpiScale;
                     height: parent.height - y;
 

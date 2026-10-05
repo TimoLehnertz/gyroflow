@@ -63,8 +63,12 @@ struct JobState {
     message: String,
     /// Hash of the stabilization settings this job was queued with
     hash: String,
-    /// The trim range the job renders, -1 if it renders the whole video (or all of its ranges joined)
-    range_index: i32
+    /// What the job renders, its key in the queue together with the video: the id of a trim range (`uid` in its
+    /// `trim_range_info`), or empty for the whole video (or all of its ranges joined)
+    seq: String,
+    /// The job is loading the video, before that it can't be removed from the queue or be the base of other jobs.
+    /// `job_id` is 0 while the key has no job yet (see "Render queue keys")
+    loading: bool
 }
 impl JobState {
     fn is_active(&self) -> bool { self.status == "queued" || self.status == "processing" || self.status == "rendering" }
@@ -92,7 +96,15 @@ struct Video {
     /// One render job per output file
     jobs: Vec<JobState>,
     /// The files of a joined video (see `core::joined_video`), shown below it when it's expanded
-    parts: Vec<JoinedPart>
+    parts: Vec<JoinedPart>,
+    /// Jobs of keys that were taken out of the queue, until the queue removed them (see "Render queue keys")
+    retired: Vec<RetiredJob>
+}
+
+#[derive(Default, Clone, Debug)]
+struct RetiredJob {
+    job_id: u32,
+    loading: bool
 }
 
 #[derive(Default, Clone, Debug)]
@@ -108,6 +120,8 @@ struct JoinedPart {
 #[derive(Clone, Debug)]
 struct OutputFile {
     range_index: i32,
+    /// See `JobState::seq`
+    seq: String,
     folder: String,
     filename: String,
     /// The trim range has its own stabilization settings
@@ -195,8 +209,24 @@ pub struct MediaLibrary {
     is_item_queued: qt_method!(fn(&self, item_id: u32) -> bool),
     retain_jobs: qt_method!(fn(&mut self, job_ids: QVariantList)),
     set_item_job: qt_method!(fn(&mut self, item_id: u32, job_id: u32)),
-    set_item_jobs: qt_method!(fn(&mut self, item_id: u32, job_ids: QVariantList, range_indexes: QVariantList)),
-    add_item_job: qt_method!(fn(&mut self, item_id: u32, job_id: u32, range_index: i32)),
+    add_item_job: qt_method!(fn(&mut self, item_id: u32, job_id: u32, seq: QString)),
+    enqueue: qt_method!(fn(&mut self, item_id: u32, seq: QString) -> bool),
+    enqueue_all: qt_method!(fn(&mut self, item_id: u32)),
+    dequeue: qt_method!(fn(&mut self, item_id: u32, seq: QString) -> bool),
+    set_key_job: qt_method!(fn(&mut self, item_id: u32, seq: QString, job_id: u32, loading: bool)),
+    job_loaded: qt_method!(fn(&mut self, job_id: u32)),
+    forget_retired: qt_method!(fn(&mut self, item_id: u32, job_id: u32)),
+    get_queue_work: qt_method!(fn(&self) -> QString),
+    get_key_states: qt_method!(fn(&self, item_id: u32) -> QString),
+    /// The keys or their jobs changed, the render queue has work to do (see `get_queue_work`)
+    pub queue_keys_changed: qt_signal!(),
+    /// The queue state of the keys of a video changed (see `get_key_states`)
+    pub key_states_changed: qt_signal!(item_id: u32),
+    reset_item_job_states: qt_method!(fn(&mut self, item_id: u32)),
+    get_item_job_for_seq: qt_method!(fn(&self, item_id: u32, seq: QString) -> u32),
+    get_job_seq: qt_method!(fn(&self, job_id: u32) -> QString),
+    get_range_index_of_seq: qt_method!(fn(&self, item_id: u32, seq: QString) -> i32),
+    get_seq_of_range: qt_method!(fn(&self, item_id: u32, range_index: i32) -> QString),
     get_item_job: qt_method!(fn(&self, item_id: u32) -> u32),
     get_item_jobs: qt_method!(fn(&self, item_id: u32) -> QVariantList),
     get_item_outputs: qt_method!(fn(&self, item_id: u32, ext: QString) -> QString),
@@ -730,6 +760,7 @@ impl MediaLibrary {
     }
     fn collect_video_jobs(v: &Video, job_ids: &mut Vec<u32>) {
         job_ids.extend(v.jobs.iter().map(|x| x.job_id).filter(|x| *x > 0));
+        job_ids.extend(v.retired.iter().map(|x| x.job_id));
     }
     fn remove_ids(&mut self, ids: &[u32]) -> QVariantList {
         if ids.is_empty() { return QVariantList::default(); }
@@ -1205,6 +1236,8 @@ impl MediaLibrary {
         }
         Self::assign_range_paths(&mut obj, &base);
         v.settings = Some(obj.to_string());
+        let id = v.id;
+        self.reconcile_keys(id);
         true
     }
     fn trim_ranges_ms(obj: &serde_json::Value) -> Vec<(f64, f64)> {
@@ -1238,6 +1271,11 @@ impl MediaLibrary {
         let mut used = info.iter().map(Self::range_path).filter(|x| !x.is_empty()).collect::<std::collections::HashSet<_>>();
         let mut number = 1;
         for x in info.iter_mut() {
+            // The id of the range, its jobs in the render queue are found by it (see `JobState::seq`)
+            if !x.is_object() { *x = serde_json::json!({ }); }
+            if x.get("uid").and_then(|x| x.as_str()).map_or(true, |x| x.is_empty()) {
+                x["uid"] = serde_json::Value::String(format!("{:016x}", fastrand::u64(..)));
+            }
             if !Self::range_path(x).is_empty() { continue; }
             let path = loop {
                 let path = format!("{base}-{number:0>3}");
@@ -1297,6 +1335,7 @@ impl MediaLibrary {
         let outputs_changed = Self::range_info(&v.settings) != Self::range_info(&Some(data.clone()));
         v.settings = Some(data);
         self.refresh_job_hash(item_id);
+        self.reconcile_keys(item_id);
         if outputs_changed {
             self.rebuild();
             self.refresh_outputs();
@@ -1313,8 +1352,8 @@ impl MediaLibrary {
     /// The job of a trim range with its own settings gets those instead of the ones of the video
     pub fn get_settings_for_job(&self, job_id: u32) -> QString {
         let item_id = self.item_id_for_job(job_id);
-        let range_index = self.video(item_id).and_then(|v| v.jobs.iter().find(|x| x.job_id == job_id)).map(|x| x.range_index).unwrap_or(-1);
-        self.get_range_settings(item_id, range_index)
+        let seq = self.video(item_id).and_then(|v| v.jobs.iter().find(|x| x.job_id == job_id)).map(|x| x.seq.clone()).unwrap_or_default();
+        self.get_range_settings(item_id, self.range_index_of_seq(item_id, &seq))
     }
     /// Settings of the video to apply to a render job of one of its trim ranges (-1: the whole video)
     pub fn get_range_settings(&self, item_id: u32, range_index: i32) -> QString {
@@ -1464,6 +1503,7 @@ impl MediaLibrary {
         for &id in &ids {
             self.update_stabilized_row(id);
             self.refresh_job_hash(id);
+            self.reconcile_keys(id);
         }
         QVariantList::from_iter(ids)
     }
@@ -1482,6 +1522,17 @@ impl MediaLibrary {
     /// Export settings of a trim range (without the output path), if the video has separate settings for each range
     fn range_output(obj: &serde_json::Value, range_index: usize) -> Option<serde_json::Value> {
         Self::range_setting(obj, range_index, "output")
+    }
+    /// See `JobState::seq`. Every range gets one when the settings are saved, this is only for settings that never were
+    fn range_uid(obj: &serde_json::Value, range_index: usize) -> String {
+        obj.get("trim_range_info").and_then(|x| x.get(range_index)).and_then(|x| x.get("uid")).and_then(|x| x.as_str())
+            .map(str::to_owned).unwrap_or_else(|| format!("#{range_index}"))
+    }
+    /// The current index of the trim range with this id, -1 for the whole video and -2 if it doesn't exist anymore
+    fn range_index_of_seq(&self, item_id: u32, seq: &str) -> i32 {
+        if seq.is_empty() { return -1; }
+        let Some(v) = self.video(item_id) else { return -2; };
+        self.outputs(v, None).into_iter().find(|x| x.seq == seq).map(|x| x.range_index).unwrap_or(-2)
     }
     fn range_setting(obj: &serde_json::Value, range_index: usize, key: &str) -> Option<serde_json::Value> {
         if obj.get("trim_range_config").and_then(|x| x.as_str()) != Some("separate") { return None; }
@@ -1594,7 +1645,7 @@ impl MediaLibrary {
         let (count, paths, separate) = Self::range_info(&v.settings);
         if count == 0 || !separate {
             let (folder, filename) = self.resolve_output(&v.url, &v.output_path, &v.settings, ext);
-            return vec![OutputFile { range_index: -1, folder, filename, own_settings: false }];
+            return vec![OutputFile { range_index: -1, seq: String::new(), folder, filename, own_settings: false }];
         }
         let base = self.output_path_or_default(&v.url, &v.output_path);
         let obj = v.settings.as_ref().and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok()).unwrap_or_default();
@@ -1609,7 +1660,7 @@ impl MediaLibrary {
                 options.output_extension(&filesystem::get_filename(&v.url), None)
             });
             let (folder, filename) = self.resolve_output(&v.url, &path, &v.settings, range_ext.as_deref().or(ext));
-            OutputFile { range_index: i as i32, folder, filename, own_settings }
+            OutputFile { range_index: i as i32, seq: Self::range_uid(&obj, i), folder, filename, own_settings }
         }).collect()
     }
     /// Folder and filename (with the extension of the codec) the output path resolves to for the video, for the output path field
@@ -1626,6 +1677,7 @@ impl MediaLibrary {
         let outputs = self.video(item_id).map(|v| self.outputs(v, ext)).unwrap_or_default();
         QString::from(serde_json::json!(outputs.iter().map(|x| serde_json::json!({
             "range_index": x.range_index,
+            "seq": x.seq,
             "output_folder": x.folder,
             "output_filename": x.filename,
             "own_settings": x.own_settings,
@@ -1721,48 +1773,215 @@ impl MediaLibrary {
         let existing = job_ids.into_iter().filter_map(|x| x.to_qbytearray().to_string().parse::<u32>().ok()).collect::<std::collections::HashSet<_>>();
         let mut changed = Vec::new();
         for v in self.all_videos_mut() {
+            // Keys whose job isn't added yet stay
             let count = v.jobs.len();
-            v.jobs.retain(|x| x.job_id > 0 && existing.contains(&x.job_id));
+            v.jobs.retain(|x| x.job_id == 0 || existing.contains(&x.job_id));
+            v.retired.retain(|x| existing.contains(&x.job_id));
             if v.jobs.len() != count { changed.push(v.id); }
         }
         if changed.is_empty() { return; }
-        for id in changed { self.update_job_row(id); }
+        for id in changed { self.update_job_row(id); self.key_states_changed(id); }
         self.items_changed();
     }
 
-    fn new_job(&self, item_id: u32, job_id: u32, range_index: i32) -> JobState {
+    fn new_job(&self, item_id: u32, job_id: u32, seq: String) -> JobState {
         JobState {
             job_id,
             status: "queued".into(),
             hash: self.settings_hash(item_id).to_string(),
-            range_index,
+            seq,
             ..Default::default()
         }
     }
-    /// The video renders with this one job (or none if it's 0). It renders the whole video until it's split into its trim ranges
+    /// The video renders with this one job of the whole video, or it's out of the queue if it's 0
     pub fn set_item_job(&mut self, item_id: u32, job_id: u32) {
-        let jobs = if job_id > 0 { vec![self.new_job(item_id, job_id, -1)] } else { Vec::new() };
-        self.set_jobs(item_id, jobs);
+        self.clear_keys(item_id);
+        if job_id > 0 {
+            let job = self.new_job(item_id, job_id, String::new());
+            if let Some(v) = self.video_mut(item_id) { v.jobs.push(job); }
+        }
+        self.keys_changed(item_id);
     }
-    /// The jobs of the video after it was split into its trim ranges, `range_indexes` are the ranges of the jobs
-    pub fn set_item_jobs(&mut self, item_id: u32, job_ids: QVariantList, range_indexes: QVariantList) {
-        let parse = |x: &QVariant| x.to_qbytearray().to_string().parse::<i64>().unwrap_or(-1);
-        let ranges = range_indexes.into_iter().map(parse).collect::<Vec<_>>();
-        let jobs = job_ids.into_iter().map(parse).enumerate().filter(|(_, id)| *id > 0)
-            .map(|(i, id)| self.new_job(item_id, id as u32, ranges.get(i).copied().unwrap_or(-1) as i32))
-            .collect();
-        self.set_jobs(item_id, jobs);
-    }
-    /// A job of the video that was added to the render queue elsewhere (eg. restored from the previous session)
-    pub fn add_item_job(&mut self, item_id: u32, job_id: u32, range_index: i32) {
+    /// A job of the video in the queue, for `seq` (see `JobState::seq`). The video has one job per seq at most, the queue
+    /// is the ordered set of these keys, and the job of a key is never changed to render another one
+    pub fn add_item_job(&mut self, item_id: u32, job_id: u32, seq: QString) {
+        let seq = seq.to_string();
         if job_id == 0 || self.is_library_job(job_id) { return; }
-        let job = self.new_job(item_id, job_id, range_index);
+        if self.video(item_id).map_or(true, |v| v.jobs.iter().any(|x| x.seq == seq)) { return; }
+        let job = self.new_job(item_id, job_id, seq);
         let Some(v) = self.video_mut(item_id) else { return; };
-        // A job of the whole video replaces the others, and the other way around
-        v.jobs.retain(|x| (x.range_index < 0) == (range_index < 0));
         v.jobs.push(job);
         self.update_job_row(item_id);
         self.items_changed();
+    }
+    /// The jobs of the video render again (eg. after "Reset status"), with the settings it has now
+    pub fn reset_item_job_states(&mut self, item_id: u32) {
+        let hash = self.settings_hash(item_id).to_string();
+        let Some(v) = self.video_mut(item_id) else { return; };
+        for job in v.jobs.iter_mut() {
+            *job = JobState { job_id: job.job_id, status: "queued".into(), hash: hash.clone(), seq: job.seq.clone(), loading: job.loading, ..Default::default() };
+        }
+        self.update_job_row(item_id);
+        self.items_changed();
+    }
+    // ---------------------------------------------------------------------------------------------
+    // ------------------------------------- Render queue keys -------------------------------------
+    // ---------------------------------------------------------------------------------------------
+    // The render queue is an ordered set of keys, a video of the list and what of it is rendered (`JobState::seq`). The
+    // keys are kept here and only changed here, so what's queued is always known right away. A key gets a job in the
+    // render queue (which renders only that key, the order of the jobs is the order of the set) when the queue can add
+    // it: the QML side does the work this asks for (`get_queue_work`) whenever `queue_keys_changed` is emitted.
+
+    /// The keys of the video in its export mode: one per trim range exported as a separate video, otherwise the whole video
+    fn available_seqs(&self, v: &Video) -> Vec<String> {
+        self.outputs(v, None).into_iter().map(|x| x.seq).collect()
+    }
+    fn keys_changed(&mut self, item_id: u32) {
+        self.update_job_row(item_id);
+        self.items_changed();
+        self.key_states_changed(item_id);
+        self.queue_keys_changed();
+    }
+    /// Adds the key, its job is added by the queue. False if it's queued already or the video doesn't have it
+    pub fn enqueue(&mut self, item_id: u32, seq: QString) -> bool {
+        let seq = seq.to_string();
+        let Some(v) = self.video(item_id) else { return false; };
+        if v.jobs.iter().any(|x| x.seq == seq) || !self.available_seqs(v).contains(&seq) { return false; }
+        let job = self.new_job(item_id, 0, seq);
+        if let Some(v) = self.video_mut(item_id) { v.jobs.push(job); }
+        self.keys_changed(item_id);
+        true
+    }
+    /// All keys of the video in its export mode that aren't queued yet
+    pub fn enqueue_all(&mut self, item_id: u32) {
+        let Some(v) = self.video(item_id) else { return; };
+        let missing = self.available_seqs(v).into_iter().filter(|seq| !v.jobs.iter().any(|x| &x.seq == seq)).collect::<Vec<_>>();
+        if missing.is_empty() { return; }
+        for seq in missing {
+            let job = self.new_job(item_id, 0, seq);
+            if let Some(v) = self.video_mut(item_id) { v.jobs.push(job); }
+        }
+        self.keys_changed(item_id);
+    }
+    /// Takes the key out of the queue. False if its job is rendering (or synchronizing for it) right now
+    pub fn dequeue(&mut self, item_id: u32, seq: QString) -> bool {
+        let seq = seq.to_string();
+        let Some(v) = self.video_mut(item_id) else { return false; };
+        let Some(index) = v.jobs.iter().position(|x| x.seq == seq) else { return false; };
+        if !v.jobs[index].loading && v.jobs[index].job_id > 0 && v.jobs[index].is_busy() { return false; }
+        let job = v.jobs.remove(index);
+        Self::retire(v, job);
+        self.keys_changed(item_id);
+        true
+    }
+    /// The job of a key that's not in the queue anymore. One that's still loading the video renders a key that's waiting
+    /// for it instead, otherwise the queue removes it
+    fn retire(v: &mut Video, job: JobState) {
+        if job.job_id == 0 { return; }
+        if job.loading {
+            if let Some(waiting) = v.jobs.iter_mut().find(|x| x.job_id == 0) {
+                waiting.job_id = job.job_id;
+                waiting.loading = true;
+                return;
+            }
+        }
+        v.retired.push(RetiredJob { job_id: job.job_id, loading: job.loading });
+    }
+    /// All keys of the video out of the queue (or with `job_id` > 0, only this job as the one key of the whole video)
+    fn clear_keys(&mut self, item_id: u32) {
+        let Some(v) = self.video_mut(item_id) else { return; };
+        for job in std::mem::take(&mut v.jobs) {
+            if job.job_id > 0 { v.retired.push(RetiredJob { job_id: job.job_id, loading: job.loading }); }
+        }
+    }
+    /// The keys follow the settings of the video: when it's switched to one joined video, it's queued if any of its trim
+    /// ranges was, and the other way around all of its ranges are. Keys of trim ranges that were deleted are removed
+    fn reconcile_keys(&mut self, item_id: u32) {
+        let Some(v) = self.video(item_id) else { return; };
+        if v.jobs.is_empty() { return; }
+        let available = self.available_seqs(v);
+        let queued = v.jobs.iter().map(|x| x.seq.clone()).collect::<Vec<_>>();
+        if queued.iter().all(|x| available.contains(x)) { return; }
+        let joined = available.len() == 1 && available[0].is_empty();
+        let mut add = Vec::new();
+        if joined && queued.iter().any(|x| !x.is_empty()) {
+            add.push(String::new());
+        } else if !joined && queued.iter().any(|x| x.is_empty()) {
+            add = available.clone();
+        }
+        let hash = self.settings_hash(item_id).to_string();
+        let Some(v) = self.video_mut(item_id) else { return; };
+        let (keep, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut v.jobs).into_iter().partition(|x| available.contains(&x.seq) || (x.job_id > 0 && !x.loading && x.is_busy()));
+        v.jobs = keep;
+        for seq in add {
+            if !v.jobs.iter().any(|x| x.seq == seq) { v.jobs.push(JobState { status: "queued".into(), hash: hash.clone(), seq, ..Default::default() }); }
+        }
+        for job in gone { Self::retire(v, job); }
+        self.keys_changed(item_id);
+    }
+    /// The queue added the job of the key (`loading`: it's loading the video first)
+    pub fn set_key_job(&mut self, item_id: u32, seq: QString, job_id: u32, loading: bool) {
+        let seq = seq.to_string();
+        let Some(v) = self.video_mut(item_id) else { return; };
+        let Some(job) = v.jobs.iter_mut().find(|x| x.seq == seq && x.job_id == 0) else { return; };
+        job.job_id = job_id;
+        job.loading = loading;
+        self.keys_changed(item_id);
+    }
+    /// The job loaded the video, it can be the base of the other jobs of the video now (or be removed if it's retired)
+    pub fn job_loaded(&mut self, job_id: u32) {
+        if job_id == 0 { return; }
+        let mut item = 0;
+        for v in self.all_videos_mut() {
+            for x in v.jobs.iter_mut().filter(|x| x.job_id == job_id) { x.loading = false; item = v.id; }
+            for x in v.retired.iter_mut().filter(|x| x.job_id == job_id) { x.loading = false; item = v.id; }
+        }
+        if item > 0 { self.keys_changed(item); }
+    }
+    /// The queue removed the retired job (or it's left alone, eg. it's rendering)
+    pub fn forget_retired(&mut self, item_id: u32, job_id: u32) {
+        if let Some(v) = self.video_mut(item_id) { v.retired.retain(|x| x.job_id != job_id); }
+    }
+    /// What the render queue has to do, JSON `[{ item_id, url, pending: [seq], base_job, loading, retired: [{ job_id, loading }] }]`:
+    /// `pending` are the keys without a job, which get one from `base_job` (a job of the video that has it loaded, 0 if
+    /// there's none) or by loading the video if no job is `loading` it already
+    pub fn get_queue_work(&self) -> QString {
+        let work = self.all_videos().filter(|v| v.jobs.iter().any(|x| x.job_id == 0) || !v.retired.is_empty()).map(|v| {
+            let base_job = v.jobs.iter().map(|x| (x.job_id, x.loading)).chain(v.retired.iter().map(|x| (x.job_id, x.loading)))
+                .find(|x| x.0 > 0 && !x.1).map(|x| x.0).unwrap_or_default();
+            let loading = v.jobs.iter().any(|x| x.loading) || v.retired.iter().any(|x| x.loading);
+            serde_json::json!({
+                "item_id": v.id,
+                "url": v.url,
+                "pending": v.jobs.iter().filter(|x| x.job_id == 0).map(|x| x.seq.clone()).collect::<Vec<_>>(),
+                "base_job": base_job,
+                "loading": loading,
+                "retired": v.retired.iter().map(|x| serde_json::json!({ "job_id": x.job_id, "loading": x.loading })).collect::<Vec<_>>(),
+            })
+        }).collect::<Vec<_>>();
+        QString::from(serde_json::Value::Array(work).to_string())
+    }
+    /// Queue state of the keys of the video, JSON `{ seq: status }`: "queued" (also while its job is added or loads the
+    /// video), "processing", "rendering", "done", "error" or "question"
+    pub fn get_key_states(&self, item_id: u32) -> QString {
+        let states = self.video(item_id).map(|v| v.jobs.iter().map(|x| (x.seq.clone(), serde_json::Value::String(if x.job_id == 0 || x.loading || x.status.is_empty() { "queued".into() } else { x.status.clone() }))).collect::<serde_json::Map<_, _>>()).unwrap_or_default();
+        QString::from(serde_json::Value::Object(states).to_string())
+    }
+
+    pub fn get_item_job_for_seq(&self, item_id: u32, seq: QString) -> u32 {
+        let seq = seq.to_string();
+        self.video(item_id).and_then(|v| v.jobs.iter().find(|x| x.seq == seq)).map(|x| x.job_id).unwrap_or_default()
+    }
+    pub fn get_job_seq(&self, job_id: u32) -> QString {
+        self.all_videos().flat_map(|v| v.jobs.iter()).find(|x| x.job_id == job_id).map(|x| QString::from(x.seq.as_str())).unwrap_or_default()
+    }
+    pub fn get_range_index_of_seq(&self, item_id: u32, seq: QString) -> i32 {
+        self.range_index_of_seq(item_id, &seq.to_string())
+    }
+    /// The seq of the trim range at this index (empty for the whole video), eg. for a job that was added to the queue elsewhere
+    pub fn get_seq_of_range(&self, item_id: u32, range_index: i32) -> QString {
+        let Some(v) = self.video(item_id) else { return QString::default(); };
+        self.outputs(v, None).into_iter().find(|x| x.range_index == range_index).map(|x| QString::from(x.seq)).unwrap_or_default()
     }
     fn set_jobs(&mut self, item_id: u32, jobs: Vec<JobState>) {
         let Some(v) = self.video_mut(item_id) else { return; };
@@ -1772,10 +1991,11 @@ impl MediaLibrary {
         self.items_changed();
     }
     pub fn get_item_job(&self, item_id: u32) -> u32 {
-        self.video(item_id).and_then(|v| v.jobs.first()).map(|x| x.job_id).unwrap_or_default()
+        self.video(item_id).and_then(|v| v.jobs.iter().find(|x| x.job_id > 0)).map(|x| x.job_id).unwrap_or_default()
     }
+    /// The jobs of the keys of the video that have one
     pub fn get_item_jobs(&self, item_id: u32) -> QVariantList {
-        QVariantList::from_iter(self.video(item_id).map(|v| v.jobs.iter().map(|x| x.job_id).collect::<Vec<_>>()).unwrap_or_default())
+        QVariantList::from_iter(self.video(item_id).map(|v| v.jobs.iter().filter(|x| x.job_id > 0).map(|x| x.job_id).collect::<Vec<_>>()).unwrap_or_default())
     }
     /// The status of the video, summarized over all of its jobs
     pub fn get_item_job_status(&self, item_id: u32) -> QString {
@@ -1792,7 +2012,8 @@ impl MediaLibrary {
     }
     fn item_id_for_job(&self, job_id: u32) -> u32 {
         if job_id == 0 { return 0; }
-        self.all_videos().find(|v| v.jobs.iter().any(|x| x.job_id == job_id)).map(|v| v.id).unwrap_or_default()
+        // Retired jobs are still the video's until the queue removed them, they aren't jobs of others
+        self.all_videos().find(|v| v.jobs.iter().any(|x| x.job_id == job_id) || v.retired.iter().any(|x| x.job_id == job_id)).map(|v| v.id).unwrap_or_default()
     }
     fn job_mut(&mut self, job_id: u32) -> Option<&mut JobState> {
         if job_id == 0 { return None; }
@@ -1806,11 +2027,11 @@ impl MediaLibrary {
         if job.status == "error" || job.status == "question" { return; }
         job.progress = progress;
         job.status = if finished { "done".into() } else { "rendering".into() };
-        let (hash, range_index) = (job.hash.clone(), job.range_index);
+        let (hash, seq) = (job.hash.clone(), job.seq.clone());
         if finished {
             // The rendered file contains the hash of the settings it was rendered with
             if let Some(v) = self.video(item_id) {
-                if let Some(output) = self.outputs(v, None).into_iter().find(|x| x.range_index == range_index) {
+                if let Some(output) = self.outputs(v, None).into_iter().find(|x| x.seq == seq) {
                     let url = output.url();
                     if let Some(v) = self.video_mut(item_id) { v.output_hashes.insert(url, hash); }
                 }
@@ -1875,6 +2096,7 @@ impl MediaLibrary {
 
 #[cfg(test)]
 mod tests {
+    use qmetaobject::QString;
     use super::{ MediaLibrary, Video };
 
     fn outputs(settings: serde_json::Value) -> Vec<(i32, String)> {
@@ -1924,6 +2146,109 @@ mod tests {
         MediaLibrary::assign_range_paths(&mut obj, "clip_stabilized");
         let paths = obj["trim_range_info"].as_array().unwrap().iter().map(|x| x["output_path"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         assert_eq!(paths, vec!["clip_stabilized-002", "clip_stabilized-001", "clip_stabilized-003"]);
+    }
+
+    #[test]
+    fn a_range_keeps_its_queue_key_when_others_are_removed() {
+        let mut obj = serde_json::json!({ "trim_ranges_ms": [[0, 1000], [2000, 3000], [4000, 5000]] });
+        MediaLibrary::assign_range_paths(&mut obj, "clip_stabilized");
+        let uids = (0..3).map(|i| MediaLibrary::range_uid(&obj, i)).collect::<Vec<_>>();
+        assert!(uids.iter().all(|x| x.len() == 16) && uids[0] != uids[1] && uids[1] != uids[2]);
+        // Assigning the paths again (every save does) keeps the ids
+        MediaLibrary::assign_range_paths(&mut obj, "clip_stabilized");
+        assert_eq!((0..3).map(|i| MediaLibrary::range_uid(&obj, i)).collect::<Vec<_>>(), uids);
+
+        // The first range is removed in the timeline: the last one is at index 1 now, and its key still finds it there
+        obj["trim_ranges_ms"].as_array_mut().unwrap().remove(0);
+        obj["trim_range_info"].as_array_mut().unwrap().remove(0);
+        let mut lib = MediaLibrary::default();
+        lib.standalone.push(Video { id: 1, url: "file:///videos/C0001.MP4".into(), settings: Some(obj.to_string()), ..Default::default() });
+        assert_eq!(lib.range_index_of_seq(1, &uids[2]), 1);
+        assert_eq!(lib.range_index_of_seq(1, &uids[0]), -2);
+        assert_eq!(lib.range_index_of_seq(1, ""), -1);
+        assert_eq!(lib.get_seq_of_range(1, 0).to_string(), uids[1]);
+    }
+
+    fn library_with_ranges(ranges: usize, separate: bool) -> (MediaLibrary, Vec<String>) {
+        let mut obj = serde_json::json!({
+            "trim_ranges_ms": (0..ranges).map(|i| [i as f64 * 2000.0, i as f64 * 2000.0 + 1000.0]).collect::<Vec<_>>(),
+            "output": { "export_trims_separately": separate }
+        });
+        MediaLibrary::assign_range_paths(&mut obj, "C0001_stabilized");
+        let uids = (0..ranges).map(|i| MediaLibrary::range_uid(&obj, i)).collect();
+        let mut lib = MediaLibrary::default();
+        lib.standalone.push(Video { id: 1, url: "file:///videos/C0001.MP4".into(), settings: Some(obj.to_string()), ..Default::default() });
+        (lib, uids)
+    }
+    fn set_mode(lib: &mut MediaLibrary, separate: bool) {
+        let mut obj: serde_json::Value = serde_json::from_str(lib.standalone[0].settings.as_ref().unwrap()).unwrap();
+        obj["output"]["export_trims_separately"] = serde_json::json!(separate);
+        lib.standalone[0].settings = Some(obj.to_string());
+        lib.reconcile_keys(1);
+    }
+    fn keys(lib: &MediaLibrary) -> Vec<(String, u32)> {
+        lib.standalone[0].jobs.iter().map(|x| (x.seq.clone(), x.job_id)).collect()
+    }
+
+    #[test]
+    fn queue_keys_follow_the_export_mode() {
+        let (mut lib, uids) = library_with_ranges(2, true);
+        assert!(lib.enqueue(1, QString::from(uids[1].as_str())));
+        assert!(!lib.enqueue(1, QString::from(uids[1].as_str())), "a key is in the set once");
+        assert!(!lib.enqueue(1, QString::from("")), "the whole video isn't a key while the ranges are separate videos");
+        lib.set_key_job(1, QString::from(uids[1].as_str()), 11, false);
+        assert_eq!(keys(&lib), vec![(uids[1].clone(), 11)]);
+
+        // Joined: the whole video replaces the queued range, whose job is removed by the queue
+        set_mode(&mut lib, false);
+        assert_eq!(keys(&lib), vec![(String::new(), 0)]);
+        assert_eq!(lib.standalone[0].retired.iter().map(|x| x.job_id).collect::<Vec<_>>(), vec![11]);
+        let work: serde_json::Value = serde_json::from_str(&lib.get_queue_work().to_string()).unwrap();
+        assert_eq!(work[0]["pending"], serde_json::json!([""]));
+        assert_eq!(work[0]["base_job"], 11, "the new job is added from the loaded video of the retired one");
+        lib.set_key_job(1, QString::from(""), 12, false);
+        lib.forget_retired(1, 11);
+
+        // Separate again: all ranges are queued
+        set_mode(&mut lib, true);
+        assert_eq!(keys(&lib), vec![(uids[0].clone(), 0), (uids[1].clone(), 0)]);
+        let states: serde_json::Value = serde_json::from_str(&lib.get_key_states(1).to_string()).unwrap();
+        assert_eq!(states, serde_json::json!({ uids[0].clone(): "queued", uids[1].clone(): "queued" }));
+    }
+
+    #[test]
+    fn deleted_ranges_leave_the_queue_but_rendering_jobs_stay() {
+        let (mut lib, uids) = library_with_ranges(3, true);
+        lib.enqueue_all(1);
+        for (i, uid) in uids.iter().enumerate() { lib.set_key_job(1, QString::from(uid.as_str()), 20 + i as u32, false); }
+        lib.standalone[0].jobs[1].status = "rendering".into();
+        assert!(!lib.dequeue(1, QString::from(uids[1].as_str())), "a rendering job can't be taken out");
+
+        // Ranges 0 and 1 deleted in the timeline
+        let mut obj: serde_json::Value = serde_json::from_str(lib.standalone[0].settings.as_ref().unwrap()).unwrap();
+        obj["trim_ranges_ms"].as_array_mut().unwrap().drain(0..2);
+        obj["trim_range_info"].as_array_mut().unwrap().drain(0..2);
+        lib.standalone[0].settings = Some(obj.to_string());
+        lib.reconcile_keys(1);
+        assert_eq!(keys(&lib), vec![(uids[1].clone(), 21), (uids[2].clone(), 22)]);
+        assert_eq!(lib.standalone[0].retired.iter().map(|x| x.job_id).collect::<Vec<_>>(), vec![20]);
+    }
+
+    #[test]
+    fn a_loading_job_renders_a_waiting_key_when_its_own_is_dequeued() {
+        let (mut lib, uids) = library_with_ranges(2, true);
+        lib.enqueue_all(1);
+        lib.set_key_job(1, QString::from(uids[0].as_str()), 30, true);
+        assert!(lib.dequeue(1, QString::from(uids[0].as_str())));
+        assert_eq!(keys(&lib), vec![(uids[1].clone(), 30)]);
+        assert!(lib.standalone[0].retired.is_empty());
+        // Without a waiting key it's removed once it's loaded
+        assert!(lib.dequeue(1, QString::from(uids[1].as_str())));
+        assert!(keys(&lib).is_empty());
+        let work: serde_json::Value = serde_json::from_str(&lib.get_queue_work().to_string()).unwrap();
+        assert_eq!(work[0]["retired"], serde_json::json!([{ "job_id": 30, "loading": true }]));
+        lib.job_loaded(30);
+        assert!(!lib.standalone[0].retired[0].loading);
     }
 
     #[test]

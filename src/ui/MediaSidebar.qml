@@ -84,6 +84,7 @@ ResizablePanel {
         root.currentJobId       = media_library.current_item > 0? media_library.get_item_job(media_library.current_item) : 0;
         root.updateOutputFile();
         window.videoArea.timeline.importedMarkers = JSON.parse(media_library.get_timeline_markers(media_library.current_item));
+        root.updateKeyStates();
     }
 
     // -----------------------------------------------------------------------------------------
@@ -338,35 +339,94 @@ ResizablePanel {
         if (step > 0) jobs = jobs.reverse();
         for (const jobId of jobs) render_queue.move_item(jobId, step);
     }
-    // The video is loaded by one job, which is split into one job per output file once it's ready (see onProcessing_done)
+    // The render queue is an ordered set of keys, a video of the list and what of it is rendered (its `seq`: the id of a
+    // trim range, or "" for the whole video). The keys are kept by the media library, which decides what's queued (see
+    // "Render queue keys" in media_library.rs). This only does the work it asks for: every key gets its own job, which
+    // only renders that key, and jobs of keys that aren't queued anymore are removed. The jobs of a video share the loaded
+    // video, its first job loads it and the others are added from that one
+
+    // All keys of the video in its export mode. A video that's queued again (eg. by a marker import) gets new jobs instead
+    // of its old ones, which would stay in the queue with the old settings
     function queueItem(itemId: int): void {
-        // A video that's queued again (eg. by a marker import) gets new jobs instead of its old ones. Otherwise those would
-        // stay in the queue with the old settings, no longer linked to the video, and render the whole video too
         if (media_library.is_item_queued(itemId)) {
             const status = media_library.get_item_job_status(itemId);
             if (status == "rendering" || status == "processing") return;
-            root.cancelItem(itemId);
+            media_library.set_item_job(itemId, 0);
         }
-        const jobId = render_queue.add_file(media_library.get_item_url(itemId), "", JSON.stringify(root.jobData(itemId)));
-        root.pendingJobs[jobId] = true;
-        media_library.set_item_job(itemId, jobId);
-        root.ownJobs[jobId] = true;
+        media_library.enqueue_all(itemId);
     }
-    // Every output file of the video (one per trim range, unless they are joined) gets its own job.
-    // They share the loaded video, so it's synchronized and its smoothing computed only once.
-    function splitItemJobs(itemId: int, jobId: int): void {
-        const outputs = JSON.parse(media_library.get_item_outputs(itemId, ""));
-        if (!outputs.length) return;
-        const ids = render_queue.split_job_by_ranges(jobId, JSON.stringify(outputs));
-        for (const id of ids) root.ownJobs[id] = true;
-        media_library.set_item_jobs(itemId, ids, outputs.map(x => x.range_index));
-        root.applyRangeSettings(itemId, ids, outputs);
-        root.splitLayouts[itemId] = root.splitLayout(outputs);
+    function enqueue(itemId: int, seq: string): void { media_library.enqueue(itemId, seq); }
+    function dequeue(itemId: int, seq: string): void { media_library.dequeue(itemId, seq); }
+
+    property bool queueWorkScheduled: false;
+    function scheduleQueueWork(): void {
+        if (root.queueWorkScheduled) return;
+        root.queueWorkScheduled = true;
+        Qt.callLater(root.doQueueWork);
     }
-    // Which ranges the jobs of an item were split into, and which of them got their own copy of the video
-    property var splitLayouts: ({ });
-    function splitLayout(outputs: var): string {
-        return JSON.stringify(outputs.map(x => [x.range_index, !!x.own_settings]));
+    function doQueueWork(): void {
+        root.queueWorkScheduled = false;
+        let added = false;
+        for (const work of JSON.parse(media_library.get_queue_work())) {
+            for (const seq of work.pending) {
+                if (work.base_job > 0) {
+                    // From the loaded video of another job of the video
+                    const output = JSON.parse(media_library.get_item_outputs(work.item_id, "")).find(x => x.seq == seq);
+                    const jobId = output? render_queue.add_range_job(work.base_job, JSON.stringify(output)) : 0;
+                    if (!jobId) continue;
+                    root.ownJobs[jobId] = true;
+                    media_library.set_key_job(work.item_id, seq, jobId, false);
+                    root.syncJob(work.item_id, jobId, true);
+                    added = true;
+                } else if (!work.loading) {
+                    // The first job of the video loads it, the other keys wait for it (see onProcessing_done)
+                    const jobId = render_queue.add_file(work.url, "", JSON.stringify(root.jobData(work.item_id)));
+                    root.pendingJobs[jobId] = true;
+                    root.ownJobs[jobId] = true;
+                    media_library.set_key_job(work.item_id, seq, jobId, true);
+                    break;
+                }
+            }
+            // A job that's loading the video can't be removed yet, it's removed once it's loaded
+            for (const retired of work.retired) {
+                if (retired.loading) continue;
+                render_queue.remove(retired.job_id);
+                media_library.forget_retired(work.item_id, retired.job_id);
+            }
+        }
+        // Queued jobs wait for the user to start the queue, but a running queue picks up the new ones
+        if (added && render_queue.status == "active") render_queue.start();
+    }
+    Connections {
+        target: media_library;
+        function onQueue_keys_changed(): void { root.scheduleQueueWork(); }
+        function onKey_states_changed(item_id: int): void { if (item_id == media_library.current_item) root.updateKeyStates(); }
+        function onCurrent_item_changed(): void { root.updateKeyStates(); }
+    }
+    // Queue state of the keys of the video in the main view (`seq` → status, see `get_key_states`), shown on the timeline
+    // and used by the queue button of the bottom bar. They look up their trim ranges by the ids the timeline has
+    property var keyStates: ({ });
+    function updateKeyStates(): void {
+        const states = media_library.current_item > 0? JSON.parse(media_library.get_key_states(media_library.current_item)) : ({ });
+        if (JSON.stringify(states) != JSON.stringify(root.keyStates)) root.keyStates = states;
+    }
+    // The job renders its key with the settings the video has now: the ones of its trim range, if it has its own, and the
+    // output file of the key. Jobs that started rendering are left as they are, unless `loaded` (it just loaded the video)
+    function syncJob(itemId: int, jobId: int, loaded: bool): void {
+        if (!loaded && media_library.get_job_status(jobId) != "queued") return;
+        const seq = media_library.get_job_seq(jobId);
+        const file = JSON.parse(media_library.get_item_outputs(itemId, "")).find(x => x.seq == seq);
+        if (!file) return;
+        const settings = media_library.get_settings_for_job(jobId);
+        let data = settings? JSON.parse(settings) : ({ title: "Gyroflow data file", version: 4 });
+        const output = root.jobData(itemId).output;
+        // A range with its own settings keeps its own export settings, every key renders to its own file
+        const rangeOutput = file.own_settings? (data.output || { }) : { };
+        data.output = Object.assign({ }, output, rangeOutput, { output_folder: file.output_folder, output_filename: file.output_filename });
+        // The metadata has the stabilization hash, which tells whether the rendered file is up to date
+        data.output.metadata = output.metadata;
+        render_queue.apply_to_all(JSON.stringify(data), window.getAdditionalProjectDataJson(), jobId);
+        render_queue.set_job_output(jobId, file.range_index, "", "");
     }
     // Trim ranges with their own stabilization settings got their own copy of the loaded video, apply their settings to it
     function applyRangeSettings(itemId: int, jobIds: var, outputs: var): void {
@@ -395,42 +455,11 @@ ResizablePanel {
         ad.output.metadata = Object.assign({ }, ad.output.metadata || { }, { stabilization_hash: media_library.settings_hash(itemId) });
         return ad;
     }
-    // An item can be edited while it's waiting in the queue, keep its jobs up to date until they start rendering
+    // An item can be edited while it's waiting in the queue, keep its jobs up to date until they start rendering. Which of
+    // its keys are queued follows its settings in the media library (see `reconcile_keys`)
     function updateQueuedJob(itemId: int): void {
         delete root.outdatedJobItems[itemId];
-        const jobIds = media_library.get_item_jobs(itemId);
-        if (!jobIds.length) return;
-        // A trim range with its own stabilization settings gets those
-        const settingsOf = (jobId) => { const x = media_library.get_settings_for_job(jobId); return x? JSON.parse(x) : ({ title: "Gyroflow data file", version: 4 }); };
-        let data = settingsOf(jobIds[0]);
-        const output = root.jobData(itemId).output;
-        const additionalData = window.getAdditionalProjectDataJson();
-        const outputs = JSON.parse(media_library.get_item_outputs(itemId, ""));
-        const ranges = jobIds.map(id => render_queue.get_job_range_index(id));
-        const allQueued = jobIds.every(id => media_library.get_job_status(id) == "queued");
-        const sameFiles = outputs.length == jobIds.length && outputs.every((x, i) => x.range_index == ranges[i])
-                       && (root.splitLayouts[itemId] || root.splitLayout(outputs)) == root.splitLayout(outputs);
-        if (!sameFiles && allQueued) {
-            // The trim ranges (or whether they have their own settings) changed: keep the first job, which has the video loaded, and split it again
-            for (const id of jobIds.slice(1)) render_queue.remove(id);
-            data.output = output;
-            render_queue.apply_to_all(JSON.stringify(data), additionalData, jobIds[0]);
-            root.splitItemJobs(itemId, jobIds[0]);
-            return;
-        }
-        // Each job keeps its own output file. Jobs that already started or finished are left as they are
-        for (let i = 0; i < jobIds.length; ++i) {
-            if (media_library.get_job_status(jobIds[i]) != "queued") continue;
-            const file = outputs.find(x => x.range_index == ranges[i]);
-            data = settingsOf(jobIds[i]);
-            // A range with its own settings keeps its own export settings, all of them render to their own file
-            const rangeOutput = file && file.own_settings? (data.output || { }) : { };
-            data.output = Object.assign({ }, output, rangeOutput, file? { output_folder: file.output_folder, output_filename: file.output_filename } : { });
-            // The metadata has the stabilization hash, which tells whether the rendered file is up to date
-            data.output.metadata = output.metadata;
-            render_queue.apply_to_all(JSON.stringify(data), additionalData, jobIds[i]);
-            render_queue.set_job_output(jobIds[i], ranges[i], "", "");
-        }
+        for (const jobId of media_library.get_item_jobs(itemId)) root.syncJob(itemId, jobId, false);
     }
     function updateQueuedJobs(): void {
         for (const id of media_library.get_render_items(false)) root.markQueuedJobOutdated(id);
@@ -493,12 +522,18 @@ ResizablePanel {
     }
     // The "Add to render queue" button of the bottom bar queues the loaded item through the same path
     // the sidebar uses, so there's only one way a job is created. Returns the queued item id, or 0.
-    function queueLoadedFile(): int {
+    // `range` >= 0 queues only that trim range (with the trim ranges exported as separate videos), -1 all of them
+    function queueLoadedFile(range: int): int {
         const itemId = root.loadedItem();
         if (itemId <= 0) return 0;
         // The settings of the main view are the ones of this item
         root.saveCurrentSettings();
-        if (!media_library.is_item_queued(itemId)) root.queueItem(itemId);
+        if (range >= 0) {
+            root.enqueue(itemId, media_library.get_seq_of_range(itemId, range));
+        } else {
+            // The keys that aren't queued yet
+            media_library.enqueue_all(itemId);
+        }
         const index = media_library.get_item_index(itemId);
         if (index >= 0) lv.positionViewAtIndex(index, ListView.Contain);
         return itemId;
@@ -535,6 +570,10 @@ ResizablePanel {
         const itemId = root.loadedItem();
         if (itemId > 0) root.unqueueItem(itemId);
     }
+    function unqueueLoadedRange(range: int): void {
+        const itemId = root.loadedItem();
+        if (itemId > 0) root.dequeue(itemId, media_library.get_seq_of_range(itemId, range));
+    }
 
     // The render queue itself is managed in its own modal, opened from here or from the bottom bar
     function showQueue(): void {
@@ -550,19 +589,16 @@ ResizablePanel {
         const jobs = media_library.remove_selected();
         for (const jobId of jobs) render_queue.remove(jobId);
     }
+    // Out of the queue: its jobs are removed by the queue (see `doQueueWork`)
     function cancelItem(itemId: int): void {
-        const jobIds = media_library.get_item_jobs(itemId);
-        if (!jobIds.length) return;
-        for (const jobId of jobIds) render_queue.remove(jobId);
         media_library.set_item_job(itemId, 0);
     }
     function resetItem(itemId: int): void {
         const jobIds = media_library.get_item_jobs(itemId);
         if (!jobIds.length) return;
         const status = media_library.get_item_job_status(itemId);
-        const ranges = jobIds.map(id => render_queue.get_job_range_index(id));
         for (const jobId of jobIds) render_queue.reset_job(jobId);
-        media_library.set_item_jobs(itemId, jobIds, ranges);
+        media_library.reset_item_job_states(itemId);
         // Finished or failed jobs render again with the settings the item has now, running ones are only stopped
         if (status != "rendering" && status != "processing") root.updateQueuedJob(itemId);
     }
@@ -622,7 +658,8 @@ ResizablePanel {
         const data = render_queue.get_gyroflow_data(jobId);
         if (data && data.includes("\"stabilization\"")) media_library.save_settings(itemId, data);
         if (rangeIndex < 0) media_library.set_output_url(itemId, outputFolder, outputFilename);
-        media_library.add_item_job(itemId, jobId, rangeIndex);
+        // Its key is the trim range it renders (the settings above gave the ranges their ids)
+        media_library.add_item_job(itemId, jobId, rangeIndex < 0? "" : media_library.get_seq_of_range(itemId, rangeIndex));
     }
     function renameJobOutput(itemId: int, jobId: int, filename: string, folder: string, start: bool): void {
         const newName = window.renameOutput(filename, folder);
@@ -647,14 +684,11 @@ ResizablePanel {
             // Either the job made it into the queue by now, or it never will
             delete root.pendingJobs[job_id];
             if (!media_library.is_library_job(job_id)) return;
-            // The video is loaded in the queue now, apply the settings of this item on top of it
-            const data = media_library.get_settings_for_job(job_id);
-            if (data) {
-                render_queue.apply_to_all(data, window.getAdditionalProjectDataJson(), job_id);
-            }
-            // One job per output file, they share the loaded video
+            // The video is loaded in the queue now: the job gets the settings of its key (unless it was taken out of the
+            // queue meanwhile), the keys that wait for it get their jobs, or it's removed (see `doQueueWork`)
             const itemId = media_library.get_item_for_job(job_id);
-            if (media_library.get_item_jobs(itemId).length == 1) root.splitItemJobs(itemId, job_id);
+            if (media_library.get_item_job_for_seq(itemId, media_library.get_job_seq(job_id)) == job_id) root.syncJob(itemId, job_id, true);
+            media_library.job_loaded(job_id);
             // Queued jobs wait for the user to start the queue, but a running queue picks up the new ones
             if (render_queue.status == "active") render_queue.start();
         }

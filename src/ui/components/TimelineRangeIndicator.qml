@@ -12,6 +12,8 @@ Rectangle {
     property real trimEndAdjustment: 0;
     // The range the playhead is in, or the last one it was in (whose settings and output path are shown)
     property bool isActive: true;
+    // Status of the render job of this range when it's in the render queue ("queued", "rendering", "done", ...), empty otherwise
+    property string queueStatus: "";
 
     property bool active: rightTrimDrag.active || leftTrimDrag.active;
 
@@ -92,5 +94,23 @@ Rectangle {
             x: -2 * dpiScale;
             y: parent.height - height + width/2;
         }
+    }
+
+    // Queued ranges are marked, so it's visible which ones are rendered
+    Rectangle {
+        visible: root.queueStatus.length > 0;
+        width: parent.width;
+        height: 3 * dpiScale;
+        color: root.queueStatus == "done"? "#70e574" : root.queueStatus == "error"? "#ed7676" : "#f6a00b";
+    }
+    BasicText {
+        visible: root.queueStatus.length > 0 && parent.width > width + 6 * dpiScale;
+        x: 3 * dpiScale;
+        y: 4 * dpiScale;
+        leftPadding: 0;
+        font.pixelSize: 10 * dpiScale;
+        color: root.queueStatus == "done"? "#70e574" : root.queueStatus == "error"? "#ed7676" : "#f6a00b";
+        text: root.queueStatus == "done"? qsTr("Done") : root.queueStatus == "error"? qsTr("Error")
+            : root.queueStatus == "rendering" || root.queueStatus == "processing"? qsTr("Rendering") : qsTr("Queued");
     }
 }

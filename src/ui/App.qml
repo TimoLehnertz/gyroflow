@@ -185,16 +185,20 @@ Rectangle {
                     x: 10 * dpiScale;
                     visible: exportbar.rangeCount > 1;
                     anchors.verticalCenter: parent.verticalCenter;
-                    width: visible? 250 * dpiScale : 0;
+                    width: visible? 165 * dpiScale : 0;
                     height: 28 * dpiScale;
                     font.pixelSize: 12 * dpiScale;
-                    // Ranges with their own settings can only be exported as separate videos, so it's one choice
+                    // Ranges with their own settings can only be exported as separate videos, so it's one choice.
+                    // The list explains them, the box shows a short name
                     model: [QT_TRANSLATE_NOOP("Popup", "One video per range"), QT_TRANSLATE_NOOP("Popup", "One video per range, separate settings"), QT_TRANSLATE_NOOP("Popup", "Join ranges into one video")];
+                    displayText: [qsTr("Per range"), qsTr("Per range, own settings"), qsTr("Joined")][currentIndex] || "";
                     currentIndex: videoArea.separateRangeSettings? 1 : exportbar.separateRanges? 0 : 2;
                     onActivated: (index) => {
                         videoArea.setSeparateRangeSettings(index == 1);
                         exportSettings.item.exportTrimsSeparately.checked = index != 2;
                         currentIndex = Qt.binding(() => videoArea.separateRangeSettings? 1 : exportbar.separateRanges? 0 : 2);
+                        // A queued video is rendered in the new mode: the whole video joined, or every range on its own
+                        Qt.callLater(mediaPanel.saveCurrentSettings);
                     }
                     tooltip: qsTr("Export every trim range as its own video, with the same or with its own stabilization and export settings, or all of them joined into one video");
                 }
@@ -204,9 +208,10 @@ Rectangle {
                     anchors.verticalCenter: (isMobileLayout? undefined : parent.verticalCenter);
                     anchors.verticalCenterOffset: -1 * dpiScale;
                     text: exportbar.separateRanges && exportbar.rangeCount > 1 && videoArea.timeline.activeTrimRange >= 0?
-                          qsTr("Output of range %1:").arg(videoArea.timeline.activeTrimRange + 1) : qsTr("Output path:");
+                          qsTr("Range %1:").arg(videoArea.timeline.activeTrimRange + 1) : qsTr("Output:");
                     position: isMobileLayout? Label.TopPosition : Label.LeftPosition;
-                    width: parent.width - (isMobileLayout? 0 : renderBtnRow.width + 10 * dpiScale) - x - 10 * dpiScale;
+                    // The path is shown elided, it doesn't need the whole bar
+                    width: Math.min(380 * dpiScale, parent.width - (isMobileLayout? 0 : renderBtnRow.width + 10 * dpiScale) - x - 10 * dpiScale);
                     OutputPathField {
                         id: outputFile;
                         onFolderUrlChanged: {
@@ -233,7 +238,8 @@ Rectangle {
                         width: 0; height: 0; visible: false;
 
                         // Whether the item loaded in the main view is in the render queue right now
-                        readonly property bool isQueued: mediaPanel.currentJobId > 0;
+                        // Any of its keys is queued (also while their jobs are added, see `mediaPanel.keyStates`)
+                        readonly property bool isQueued: Object.keys(mediaPanel.keyStates).length > 0;
                         property bool allowFile: false;
                         property bool allowLens: false;
                         property bool allowSync: false;
@@ -268,9 +274,23 @@ Rectangle {
                             if (renderBtn.isQueued) {
                                 mediaPanel.unqueueLoadedFile();
                             } else {
-                                renderBtn.startAction("queue");
+                                renderBtn.queueOnly(-1);
                             }
                         }
+                        // The trim range "Queue" adds, -1 for all of them
+                        property int queueRange: -1;
+                        function queueOnly(range: int): void {
+                            renderBtn.queueRange = range;
+                            renderBtn.startAction("queue");
+                        }
+                        // With the trim ranges exported as separate videos, the queue button is about the active range
+                        readonly property bool queuePerRange: canChooseRange && render_queue.editing_job_id <= 0;
+                        readonly property int activeRange: videoArea.timeline.activeTrimRange;
+                        // The queue state of the ranges, by the ids the timeline has for them (see `mediaPanel.keyStates`)
+                        function rangeUid(i: int): string { const r = videoArea.timeline.trimRanges[i]; return r && r[2]? (r[2].uid || "") : ""; }
+                        readonly property string activeRangeState: mediaPanel.keyStates[rangeUid(activeRange)] || "";
+                        readonly property bool activeRangeQueued: activeRangeState.length > 0;
+                        readonly property int queuedRangeCount: videoArea.timeline.trimRanges.filter((x, i) => !!mediaPanel.keyStates[rangeUid(i)]).length;
                         function stabilizeNow(): void { renderBtn.stabilizeRange(-1); }
                         function stabilizeRange(range: int): void {
                             renderBtn.directRange = range;
@@ -402,7 +422,7 @@ Rectangle {
                                 if (renderBtn.pendingAction == "queue") {
                                     // The media list is the single source of truth for the queue, so instead of creating
                                     // a job here, queue the loaded item there. Saving an edited job still goes directly.
-                                    if (render_queue.editing_job_id > 0 || mediaPanel.queueLoadedFile() <= 0) {
+                                    if (render_queue.editing_job_id > 0 || mediaPanel.queueLoadedFile(renderBtn.queueRange) <= 0) {
                                         render_queue.add(window.getAdditionalProjectDataJson(), controller.image_to_b64(result.image));
                                     }
                                     renderBtn.addQueueDelayed = true;
@@ -477,19 +497,56 @@ Rectangle {
                     // The queue actions are always visible, not hidden behind a dropdown
                     Button {
                         id: queueToggleBtn;
-                        accent: !renderBtn.isQueued;
-                        accentColor: renderBtn.isQueued? "#f6a00b" : styleAccentColor;
+                        // Queued: the video, or with the trim ranges exported as separate videos, all of them (or the active one
+                        // when only some of them are)
+                        readonly property bool queued: !renderBtn.queuePerRange? renderBtn.isQueued
+                                                      : renderBtn.queuedRangeCount >= exportbar.rangeCount || (renderBtn.queuedRangeCount > 0 && renderBtn.activeRangeQueued);
+                        accent: !queued;
+                        accentColor: queued? "#f6a00b" : styleAccentColor;
                         height: 32 * dpiScale;
                         font.pixelSize: 12 * dpiScale;
-                        icon.width: 14 * dpiScale;
-                        icon.height: 14 * dpiScale;
-                        iconName: renderBtn.addQueueDelayed? "confirmed" : renderBtn.isQueued? "close" : "queue";
+                        icon.width: 12 * dpiScale;
+                        icon.height: 12 * dpiScale;
+                        iconName: renderBtn.addQueueDelayed? "confirmed" : queued? "minus" : "plus";
                         enabled: renderBtn.canExport && !renderBtn.addQueueDelayed;
-                        text: renderBtn.addQueueDelayed? qsTr("Added to queue")
+                        text: renderBtn.addQueueDelayed? qsTr("Added")
                             : render_queue.editing_job_id > 0? qsTr("Save")
-                            : renderBtn.isQueued? qsTr("Remove from render queue")
-                            : qsTr("Add to render queue");
-                        onClicked: renderBtn.toggleQueue();
+                            : qsTr("Queue");
+                        tooltip: render_queue.editing_job_id > 0? qsTr("Save the changes to the job in the render queue")
+                               : renderBtn.queuePerRange? qsTr("Add trim ranges to the render queue or remove them")
+                               : queued? qsTr("Remove from the render queue") : qsTr("Add to the render queue");
+                        rightPadding: renderBtn.queuePerRange? 30 * dpiScale : leftPadding;
+                        onClicked: {
+                            if (renderBtn.queuePerRange) queueMenu.popup(queueToggleBtn, 0, -queueMenu.height);
+                            else renderBtn.toggleQueue();
+                        }
+                        DropdownChevron { visible: renderBtn.queuePerRange; opened: queueMenu.visible; color: queueToggleBtn.textColor; }
+                        Components.Menu {
+                            id: queueMenu;
+                            Action {
+                                iconName: renderBtn.activeRangeQueued? "minus" : "plus";
+                                text: renderBtn.activeRangeQueued? qsTr("Remove range %1 from the queue").arg(renderBtn.activeRange + 1)
+                                                                 : qsTr("Add range %1 to the queue").arg(renderBtn.activeRange + 1);
+                                enabled: !renderBtn.activeRangeQueued || ["rendering", "processing"].indexOf(renderBtn.activeRangeState) < 0;
+                                onTriggered: {
+                                    if (renderBtn.activeRangeQueued) mediaPanel.unqueueLoadedRange(renderBtn.activeRange);
+                                    else renderBtn.queueOnly(renderBtn.activeRange);
+                                }
+                            }
+                            QQC.MenuSeparator { verticalPadding: 5 * dpiScale; }
+                            Action {
+                                iconName: "plus";
+                                text: qsTr("Add all %1 ranges").arg(exportbar.rangeCount);
+                                enabled: renderBtn.queuedRangeCount < exportbar.rangeCount;
+                                onTriggered: renderBtn.queueOnly(-1);
+                            }
+                            Action {
+                                iconName: "minus";
+                                text: qsTr("Remove all ranges from the queue");
+                                enabled: renderBtn.isQueued;
+                                onTriggered: mediaPanel.unqueueLoadedFile();
+                            }
+                        }
                     }
                     Button {
                         id: stabilizeNowBtn;
@@ -533,24 +590,28 @@ Rectangle {
                             Action { iconName: "save"; text: qsTr("Export project file"); onTriggered: window.saveProject("WithGyroData"); }
                             Action { iconName: "save"; text: qsTr("Save project file"); enabled: controller.project_file_url != ""; onTriggered: window.saveProject(""); }
                             Action { iconName: "settings"; text: qsTr("Create settings preset"); onTriggered: renderBtn.openSettingsSelector("preset"); }
-                            Action { iconName: "queue"; text: qsTr("Apply settings to the queue"); enabled: render_queue.queue.rowCount() > 0; onTriggered: renderBtn.openSettingsSelector("apply"); }
                             QQC.MenuSeparator { verticalPadding: 5 * dpiScale; }
-                            // The stabilization settings shown in the main view, to the other trim ranges of the video or to the other videos
-                            Action {
-                                iconName: "gyroflow";
-                                text: qsTr("Apply stabilization settings to all ranges of this clip");
-                                enabled: videoArea.separateRangeSettings;
-                                onTriggered: {
-                                    videoArea.applySettingsToAllRanges();
-                                    mediaPanel.saveCurrentSettings();
-                                    showNotification(Modal.Success, qsTr("Stabilization settings applied to all trim ranges of this video."));
+                            // The settings shown in the main view, to the queue, the other trim ranges of the video or the other videos
+                            Components.Menu {
+                                title: qsTr("Apply settings to…");
+                                Action { iconName: "queue"; text: qsTr("The render queue…"); enabled: render_queue.queue.rowCount() > 0; onTriggered: renderBtn.openSettingsSelector("apply"); }
+                                QQC.MenuSeparator { verticalPadding: 5 * dpiScale; }
+                                Action {
+                                    iconName: "gyroflow";
+                                    text: qsTr("All ranges of this clip (stabilization)");
+                                    enabled: videoArea.separateRangeSettings;
+                                    onTriggered: {
+                                        videoArea.applySettingsToAllRanges();
+                                        mediaPanel.saveCurrentSettings();
+                                        showNotification(Modal.Success, qsTr("Stabilization settings applied to all trim ranges of this video."));
+                                    }
                                 }
-                            }
-                            Action {
-                                iconName: "gyroflow";
-                                text: qsTr("Apply stabilization settings to all other clips");
-                                enabled: videoArea.vid.loaded;
-                                onTriggered: mediaPanel.applyStabilizationToAll();
+                                Action {
+                                    iconName: "gyroflow";
+                                    text: qsTr("All other clips (stabilization)");
+                                    enabled: videoArea.vid.loaded;
+                                    onTriggered: mediaPanel.applyStabilizationToAll();
+                                }
                             }
                         }
                     }

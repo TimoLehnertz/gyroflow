@@ -277,6 +277,7 @@ pub struct RenderQueue {
 
     file_exists_in_folder: qt_method!(fn(&self, folder: QUrl, filename: QString) -> bool),
     move_item: qt_method!(fn(&mut self, job_id: u32, step: i32)),
+    add_range_job: qt_method!(fn(&mut self, base_job_id: u32, output: String) -> u32),
 
     save_render_queue: qt_method!(fn(&self)),
     restore_render_queue: qt_method!(fn(&mut self, additional_data: String) -> bool),
@@ -617,6 +618,54 @@ impl RenderQueue {
     /// a job for each of the others right after it. They all share the stabilizer of `job_id`, so the video is loaded, synchronized and
     /// its smoothing computed only once for all of its trim ranges. A range with `own_settings` (its own stabilization settings) gets
     /// its own copy of the loaded stabilizer instead, the settings are applied to its job afterwards. Returns the ids of the jobs
+    /// One more job of a video that's already in the queue (`output` like an item of `split_job_by_ranges`), sharing the
+    /// loaded video of `base_job_id`, another job of the video. That one can be rendering or rendered already, the new job
+    /// starts from the beginning. It's added after the last job of the video, so its jobs stay together in the order they
+    /// were added
+    pub fn add_range_job(&mut self, base_job_id: u32, output: String) -> u32 {
+        let output = serde_json::from_str::<serde_json::Value>(&output).unwrap_or_default();
+        let Some(base) = self.jobs.get(&base_job_id) else { return 0; };
+        let base_index = base.queue_index;
+        let input_file = self.queue.borrow().iter().nth(base_index).map(|x| x.input_file.clone()).unwrap_or_default();
+        let insert_index = self.queue.borrow().iter().enumerate().filter(|(_, x)| x.input_file == input_file).map(|(i, _)| i + 1).max().unwrap_or(base_index + 1);
+        let own_settings = output.get("own_settings").and_then(|x| x.as_bool()).unwrap_or_default();
+        let (stab, gyro_outdated, prepared) = if own_settings {
+            (Arc::new(base.stab.get_cloned()), Arc::new(AtomicBool::new(base.gyro_outdated.load(SeqCst))), Default::default())
+        } else {
+            (base.stab.clone(), base.gyro_outdated.clone(), base.prepared.clone())
+        };
+        let job = Job {
+            queue_index: insert_index,
+            render_options: base.render_options.clone(),
+            additional_data: base.additional_data.clone(),
+            cancel_flag: Default::default(),
+            project_data: None,
+            stab,
+            gyro_outdated,
+            prepared
+        };
+        let Some(mut itm) = self.queue.borrow().iter().nth(base_index).cloned() else { return 0; };
+        let new_id = fastrand::u32(1..2147483640);
+        self.jobs.insert(new_id, job);
+        itm.job_id = new_id;
+        itm.current_frame = 0;
+        itm.error_string = QString::default();
+        itm.processing_info = QString::default();
+        itm.processing_progress = 0.0;
+        itm.frame_times.clear();
+        itm.status = JobStatus::Queued;
+        self.queue.borrow_mut().insert(insert_index, itm);
+        self.update_queue_indices();
+
+        let range_index = output.get("range_index").and_then(|x| x.as_i64()).filter(|x| *x >= 0).map(|x| x as i32).unwrap_or(-1);
+        let folder   = output.get("output_folder").and_then(|x| x.as_str()).unwrap_or_default().to_owned();
+        let filename = output.get("output_filename").and_then(|x| x.as_str()).unwrap_or_default().to_owned();
+        self.set_job_output(new_id, range_index, folder, filename);
+        self.update_queue_indices();
+        self.queue_changed();
+        new_id
+    }
+
     pub fn split_job_by_ranges(&mut self, job_id: u32, outputs: String) -> QVariantList {
         let outputs = serde_json::from_str::<Vec<serde_json::Value>>(&outputs).unwrap_or_default();
         let mut ids = Vec::new();
