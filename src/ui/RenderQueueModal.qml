@@ -167,6 +167,8 @@ Item {
             clip: true;
             spacing: 5 * dpiScale;
             model: render_queue.queue;
+            // Dragging an item mustn't scroll the list instead (it took the drag over on macOS, which canceled it)
+            interactive: !isDragging;
             QQC.ScrollIndicator.vertical: QQC.ScrollIndicator { }
 
             BasicText {
@@ -322,7 +324,9 @@ Item {
                             anchors.fill: parent;
                             hoverEnabled: true;
                             cursorShape: Qt.SizeVerCursor;
-                            drag.target: dlg.dragging? dlg : undefined;
+                            // The list mustn't take the drag over, which cancels it
+                            preventStealing: true;
+                            drag.target: dlg;
                             drag.axis: Drag.YAxis;
                             onPressed: {
                                 dlg.dragStartY = dlg.y;
