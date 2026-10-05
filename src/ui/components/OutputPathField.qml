@@ -35,16 +35,30 @@ TextField {
     // The owner resolves the path again, eg. with the extension of a new codec
     signal resolveRequested();
 
-    onTextChanged: {
-        // When typing manually
-        if (!preventChange) {
-            if (root.pathMode) {
-                root.pathEdited(text);
-            } else if (isSandboxed) {
-                setFilename(text.replace(/^.+\//, ""));
-            } else {
-                setUrl(filesystem.path_to_url(text));
-            }
+    // Typed text is only applied when editing is finished (Enter or leaving the field), Escape reverts it.
+    // Applying it on every key press resolved and rewrote the path while typing, eg. a deleted slash came right back
+    property bool edited: false;
+    property string textBeforeEdit: "";
+    onTextChanged: if (!preventChange) edited = true;
+    onActiveFocusChanged: if (activeFocus && !edited) textBeforeEdit = text;
+    onEditingFinished: commit();
+    Keys.onEscapePressed: (event) => {
+        if (!edited) { event.accepted = false; return; }
+        preventChange = true;
+        text = textBeforeEdit;
+        preventChange = false;
+        edited = false;
+    }
+    function commit(): void {
+        if (!edited) return;
+        edited = false;
+        textBeforeEdit = text;
+        if (root.pathMode) {
+            root.pathEdited(text);
+        } else if (isSandboxed) {
+            setFilename(text.replace(/^.+\//, ""));
+        } else {
+            setUrl(filesystem.path_to_url(text));
         }
     }
 
@@ -54,13 +68,16 @@ TextField {
         folderUrl = folder;
         filename = fname;
         fullFileUrl = "";
-        if (path) text = path;
+        // Don't type over what the user is editing
+        if (path && !edited) { text = path; textBeforeEdit = path; }
         preventChange = false;
     }
     // A path picked in one of the dialogs, shown as it is and reported to the owner of the path
     function setPathFromDialog(path: string): void {
         preventChange = true;
         text = path;
+        textBeforeEdit = path;
+        edited = false;
         preventChange = false;
         root.pathEdited(path);
     }
@@ -70,6 +87,7 @@ TextField {
     }
 
     function updateText(): void {
+        if (edited) return;
         preventChange = true;
         if (!filename && root.folderOnly && root.folderUrl.toString()) {
             text = filesystem.display_folder_filename(root.folderUrl, filename);
@@ -81,6 +99,7 @@ TextField {
     }
 
     function setUrl(url: url): void {
+        root.edited = false;
         if (root.pathMode) {
             root.setPathFromDialog(filesystem.url_to_path(url));
             return;
@@ -104,6 +123,7 @@ TextField {
         }
     }
     function setFolder(folder: url): void {
+        root.edited = false;
         if (root.pathMode) {
             if (folder.toString()) root.setPathFromDialog(filesystem.url_to_path(filesystem.get_file_url(folder, filename, false)));
             return;

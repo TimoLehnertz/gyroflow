@@ -176,10 +176,10 @@ Item {
         trimRanges.splice(i, 1);
         root.cleanupTrimRanges();
     }
+    // Only the info of the range changes, `trimRangesChanged` would set the ranges in the stabilizer again and recompute
     function setTrimRangeOutputPath(i: int, path: string): void {
         if (i < 0 || i >= trimRanges.length) return;
         trimRangeInfo(i).output_path = path;
-        root.trimRangesChanged();
     }
     function getTrimRanges(): list<var> {
         if (trimRanges.length > 0) {

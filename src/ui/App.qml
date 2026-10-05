@@ -254,6 +254,8 @@ Rectangle {
                         Timer { id: delayAddQueue; interval: 2000; onTriggered: renderBtn.addQueueDelayed = false; }
 
                         function startAction(action: string): void {
+                            // A path that's still being typed is the one to render to
+                            outputFile.commit();
                             renderBtn.pendingAction = action;
                             renderBtn.allowFile = false;
                             renderBtn.allowLens = false;

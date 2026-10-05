@@ -101,6 +101,8 @@ ResizablePanel {
 
     function loadItem(itemId: int): void {
         if (itemId <= 0 || itemId == media_library.current_item) return;
+        // A path that's still being typed belongs to the item that's shown now
+        if (window.outputFile) window.outputFile.commit();
         root.saveCurrentSettings();
         media_library.set_current_item(itemId);
         root.loadItemSettings(itemId);
@@ -190,14 +192,16 @@ ResizablePanel {
         if (range >= 0) {
             // It's part of the settings of the video, like the trim range itself
             window.videoArea.timeline.setTrimRangeOutputPath(range, path);
-            root.showOutputPath(id, path, false);
+            // An emptied path gets the default one of the range again
+            root.assignRangePaths();
             root.saveCurrentSettings();
         } else {
             media_library.set_output_path(id, path);
-            root.showOutputPath(id, path, false);
             root.updateQueuedJob(id);
         }
         root.updatingOutput = false;
+        // Show the path as it's stored now
+        root.updateOutputFile();
     }
     Connections {
         target: window.outputFile;
