@@ -68,6 +68,18 @@ ResizablePanel {
             }
         }
     }
+    // The trim ranges are edited in the main view: the list shows them (the mini timeline of the video) and the render
+    // queue follows them (eg. the key of a deleted range leaves it), so the settings of the item are saved as they change
+    Connections {
+        target: window.videoArea? window.videoArea.timeline : null;
+        function onTrimRangesChanged(): void { rangesSaveTimer.restart(); }
+    }
+    Timer {
+        id: rangesSaveTimer;
+        interval: 300;
+        // Not while the settings of an item are still being applied to the main view
+        onTriggered: if (!window.videoArea.pendingGyroflowData) root.saveCurrentSettings();
+    }
     property int itemBeforeJoin: 0;
     function joinSplitRecordings(join: bool): void {
         const loaded = window.videoArea.loadedFileUrl.toString();
@@ -248,6 +260,13 @@ ResizablePanel {
         }
         if (rest.length) media_library.add_dropped(rest.join("\n"));
         if (rest.length) root.rememberMediaFolder(rest[0].toString());
+        // A dropped video is opened right away (a dropped folder is only added to the list)
+        const openId = rest.map(u => media_library.find_by_url(u)).find(x => x > 0);
+        if (openId) {
+            media_library.select_only(openId);
+            root.lastClickedId = openId;
+            root.loadItem(openId);
+        }
         if (jsons.length) root.openImportMarkers(jsons[0]);
     }
     function applyImportedMarkers(offsetHours: real, queue: bool): void {
@@ -832,6 +851,15 @@ ResizablePanel {
                         ]);
                     }
                 }
+                // Shown again with the button at the left of the bottom bar
+                LinkButton {
+                    width: 32 * dpiScale;
+                    height: 32 * dpiScale;
+                    leftPadding: 0; rightPadding: 0;
+                    iconName: "chevron-left";
+                    tooltip: qsTr("Hide the media list");
+                    onClicked: window.mediaPanelShown = false;
+                }
             }
         }
 
@@ -941,11 +969,13 @@ ResizablePanel {
             property bool isJobDone:    job_status == "done";
             property bool isBusy: dlg.isRendering || dlg.isProcessing;
             // Being in the render queue is shown independently of the selection, an item can be both
-            property bool isInQueue: job_id > 0;
+            property bool isInQueue: queue_state.length > 0;
 
             color: selected?     "#33ffffff"
                  : isJobError?   "#30ed7676"
                  : isQuestion?   "#30" + styleAccentColor.toString().substring(1)
+                 // All of it is in the render queue (all of its trim ranges, or the whole video)
+                 : queue_state == "all"? Qt.rgba(styleQueuedColor.r, styleQueuedColor.g, styleQueuedColor.b, 0.2)
                  : stabilized_state == 1? "#3070e574"
                  : stabilized_state == 2? "#30f6a00b"
                  : "transparent";
@@ -960,7 +990,7 @@ ResizablePanel {
                 radius: width;
                 x: 1 * dpiScale;
                 anchors.verticalCenter: parent.verticalCenter;
-                color: dlg.isJobError? "#ed7676" : dlg.isJobDone? "#70e574" : styleAccentColor;
+                color: dlg.isJobError? "#ed7676" : dlg.isJobDone? "#70e574" : styleQueuedColor;
             }
 
             MouseArea {
@@ -1176,11 +1206,35 @@ ResizablePanel {
                                 : dlg.isQuestion?    qsTr("Action needed")
                                 : dlg.isProcessing?  qsTr("Synchronizing")
                                 : dlg.isRendering?   (job_progress * 100).toFixed(0) + "%"
-                                : dlg.isQueued?      qsTr("Queued")
+                                : dlg.isQueued?      (queue_state == "some"? qsTr("%1/%2 queued").arg(queued_count).arg(key_count) : qsTr("Queued"))
                                 : dlg.isJobDone?     qsTr("Done")
                                 : stabilized_state == 2? qsTr("Changed")
                                 : stabilized_state == 1? qsTr("Stabilized") : "";
                         }
+                    }
+                }
+                // Where the trim ranges are in the video (for every video with ranges), and which of them are in the render queue:
+                // queued or rendering ones in the queue color, done ones green, failed ones red, the others dim
+                Item {
+                    id: rangeBar;
+                    readonly property var ranges: range_bar? JSON.parse(range_bar) : [];
+                    visible: !dlg.isFolder && !dlg.isPart && ranges.length > 0;
+                    width: parent.width;
+                    height: 16 * dpiScale;
+                    RangeTrack {
+                        x: 24 * dpiScale;
+                        width: parent.width - x;
+                        height: 12 * dpiScale;
+                        anchors.verticalCenter: parent.verticalCenter;
+                        ranges: rangeBar.ranges.map((x, i) => ({
+                            start: x[0], end: x[1],
+                            color: x[2] == "done"? "#70e574"
+                                 : x[2] == "error" || x[2] == "question"? "#ed7676"
+                                 : x[2]? styleQueuedColor
+                                 : Qt.rgba(styleTextColor.r, styleTextColor.g, styleTextColor.b, 0.35),
+                            tooltip: qsTr("Range %1").arg(i + 1) + ": " + (x[2] == "done"? qsTr("Done") : x[2] == "error"? qsTr("Error")
+                                   : x[2] == "rendering" || x[2] == "processing"? qsTr("Rendering") : x[2]? qsTr("Queued") : qsTr("Not queued"))
+                        }));
                     }
                 }
                 QQC.ProgressBar {
@@ -1631,46 +1685,6 @@ ResizablePanel {
         onAccepted: {
             if (selectedFiles.length) media_library.add_dropped(Array.from(selectedFiles, x => x.toString()).join("\n"));
             if (selectedFiles.length) root.rememberMediaFolder(selectedFiles[0].toString());
-        }
-    }
-
-    Rectangle {
-        id: dropRect;
-        anchors.fill: parent;
-        anchors.margins: 5 * dpiScale;
-        color: styleBackground;
-        radius: 5 * dpiScale;
-        opacity: da.containsDrag? 0.85 : 0.0;
-        visible: opacity > 0;
-        Ease on opacity { duration: 300; }
-        BasicText {
-            anchors.centerIn: parent;
-            width: parent.width - 20 * dpiScale;
-            horizontalAlignment: Text.AlignHCenter;
-            wrapMode: Text.WordWrap;
-            font.pixelSize: 16 * dpiScale;
-            text: qsTr("Drop files or folders here");
-        }
-        Loader {
-            anchors.fill: parent;
-            anchors.margins: 5 * dpiScale;
-            asynchronous: true;
-            sourceComponent: Component { DropTargetRect { } }
-        }
-    }
-    DropArea {
-        id: da;
-        anchors.fill: parent;
-        property var pendingUrls: [];
-        onEntered: (drag) => {
-            da.pendingUrls = Util.collectDropUrls(drag);
-            drag.accepted = da.pendingUrls.length > 0;
-        }
-        onDropped: (drop) => {
-            let urls = Util.collectDropUrls(drop);
-            if (!urls.length) urls = da.pendingUrls;
-            da.pendingUrls = [];
-            root.handleDroppedUrls(urls);
         }
     }
 

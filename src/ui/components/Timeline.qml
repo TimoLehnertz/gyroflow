@@ -140,6 +140,13 @@ Item {
         }
         Qt.callLater(root.cleanupTrimRanges);
     }
+    // Both ends at once, when the whole range is dragged
+    function moveTrimRange(i: int, start: real, end: real): void {
+        if (i < 0 || i >= trimRanges.length) return;
+        trimRanges[i][0] = Math.max(0.0, start);
+        trimRanges[i][1] = Math.min(1.0, end);
+        Qt.callLater(root.cleanupTrimRanges);
+    }
     // Splits the range the position is in, otherwise adds a new range starting there (10 s, or until the next range)
     function addTrimRange(pos: real): void {
         const length = orgDurationMs > 0? 10000 / orgDurationMs : 0.1;
@@ -929,6 +936,7 @@ Item {
             anchors.fill: parent;
             clip: true;
             Repeater {
+                id: rangeIndicators;
                 model: root.trimRanges;
                 TimelineRangeIndicator {
                     trimStart: modelData[0];
@@ -936,8 +944,6 @@ Item {
                     isActive: index == root.activeTrimRange;
                     // Where ranges overlap, the smaller one is on top, so it can be clicked and its ends dragged
                     z: 1 - (modelData[1] - modelData[0]);
-                    // Its key in the render queue (by its id), or the one of the whole video when the ranges are joined into one
-                    queueStatus: window.mediaPanel? (window.mediaPanel.keyStates[(modelData[2] || { }).uid || "-"] || window.mediaPanel.keyStates[""] || "") : "";
                     y: (root.fullScreen || window.isMobileLayout? 0 : 35) * dpiScale;
                     height: parent.height - y;
 
@@ -947,19 +953,37 @@ Item {
                         if (mapToVisibleArea(dragPos) < 0 && dragPos >= 0) {
                             scrollbar.position = root.visibleAreaLeft = dragPos;
                         }
-                        if (!vid.playing) root.setPosition(dragPos);
+                        if (!vid.playing && !moving) root.setPosition(dragPos);
                     }
                     onTrimEndAdjustmentChanged: {
                         const dragPos = Math.min(1, trimEnd + trimEndAdjustment);
                         if (mapToVisibleArea(dragPos) > 1 && dragPos <= 1) {
                             root.visibleAreaRight = dragPos;
                         }
-                        if (!vid.playing) root.setPosition(dragPos);
+                        if (!vid.playing && !moving) root.setPosition(dragPos);
                     }
                     visible: root.trimActive;
                     onChangeTrimStart: (val) => { root.setTrimStart(index, val); };
                     onChangeTrimEnd:   (val) => { root.setTrimEnd  (index, val); };
+                    onMoveRange: (start, end) => { root.moveTrimRange(index, start, end); };
                     onReset: root.resetTrim();
+                }
+            }
+            // Ranges in the render queue are marked above them: in the queue color, done ones green, failed ones red.
+            // By the key of the range (its id), or the one of the whole video when the ranges are joined into one
+            Repeater {
+                model: root.trimRanges;
+                Rectangle {
+                    readonly property Item range: rangeIndicators.count > index? rangeIndicators.itemAt(index) : null;
+                    readonly property string status: window.mediaPanel? (window.mediaPanel.keyStates[(modelData[2] || { }).uid || "-"] || window.mediaPanel.keyStates[""] || "") : "";
+                    visible: root.trimActive && !!range && status.length > 0;
+                    x: range? range.x : 0;
+                    width: range? range.width : 0;
+                    y: range? range.y - height - 2 * dpiScale : 0;
+                    z: 2;
+                    height: 3 * dpiScale;
+                    radius: height / 2;
+                    color: status == "done"? "#70e574" : status == "error" || status == "question"? "#ed7676" : styleQueuedColor;
                 }
             }
         }

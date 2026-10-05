@@ -302,31 +302,14 @@ Item {
                             text: videoCol.name;
                             font.pixelSize: 12 * dpiScale;
                         }
-                        Item {
-                            id: track;
+                        // The same mini timeline as in the media list
+                        RangeTrack {
                             width: parent.width;
-                            height: 16 * dpiScale;
-                            Rectangle {
-                                anchors.fill: parent;
-                                radius: 3 * dpiScale;
-                                color: "#18ffffff";
-                            }
-                            Repeater {
-                                model: videoCol.sections;
-                                Rectangle {
-                                    x: track.width * modelData.start;
-                                    width: Math.max(2 * dpiScale, track.width * Math.max(0, modelData.end - modelData.start));
-                                    height: track.height;
-                                    radius: 3 * dpiScale;
-                                    color: styleAccentColor;
-                                    opacity: 0.85;
-                                    ToolTip {
-                                        visible: !isMobile && ma.containsMouse;
-                                        text: modelData.label || modelData.path || modelData.name || qsTr("Trim range");
-                                    }
-                                    MouseArea { id: ma; anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.NoButton; }
-                                }
-                            }
+                            height: 14 * dpiScale;
+                            ranges: videoCol.sections.map(x => ({
+                                start: x.start, end: x.end,
+                                tooltip: x.label || x.path || x.name || qsTr("Trim range")
+                            }));
                         }
                         BasicText {
                             width: parent.width;

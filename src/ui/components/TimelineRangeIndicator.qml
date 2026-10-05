@@ -12,16 +12,17 @@ Rectangle {
     property real trimEndAdjustment: 0;
     // The range the playhead is in, or the last one it was in (whose settings and output path are shown)
     property bool isActive: true;
-    // Status of the render job of this range when it's in the render queue ("queued", "rendering", "done", ...), empty otherwise
-    property string queueStatus: "";
 
-    property bool active: rightTrimDrag.active || leftTrimDrag.active;
+    property bool active: rightTrimDrag.active || leftTrimDrag.active || moveDrag.active;
+    // The whole range is dragged (the playhead stays where it is, unlike when one of its ends is dragged)
+    readonly property bool moving: moveDrag.active;
 
     x: parent.width * mapToVisibleArea(Math.max(0.0, trimStart + trimStartAdjustment));
     width: Math.max(10, parent.width * mapToVisibleArea(Math.min(1.0, trimEnd + trimEndAdjustment)) - x);
-    color: isActive? Qt.rgba(styleAccentColor.r, styleAccentColor.g, styleAccentColor.b, 0.22) : "#12ffffff";
+    // The active range has its own color, the accent color (blue) is too close to the color of what's queued
+    color: isActive? Qt.rgba(styleActiveRangeColor.r, styleActiveRangeColor.g, styleActiveRangeColor.b, 0.22) : "#12ffffff";
     border.width: 2 * dpiScale;
-    border.color: isActive? styleAccentColor : Qt.rgba(styleAccentColor.r, styleAccentColor.g, styleAccentColor.b, 0.4);
+    border.color: isActive? styleActiveRangeColor : Qt.rgba(styleActiveRangeColor.r, styleActiveRangeColor.g, styleActiveRangeColor.b, 0.4);
     radius: 3 * dpiScale;
     clip: true;
     function mapToVisibleArea(v: real): real { return parent.parent.parent.mapToVisibleArea(v); }
@@ -30,6 +31,8 @@ Rectangle {
 
     signal changeTrimStart(real val);
     signal changeTrimEnd(real val);
+    // The whole range was dragged to `start` (its length stays)
+    signal moveRange(real start, real end);
     signal reset();
 
 
@@ -96,21 +99,49 @@ Rectangle {
         }
     }
 
-    // Queued ranges are marked, so it's visible which ones are rendered
+    // Grabbing the top middle moves the whole range, its length stays and it stays within the video
     Rectangle {
-        visible: root.queueStatus.length > 0;
-        width: parent.width;
-        height: 3 * dpiScale;
-        color: root.queueStatus == "done"? "#70e574" : root.queueStatus == "error"? "#ed7676" : "#f6a00b";
-    }
-    BasicText {
-        visible: root.queueStatus.length > 0 && parent.width > width + 6 * dpiScale;
-        x: 3 * dpiScale;
+        id: moveGrip;
+        visible: root.width > width + 24 * dpiScale;
+        anchors.horizontalCenter: parent.horizontalCenter;
         y: 4 * dpiScale;
-        leftPadding: 0;
-        font.pixelSize: 10 * dpiScale;
-        color: root.queueStatus == "done"? "#70e574" : root.queueStatus == "error"? "#ed7676" : "#f6a00b";
-        text: root.queueStatus == "done"? qsTr("Done") : root.queueStatus == "error"? qsTr("Error")
-            : root.queueStatus == "rendering" || root.queueStatus == "processing"? qsTr("Rendering") : qsTr("Queued");
+        width: 33 * dpiScale;
+        height: 9 * dpiScale;
+        radius: height / 2;
+        color: root.border.color;
+        opacity: moveMa.containsMouse || moveDrag.active? 1 : 0.7;
+        Item {
+            anchors.fill: parent;
+            anchors.margins: (isMobile? -12 : -6) * dpiScale;
+            MouseArea {
+                id: moveMa;
+                anchors.fill: parent;
+                hoverEnabled: true;
+                acceptedButtons: Qt.NoButton;
+                cursorShape: Qt.SizeAllCursor;
+            }
+            DragHandler {
+                id: moveDrag;
+                target: null;
+                xAxis.enabled: true;
+                yAxis.enabled: false;
+                property real offset: 0;
+                onActiveChanged: {
+                    if (!active) {
+                        root.moveRange(root.trimStart + offset, root.trimEnd + offset);
+                        root.trimStartAdjustment = 0;
+                        root.trimEndAdjustment = 0;
+                        offset = 0;
+                    }
+                }
+                onActiveTranslationChanged: {
+                    const delta = (moveDrag.activeTranslation.x / root.parent.width) * root.visibleRange;
+                    offset = Math.max(-root.trimStart, Math.min(1.0 - root.trimEnd, delta));
+                    root.trimEndAdjustment = offset;
+                    root.trimStartAdjustment = offset;
+                }
+            }
+        }
     }
+
 }

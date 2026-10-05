@@ -230,16 +230,16 @@ Item {
         onActivated: videoArea.fullScreen = (videoArea.fullScreen + 1) % 3;
     }
 
-    // Toggle the media list, which is also the render queue
+    // Add the active trim range to the render queue or remove it (the whole video without separate ranges)
     Shortcut {
         sequence: "q";
-        onActivated: if (!videoArea.isCalibrator) window.mediaPanelShown = !window.mediaPanelShown;
+        onActivated: if (!videoArea.isCalibrator) window.renderBtn.toggleActiveRange();
     }
-
-    // Add to or remove from the render queue
+    // Add the whole video (all of its ranges) to the render queue, or remove it if all of it is queued. On macOS Ctrl is
+    // Cmd for Qt, and Cmd+Q quits, so it's Control+Q there (Meta for Qt)
     Shortcut {
-        sequence: "Ctrl+Q";
-        onActivated: window.renderBtn.toggleQueue();
+        sequence: Qt.platform.os == "osx"? "Meta+Q" : "Ctrl+Q";
+        onActivated: if (!videoArea.isCalibrator) window.renderBtn.toggleClip();
     }
 
     // Stabilize this video now

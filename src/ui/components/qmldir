@@ -31,6 +31,7 @@ OutputPathField 1.0 OutputPathField.qml
 Popup 1.0 Popup.qml
 PopupDelegate 1.0 PopupDelegate.qml
 RadioButton 1.0 RadioButton.qml
+RangeTrack 1.0 RangeTrack.qml
 ReadoutDirection 1.0 ReadoutDirection.qml
 ResizablePanel 1.0 ResizablePanel.qml
 SearchField 1.0 SearchField.qml

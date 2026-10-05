@@ -969,9 +969,11 @@ Item {
                 onClicked: vidInfo.selectFileRequest();
             }
         }
+        // The main window takes dropped files anywhere in it (App.qml), the calibrator only here
         DropArea {
             id: da;
             anchors.fill: dropRect;
+            enabled: isCalibrator;
             property var pendingUrls: [];
             onEntered: (drag) => {
                 da.pendingUrls = Util.collectDropUrls(drag);

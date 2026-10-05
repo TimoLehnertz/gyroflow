@@ -99,6 +99,9 @@ impl UITools {
                     engine.set_property("styleButtonColor"      .into(), QString::from("#282828").into());
                     engine.set_property("styleTextColor"        .into(), QString::from("#ffffff").into());
                     engine.set_property("styleAccentColor"      .into(), QString::from("#76baed").into());
+                    // What's in the render queue, everywhere it's shown, and the active trim range, which is different from it
+                    engine.set_property("styleQueuedColor"      .into(), QString::from("#3f83ff").into());
+                    engine.set_property("styleActiveRangeColor" .into(), QString::from("#ffffff").into());
                     engine.set_property("styleVideoBorderColor" .into(), QString::from("#2b2b2b").into());
                     engine.set_property("styleTextColorOnAccent".into(), QString::from("#000000").into());
                     engine.set_property("styleHrColor"          .into(), QString::from("#2e2e2e").into());
@@ -114,6 +117,8 @@ impl UITools {
                     engine.set_property("styleButtonColor"      .into(), QString::from("#fbfbfb").into());
                     engine.set_property("styleTextColor"        .into(), QString::from("#111111").into());
                     engine.set_property("styleAccentColor"      .into(), QString::from("#116cad").into());
+                    engine.set_property("styleQueuedColor"      .into(), QString::from("#1d5fe0").into());
+                    engine.set_property("styleActiveRangeColor" .into(), QString::from("#2b2b2b").into());
                     engine.set_property("styleVideoBorderColor" .into(), QString::from("#d5d5d5").into());
                     engine.set_property("styleTextColorOnAccent".into(), QString::from("#ffffff").into());
                     engine.set_property("styleHrColor"          .into(), QString::from("#e5e5e5").into());

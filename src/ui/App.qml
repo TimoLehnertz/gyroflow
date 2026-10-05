@@ -11,6 +11,7 @@ import "components/"
 // `Menu` is the namespace of the side panels here, the menu component is `Components.Menu`
 import "components/" as Components
 import "menu/" as Menu
+import "Util.js" as Util;
 
 Rectangle {
     id: window;
@@ -180,9 +181,22 @@ Rectangle {
                 // the one of the active range (the one the playhead is in, or was in last) is shown
                 readonly property int rangeCount: videoArea.timeline.trimRanges.length;
                 readonly property bool separateRanges: !!exportSettings.item && exportSettings.item.exportTrimsSeparately.checked;
+                // The media list is hidden with the button in its header, and shown again here
+                LinkButton {
+                    id: showMediaBtn;
+                    visible: !window.mediaPanelShown && !videoArea.isCalibrator;
+                    x: 6 * dpiScale;
+                    anchors.verticalCenter: parent.verticalCenter;
+                    width: visible? 30 * dpiScale : 0;
+                    height: 30 * dpiScale;
+                    leftPadding: 0; rightPadding: 0;
+                    iconName: "chevron-right";
+                    tooltip: qsTr("Show the media list");
+                    onClicked: window.mediaPanelShown = true;
+                }
                 ComboBox {
                     id: rangesModeBox;
-                    x: 10 * dpiScale;
+                    x: showMediaBtn.visible? showMediaBtn.x + showMediaBtn.width + 6 * dpiScale : 10 * dpiScale;
                     visible: exportbar.rangeCount > 1;
                     anchors.verticalCenter: parent.verticalCenter;
                     width: visible? 165 * dpiScale : 0;
@@ -276,6 +290,22 @@ Rectangle {
                             } else {
                                 renderBtn.queueOnly(-1);
                             }
+                        }
+                        // The shortcuts, also written on the queue buttons
+                        readonly property string rangeShortcut: "Q";
+                        readonly property string clipShortcut: Qt.platform.os == "osx"? "⌃Q" : "Ctrl+Q";
+                        readonly property bool allQueued: queuePerRange? queuedRangeCount >= exportbar.rangeCount : isQueued;
+                        // Q: the active range, or the whole video without separate ranges
+                        function toggleActiveRange(): void {
+                            if (!canExport && !isQueued) return;
+                            if (!queuePerRange) return renderBtn.toggleClip();
+                            if (activeRangeQueued) mediaPanel.unqueueLoadedRange(activeRange);
+                            else renderBtn.queueOnly(activeRange);
+                        }
+                        // Ctrl+Q: all of the video, the ranges that aren't queued yet, or out of the queue if all of it is
+                        function toggleClip(): void {
+                            if (renderBtn.allQueued) mediaPanel.unqueueLoadedFile();
+                            else if (canExport) renderBtn.queueOnly(-1);
                         }
                         // The trim range "Queue" adds, -1 for all of them
                         property int queueRange: -1;
@@ -502,7 +532,7 @@ Rectangle {
                         readonly property bool queued: !renderBtn.queuePerRange? renderBtn.isQueued
                                                       : renderBtn.queuedRangeCount >= exportbar.rangeCount || (renderBtn.queuedRangeCount > 0 && renderBtn.activeRangeQueued);
                         accent: !queued;
-                        accentColor: queued? "#f6a00b" : styleAccentColor;
+                        accentColor: queued? styleQueuedColor : styleAccentColor;
                         height: 32 * dpiScale;
                         font.pixelSize: 12 * dpiScale;
                         icon.width: 12 * dpiScale;
@@ -511,7 +541,7 @@ Rectangle {
                         enabled: renderBtn.canExport && !renderBtn.addQueueDelayed;
                         text: renderBtn.addQueueDelayed? qsTr("Added")
                             : render_queue.editing_job_id > 0? qsTr("Save")
-                            : qsTr("Queue");
+                            : qsTr("Queue") + "  (" + renderBtn.rangeShortcut + ")";
                         tooltip: render_queue.editing_job_id > 0? qsTr("Save the changes to the job in the render queue")
                                : renderBtn.queuePerRange? qsTr("Add trim ranges to the render queue or remove them")
                                : queued? qsTr("Remove from the render queue") : qsTr("Add to the render queue");
@@ -525,8 +555,8 @@ Rectangle {
                             id: queueMenu;
                             Action {
                                 iconName: renderBtn.activeRangeQueued? "minus" : "plus";
-                                text: renderBtn.activeRangeQueued? qsTr("Remove range %1 from the queue").arg(renderBtn.activeRange + 1)
-                                                                 : qsTr("Add range %1 to the queue").arg(renderBtn.activeRange + 1);
+                                text: (renderBtn.activeRangeQueued? qsTr("Remove range %1 from the queue").arg(renderBtn.activeRange + 1)
+                                                                  : qsTr("Add range %1 to the queue").arg(renderBtn.activeRange + 1)) + "  (" + renderBtn.rangeShortcut + ")";
                                 enabled: !renderBtn.activeRangeQueued || ["rendering", "processing"].indexOf(renderBtn.activeRangeState) < 0;
                                 onTriggered: {
                                     if (renderBtn.activeRangeQueued) mediaPanel.unqueueLoadedRange(renderBtn.activeRange);
@@ -536,13 +566,13 @@ Rectangle {
                             QQC.MenuSeparator { verticalPadding: 5 * dpiScale; }
                             Action {
                                 iconName: "plus";
-                                text: qsTr("Add all %1 ranges").arg(exportbar.rangeCount);
+                                text: qsTr("Add all %1 ranges").arg(exportbar.rangeCount) + "  (" + renderBtn.clipShortcut + ")";
                                 enabled: renderBtn.queuedRangeCount < exportbar.rangeCount;
                                 onTriggered: renderBtn.queueOnly(-1);
                             }
                             Action {
                                 iconName: "minus";
-                                text: qsTr("Remove all ranges from the queue");
+                                text: qsTr("Remove all ranges from the queue") + (renderBtn.allQueued? "  (" + renderBtn.clipShortcut + ")" : "");
                                 enabled: renderBtn.isQueued;
                                 onTriggered: mediaPanel.unqueueLoadedFile();
                             }
@@ -651,6 +681,48 @@ Rectangle {
             ItemLoader { id: advanced; sourceComponent: Component { Menu.Advanced { } } }
             Hr { id: advancedHr; visible: nlePlugins.active }
             ItemLoader { id: nlePlugins; active: controller.is_nle_installed(); sourceComponent: Component { Menu.NlePlugins { } } }
+        }
+    }
+
+    // Files can be dropped anywhere in the window. The drop area is below the modals, so the ones that take their own
+    // files (eg. the motion data of the video details) still get them
+    DropArea {
+        id: windowDrop;
+        anchors.fill: parent;
+        property var pendingUrls: [];
+        onEntered: (drag) => {
+            windowDrop.pendingUrls = Util.collectDropUrls(drag);
+            drag.accepted = windowDrop.pendingUrls.length > 0;
+        }
+        onDropped: (drop) => {
+            let urls = Util.collectDropUrls(drop);
+            if (!urls.length) urls = windowDrop.pendingUrls;
+            windowDrop.pendingUrls = [];
+            window.handleDroppedUrls(urls);
+        }
+    }
+    Rectangle {
+        anchors.fill: parent;
+        anchors.margins: 10 * dpiScale;
+        z: 50;
+        color: styleBackground;
+        radius: 5 * dpiScale;
+        opacity: windowDrop.containsDrag? 0.85 : 0.0;
+        visible: opacity > 0;
+        Ease on opacity { duration: 300; }
+        BasicText {
+            anchors.centerIn: parent;
+            width: parent.width - 40 * dpiScale;
+            horizontalAlignment: Text.AlignHCenter;
+            wrapMode: Text.WordWrap;
+            font.pixelSize: (window.isMobileLayout? 23 : 30) * dpiScale;
+            text: qsTr("Drop files or folders here");
+        }
+        Loader {
+            anchors.fill: parent;
+            anchors.margins: 5 * dpiScale;
+            asynchronous: true;
+            sourceComponent: Component { DropTargetRect { } }
         }
     }
 

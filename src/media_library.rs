@@ -51,6 +51,14 @@ pub struct MediaItem {
     pub job_count: i32,
     /// Files of a joined video (a split recording), 0 for other videos
     pub part_count: i32,
+    /// How much of the video is in the render queue: "all" of its keys (every trim range, or the whole video), "some" of
+    /// them, or "" (see "Render queue keys")
+    pub queue_state: QString,
+    pub queued_count: i32,
+    pub key_count: i32,
+    /// The trim ranges of the video and their state in the queue, JSON `[[start, end, state]]` with the start and the end
+    /// as a fraction of the duration and the state as in `get_key_states` ("" if it's not queued). Empty without ranges
+    pub range_bar: QString,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -345,7 +353,36 @@ impl MediaLibrary {
             job_id: job.job_id,
             job_count: v.jobs.len() as i32,
             part_count: v.parts.len() as i32,
+            ..self.queue_display(v)
         }
+    }
+    /// The queue state shown on the row of the video (see `MediaItem::queue_state` and `range_bar`)
+    fn queue_display(&self, v: &Video) -> MediaItem {
+        let state = |seq: &str| v.jobs.iter().find(|x| x.seq == seq).map(Self::key_state).unwrap_or_default();
+        let available = self.available_seqs(v);
+        let queued = available.iter().filter(|seq| v.jobs.iter().any(|x| &x.seq == *seq)).count();
+        let obj = v.settings.as_ref().and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok()).unwrap_or_default();
+        let ranges = Self::trim_ranges_ms(&obj);
+        let joined = available.len() == 1 && available[0].is_empty();
+        let bar = if ranges.is_empty() || v.duration_ms <= 0.0 { String::new() } else {
+            serde_json::json!(ranges.iter().enumerate().map(|(i, r)| {
+                // Joined into one video, all ranges are in the queue with it
+                let seq = if joined { String::new() } else { Self::range_uid(&obj, i) };
+                let end = if r.1 < 0.0 { v.duration_ms + r.1 } else { r.1 };
+                serde_json::json!([(r.0 / v.duration_ms).clamp(0.0, 1.0), (end / v.duration_ms).clamp(0.0, 1.0), state(&seq)])
+            }).collect::<Vec<_>>()).to_string()
+        };
+        MediaItem {
+            queue_state: QString::from(if queued == 0 { "" } else if queued == available.len() { "all" } else { "some" }),
+            queued_count: queued as i32,
+            key_count: available.len() as i32,
+            range_bar: QString::from(bar),
+            ..Default::default()
+        }
+    }
+    /// The state of a key as the UI shows it, see `get_key_states`
+    fn key_state(x: &JobState) -> String {
+        if x.job_id == 0 || x.loading || x.status.is_empty() { "queued".into() } else { x.status.clone() }
     }
     /// The state of all jobs of a video, shown on its row: the first error or question, otherwise the furthest one in progress
     fn job_summary(jobs: &[JobState]) -> JobState {
@@ -365,7 +402,12 @@ impl MediaLibrary {
         let Some(v) = self.video(video_id) else { return; };
         let job = Self::job_summary(&v.jobs);
         let count = v.jobs.len() as i32;
+        let queue = self.queue_display(v);
         self.patch_row(video_id, |x| {
+            x.queue_state = queue.queue_state;
+            x.queued_count = queue.queued_count;
+            x.key_count = queue.key_count;
+            x.range_bar = queue.range_bar;
             x.job_id = job.job_id;
             x.job_count = count;
             x.job_status = QString::from(job.status.as_str());
@@ -1341,6 +1383,8 @@ impl MediaLibrary {
             self.refresh_outputs();
         } else {
             self.update_stabilized_row(item_id);
+            // The trim ranges could have moved
+            self.update_job_row(item_id);
         }
     }
 
@@ -1964,7 +2008,7 @@ impl MediaLibrary {
     /// Queue state of the keys of the video, JSON `{ seq: status }`: "queued" (also while its job is added or loads the
     /// video), "processing", "rendering", "done", "error" or "question"
     pub fn get_key_states(&self, item_id: u32) -> QString {
-        let states = self.video(item_id).map(|v| v.jobs.iter().map(|x| (x.seq.clone(), serde_json::Value::String(if x.job_id == 0 || x.loading || x.status.is_empty() { "queued".into() } else { x.status.clone() }))).collect::<serde_json::Map<_, _>>()).unwrap_or_default();
+        let states = self.video(item_id).map(|v| v.jobs.iter().map(|x| (x.seq.clone(), serde_json::Value::String(Self::key_state(x)))).collect::<serde_json::Map<_, _>>()).unwrap_or_default();
         QString::from(serde_json::Value::Object(states).to_string())
     }
 
