@@ -27,13 +27,43 @@ Item {
 
     function open(): void {
         const saved = +settings.value("markerOffsetHours", 0);
-        // Not with offsetField.preventChange: that also stops the field from showing the value, so it showed 0 while the saved offset was used.
-        offsetField.value = saved;
-        offsetSlider.value = saved;
-        root.offsetHours = saved;
+        root.setOffsetSeconds(Math.round(saved * 3600));
         queueImported.checked = +settings.value("markerQueueImported", 1) > 0;
         root.shown = true;
         if (root.hasFile) root.refresh();
+    }
+    // The offset is entered as [-]H[:MM[:SS]], eg. "2", "-3:30" or "5:45:30"
+    function parseOffset(text: string): real {
+        const m = text.trim().match(/^([+-]?)(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,2}))?$/);
+        if (!m) return NaN;
+        const minutes = +(m[3] || 0), seconds = +(m[4] || 0);
+        if (minutes >= 60 || seconds >= 60) return NaN;
+        const total = +m[2] * 3600 + minutes * 60 + seconds;
+        if (total > 24 * 3600) return NaN;
+        return m[1] === "-"? -total : total;
+    }
+    function formatOffset(totalSeconds: real): string {
+        const abs = Math.round(Math.abs(totalSeconds));
+        const h = Math.floor(abs / 3600), m = Math.floor(abs % 3600 / 60), s = abs % 60;
+        const pad = (x) => (x < 10? "0" : "") + x;
+        let text = (totalSeconds < 0 && abs > 0? "-" : "") + h;
+        if (m || s) text += ":" + pad(m);
+        if (s) text += ":" + pad(s);
+        return text;
+    }
+    // Sets the offset from the slider, the buttons or the saved value, the field shows it formatted
+    function setOffsetSeconds(totalSeconds: real): void {
+        totalSeconds = Math.max(-24 * 3600, Math.min(24 * 3600, Math.round(totalSeconds)));
+        offsetField.text = root.formatOffset(totalSeconds);
+        root.applyOffsetSeconds(totalSeconds);
+    }
+    function applyOffsetSeconds(totalSeconds: real): void {
+        offsetSlider.preventChange = true;
+        offsetSlider.value = totalSeconds / 3600;
+        offsetSlider.preventChange = false;
+        if (root.offsetHours === totalSeconds / 3600) return;
+        root.offsetHours = totalSeconds / 3600;
+        root.refresh();
     }
     function close(): void {
         root.shown = false;
@@ -197,7 +227,7 @@ Item {
 
                 Label {
                     text: qsTr("Time offset");
-                    tooltip: qsTr("Subtracted from each video's creation time. Use 2 for CEST if the camera stored local time as UTC.");
+                    tooltip: qsTr("Subtracted from each video's creation time, as hours[:minutes[:seconds]], eg. 2 for CEST if the camera stored local time as UTC, -3:30 or 1:00:15.");
                     Row {
                         spacing: 8 * dpiScale;
                         width: parent.width;
@@ -210,7 +240,9 @@ Item {
                             to: 12;
                             live: true;
                             property bool preventChange: false;
-                            onValueChanged: if (!preventChange) offsetField.value = value;
+                            stepSize: 0.25;
+                            snapMode: QQC.Slider.SnapAlways;
+                            onValueChanged: if (!preventChange) root.setOffsetSeconds(value * 3600);
                         }
                         Button {
                             id: offsetMinus;
@@ -223,26 +255,21 @@ Item {
                             icon.width: 12 * dpiScale;
                             icon.height: 12 * dpiScale;
                             tooltip: root.matchesEarlier? qsTr("One hour less — an offset up to 12 hours less matches trim ranges") : qsTr("One hour less");
-                            onClicked: offsetField.value = Math.max(offsetField.from, Math.min(offsetField.to, offsetField.value - 1));
+                            onClicked: root.setOffsetSeconds(root.offsetHours * 3600 - 3600);
                         }
-                        NumberField {
+                        TextField {
                             id: offsetField;
                             width: 78 * dpiScale;
                             height: 25 * dpiScale;
-                            precision: 3;
-                            unit: "h";
-                            from: -24;
-                            to: 24;
-                            live: true;
-                            defaultValue: 0;
-                            onValueChanged: {
-                                if (preventChange) return;
-                                offsetSlider.preventChange = true;
-                                offsetSlider.value = value;
-                                offsetSlider.preventChange = false;
-                                root.offsetHours = value;
-                                root.refresh();
-                            }
+                            horizontalAlignment: Text.AlignHCenter;
+                            placeholderText: "h:mm:ss";
+                            // Partial input is allowed while typing, the offset follows once it's complete
+                            validator: RegularExpressionValidator { regularExpression: /[+-]?\d{0,2}(:\d{0,2}(:\d{0,2})?)?/ }
+                            readonly property real seconds: root.parseOffset(text);
+                            color: isNaN(seconds)? "#f67575" : styleTextColor;
+                            tooltip: qsTr("hours[:minutes[:seconds]], eg. 2, -3:30 or 1:00:15");
+                            onTextEdited: if (!isNaN(seconds)) root.applyOffsetSeconds(seconds);
+                            onEditingFinished: root.setOffsetSeconds(isNaN(seconds)? root.offsetHours * 3600 : seconds);
                         }
                         Button {
                             id: offsetPlus;
@@ -255,7 +282,7 @@ Item {
                             icon.width: 12 * dpiScale;
                             icon.height: 12 * dpiScale;
                             tooltip: root.matchesLater? qsTr("One hour more — an offset up to 12 hours more matches trim ranges") : qsTr("One hour more");
-                            onClicked: offsetField.value = Math.max(offsetField.from, Math.min(offsetField.to, offsetField.value + 1));
+                            onClicked: root.setOffsetSeconds(root.offsetHours * 3600 + 3600);
                         }
                     }
                 }
