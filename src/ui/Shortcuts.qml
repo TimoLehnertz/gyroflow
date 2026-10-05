@@ -22,20 +22,20 @@ Item {
         sequences: ["Left", "Page Up", ",", "F2"];
         onActivated:  videoArea.vid.seekToFrameDelta(-1);
     }
-    // Previous 10 frames
+    // Previous trim range start / end
     Shortcut {
         sequences: ["Ctrl+Left", "Ctrl+Page Up", "Ctrl+,", "F5"];
-        onActivated: videoArea.vid.seekToFrameDelta(-10);
+        onActivated: videoArea.timeline.jumpToPrevTrimBoundary();
     }
     // Next frame
     Shortcut {
         sequences: ["Right", "Page Down", ".", "F4"];
         onActivated: videoArea.vid.seekToFrameDelta(1);
     }
-    // Next 10 frames
+    // Next trim range start / end
     Shortcut {
         sequences: ["Ctrl+Right", "Ctrl+Page Down", "Ctrl+.", "F6"];
-        onActivated: videoArea.vid.seekToFrameDelta(10);
+        onActivated: videoArea.timeline.jumpToNextTrimBoundary();
     }
     // Go to trim start
     Shortcut {
