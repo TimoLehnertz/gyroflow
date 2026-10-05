@@ -95,7 +95,7 @@ ResizablePanel {
         // The main view can show another video than the current item (eg. while a new one is loading), its settings don't belong to this item
         if (id > 0 && window.videoArea.vid.loaded && !window.videoArea.videoLoader.active && !controller.loading_gyro_in_progress && media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString())) {
             media_library.save_settings(id, controller.export_gyroflow_data("Simple", window.getAdditionalProjectData()));
-            root.updateQueuedJob(id);
+            root.markQueuedJobOutdated(id);
         }
     }
 
@@ -393,6 +393,7 @@ ResizablePanel {
     }
     // An item can be edited while it's waiting in the queue, keep its jobs up to date until they start rendering
     function updateQueuedJob(itemId: int): void {
+        delete root.outdatedJobItems[itemId];
         const jobIds = media_library.get_item_jobs(itemId);
         if (!jobIds.length) return;
         // A trim range with its own stabilization settings gets those
@@ -428,7 +429,31 @@ ResizablePanel {
         }
     }
     function updateQueuedJobs(): void {
-        for (const id of media_library.get_render_items(false)) root.updateQueuedJob(id);
+        for (const id of media_library.get_render_items(false)) root.markQueuedJobOutdated(id);
+    }
+    // Changing settings only updates the config of the items, which is instant. Their queued jobs are synced from it
+    // afterwards, one item per event loop iteration so the UI doesn't stall, and all at once before the queue starts a job
+    property var outdatedJobItems: ({ });
+    function markQueuedJobOutdated(itemId: int): void {
+        if (!media_library.get_item_jobs(itemId).length) return;
+        root.outdatedJobItems[itemId] = true;
+        outdatedJobsTimer.start();
+    }
+    function syncOutdatedJob(itemId: int): void {
+        if (root.outdatedJobItems[itemId]) root.updateQueuedJob(itemId);
+    }
+    function syncOutdatedJobs(): void {
+        for (const id of Object.keys(root.outdatedJobItems)) root.syncOutdatedJob(+id);
+    }
+    Timer {
+        id: outdatedJobsTimer;
+        interval: 1;
+        onTriggered: {
+            const ids = Object.keys(root.outdatedJobItems);
+            if (!ids.length) return;
+            root.syncOutdatedJob(+ids[0]);
+            if (ids.length > 1) outdatedJobsTimer.start();
+        }
     }
     // "Apply settings to render queue": the jobs of the library items are synced from the item settings,
     // so those are updated instead of the jobs directly, otherwise the next sync would revert them
@@ -439,7 +464,7 @@ ResizablePanel {
         for (const id of media_library.apply_settings_to_queued(json)) {
             if (folder) media_library.set_output_url(id, folder, media_library.get_output_filename(id, ""));
             for (const jobId of media_library.get_item_jobs(id)) libraryJobs[jobId] = true;
-            root.updateQueuedJob(id);
+            root.markQueuedJobOutdated(id);
         }
         // Jobs that were added outside of the library
         const additionalData = window.getAdditionalProjectDataJson();
@@ -612,6 +637,7 @@ ResizablePanel {
 
     Connections {
         target: render_queue;
+        function onAbout_to_start(): void { root.syncOutdatedJobs(); }
         function onProcessing_done(job_id: real, by_preset: bool): void {
             if (by_preset) return;
             // Either the job made it into the queue by now, or it never will
@@ -957,6 +983,7 @@ ResizablePanel {
                             // The jobs of the trim ranges of a video are edited through the video itself
                             enabled: job_id > 0 && job_count == 1 && !dlg.isBusy;
                             onTriggered: {
+                                root.syncOutdatedJob(item_id);
                                 const data = render_queue.get_gyroflow_data(job_id);
                                 if (data) window.videoArea.loadGyroflowData(JSON.parse(data), job_id);
                             }

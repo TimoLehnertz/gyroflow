@@ -80,6 +80,8 @@ Window {
         if (app) {
             close.accepted = closeConfirmed || !app.wasModified;
             if (close.accepted) {
+                // The render queue is saved with the settings of its jobs
+                if (app.mediaPanel) app.mediaPanel.syncOutdatedJobs();
                 ui_tools.closing();
                 main_controller.cancel_current_operation();
                 if (typeof calib_controller !== "undefined")

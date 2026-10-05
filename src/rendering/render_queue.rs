@@ -303,6 +303,8 @@ pub struct RenderQueue {
     pub error: qt_signal!(job_id: u32, text: QString, arg: QString, callback: QString),
     pub added: qt_signal!(job_id: u32),
     pub processing_done: qt_signal!(job_id: u32, by_preset: bool),
+    /// Emitted before the queue picks the next jobs to render, so the settings of jobs that are outdated can be synced first
+    pub about_to_start: qt_signal!(),
     pub processing_progress: qt_signal!(job_id: u32, progress: f64),
 
     get_prev_item_id: qt_method!(fn(&self, job_id: u32) -> u32),
@@ -751,6 +753,7 @@ impl RenderQueue {
         }
 
         if !paused {
+            self.about_to_start();
             loop {
                 if self.get_active_render_count() >= self.parallel_renders.max(1) as usize {
                     break;

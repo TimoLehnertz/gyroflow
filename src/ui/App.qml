@@ -540,6 +540,7 @@ Rectangle {
                                 enabled: videoArea.separateRangeSettings;
                                 onTriggered: {
                                     videoArea.applySettingsToAllRanges();
+                                    mediaPanel.saveCurrentSettings();
                                     showNotification(Modal.Success, qsTr("Stabilization settings applied to all trim ranges of this video."));
                                 }
                             }

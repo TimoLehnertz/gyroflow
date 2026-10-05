@@ -117,11 +117,12 @@ Item {
         }
         timeline.trimRangesChanged();
     }
+    // Only the settings stored with the ranges change, not the ranges themselves. `trimRangesChanged` would set
+    // the trim ranges in the stabilizer again and recompute everything, so it's not emitted here
     function applySettingsToAllRanges(): void {
         if (!root.separateRangeSettings) return;
         const current = root.currentRangeSettings();
         for (let i = 0; i < timeline.trimRanges.length; ++i) root.setRangeSettings(timeline.trimRangeInfo(i), current);
-        timeline.trimRangesChanged();
     }
 
     // Both are parsed as urls the same way `loadFile` does it, so different encodings of the same path still match.
