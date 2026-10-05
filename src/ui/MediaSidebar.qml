@@ -39,6 +39,40 @@ ResizablePanel {
         target: media_library;
         function onItems_changed(): void { root.refreshState(); }
         function onCurrent_item_changed(): void { root.refreshState(); }
+        // The same question wherever the videos were added from (the main view adds them here too), unless the answer
+        // was remembered, which the queue settings show and change
+        function onSplit_recordings_found(names: string): void {
+            const remembered = +settings.value("dontShowAgain-join-split-recordings", 0);
+            if (remembered) {
+                root.joinSplitRecordings(remembered == 1);
+                return;
+            }
+            messageBox(Modal.Question, qsTr("These videos are one recording that the camera split into several files. Do you want to join them into one clip?") + "<br><br><b>" + names.split("\n").join("<br>") + "</b>", [
+                { text: qsTr("Yes"), accent: true, clicked: () => root.joinSplitRecordings(true) },
+                { text: qsTr("No"),  clicked: () => root.joinSplitRecordings(false) },
+            ], null, Text.StyledText, "join-split-recordings");
+        }
+        function onSplit_recordings_joined(result: string): void {
+            const r = JSON.parse(result);
+            if (r.errors.length) {
+                messageBox(Modal.Error, qsTr("Failed to join the files: %1").arg(r.errors.join("\n")), [ { text: qsTr("Ok") } ]);
+            }
+            // The video in the main view was one of the files, it continues as the joined one
+            const joined = r.joined.find(x => x.replaced.includes(root.itemBeforeJoin));
+            root.itemBeforeJoin = 0;
+            if (joined) {
+                media_library.select_only(joined.id);
+                root.lastClickedId = joined.id;
+                media_library.set_current_item(joined.id);
+                root.loadItemSettings(joined.id);
+            }
+        }
+    }
+    property int itemBeforeJoin: 0;
+    function joinSplitRecordings(join: bool): void {
+        const loaded = window.videoArea.loadedFileUrl.toString();
+        root.itemBeforeJoin = loaded? media_library.find_by_url(loaded) : 0;
+        media_library.join_split_recordings(join);
     }
     function refreshState(): void {
         root.selectedCount      = media_library.selected_count();
@@ -59,7 +93,7 @@ ResizablePanel {
     function saveCurrentSettings(): void {
         const id = media_library.current_item;
         // The main view can show another video than the current item (eg. while a new one is loading), its settings don't belong to this item
-        if (id > 0 && window.videoArea.vid.loaded && !window.videoArea.videoLoader.active && media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString())) {
+        if (id > 0 && window.videoArea.vid.loaded && !window.videoArea.videoLoader.active && !controller.loading_gyro_in_progress && media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString())) {
             media_library.save_settings(id, controller.export_gyroflow_data("Simple", window.getAdditionalProjectData()));
             root.updateQueuedJob(id);
         }
@@ -82,6 +116,8 @@ ResizablePanel {
         if (data) {
             window.videoArea.loadGyroflowData(JSON.parse(data), 0);
         } else {
+            // An item clicked before, still waiting for the previous video to finish loading, would be loaded after this one
+            window.videoArea.pendingGyroflowData = null;
             window.videoArea.loadFile(media_library.get_item_url(itemId), true);
         }
     }
@@ -119,7 +155,7 @@ ResizablePanel {
     function assignRangePaths(): void {
         const id = media_library.current_item;
         const timeline = window.videoArea.timeline;
-        if (id <= 0 || !window.videoArea.vid.loaded || window.videoArea.videoLoader.active) return;
+        if (id <= 0 || !window.videoArea.vid.loaded || window.videoArea.videoLoader.active || controller.loading_gyro_in_progress) return;
         if (!media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString())) return;
         const base = media_library.get_output_path(id);
         const used = timeline.trimRanges.map(x => (x[2] || { }).output_path).filter(x => x);
@@ -205,7 +241,7 @@ ResizablePanel {
             if (u.split("?")[0].toLowerCase().endsWith(".json")) jsons.push(u);
             else rest.push(u);
         }
-        for (const u of rest) media_library.add_url(u);
+        if (rest.length) media_library.add_dropped(rest.join("\n"));
         if (rest.length) root.rememberMediaFolder(rest[0].toString());
         if (jsons.length) root.openImportMarkers(jsons[0]);
     }
@@ -220,7 +256,7 @@ ResizablePanel {
         // The video in the main view doesn't have the new trim ranges yet, and saving its settings would drop them again.
         // Its settings were saved when the import was opened, so load it again with the ranges.
         const current = media_library.current_item;
-        if ((result.queue_ids || []).includes(current) && window.videoArea.vid.loaded && !window.videoArea.videoLoader.active) {
+        if ((result.queue_ids || []).includes(current) && window.videoArea.vid.loaded && !window.videoArea.videoLoader.active && !controller.loading_gyro_in_progress) {
             root.loadItemSettings(current);
         }
         if (queue) {
@@ -831,6 +867,8 @@ ResizablePanel {
             height: itemCol.height + 10 * dpiScale;
             radius: 5 * dpiScale;
             property bool isFolder:  kind == "folder";
+            // A file of a joined video, listed below it
+            property bool isPart:    kind == "part";
             property bool isRendering:  job_status == "rendering";
             property bool isProcessing: job_status == "processing";
             property bool isQueued:     job_status == "queued";
@@ -867,7 +905,9 @@ ResizablePanel {
                 cursorShape: dlg.isFolder? Qt.ArrowCursor : Qt.PointingHandCursor;
                 onClicked: (mouse) => {
                     lv.forceActiveFocus();
-                    if (dlg.isFolder) {
+                    if (dlg.isPart) {
+                        root.clickItem(parent_id, mouse.modifiers);
+                    } else if (dlg.isFolder) {
                         if (mouse.modifiers & (Qt.ShiftModifier | Qt.ControlModifier)) {
                             root.clickItem(item_id, mouse.modifiers);
                         } else {
@@ -881,84 +921,90 @@ ResizablePanel {
             ContextMenuMouseArea {
                 // Right clicking an item that isn't part of the selection makes it the selection first
                 onContextMenu: (isHold, mx, my) => {
+                    if (dlg.isPart) return;
                     lv.forceActiveFocus();
                     if (!selected) root.clickItem(item_id, Qt.NoModifier);
                     itemMenu.popup(dlg, mx, my);
                 }
             }
-            Menu {
+            // Created on the first right click: a menu in every row made adding videos slow, all rows are created at once
+            ContextMenuLoader {
                 id: itemMenu;
-                font.pixelSize: 11.5 * dpiScale;
-                Action {
-                    iconName: "queue";
-                    text: qsTr("Add %1 selected to the render queue").arg(root.queueableCount);
-                    enabled: root.queueableCount > 0;
-                    onTriggered: root.queueSelected();
-                }
-                Action {
-                    iconName: "close";
-                    text: qsTr("Remove %1 selected from the render queue").arg(root.queuedSelectedCount);
-                    enabled: root.queuedSelectedCount > 0;
-                    onTriggered: root.unqueueSelected();
-                }
-                Action {
-                    iconName: "play";
-                    text: qsTr("Render now");
-                    enabled: job_id > 0 && !dlg.isBusy && !dlg.isJobDone;
-                    onTriggered: root.prioritizeItem(item_id);
-                }
-                Action {
-                    iconName: "pencil";
-                    text: qsTr("Edit render settings");
-                    // The jobs of the trim ranges of a video are edited through the video itself
-                    enabled: job_id > 0 && job_count == 1 && !dlg.isBusy;
-                    onTriggered: {
-                        const data = render_queue.get_gyroflow_data(job_id);
-                        if (data) window.videoArea.loadGyroflowData(JSON.parse(data), job_id);
+                sourceComponent: Component {
+                    Menu {
+                        font.pixelSize: 11.5 * dpiScale;
+                        Action {
+                            iconName: "queue";
+                            text: qsTr("Add %1 selected to the render queue").arg(root.queueableCount);
+                            enabled: root.queueableCount > 0;
+                            onTriggered: root.queueSelected();
+                        }
+                        Action {
+                            iconName: "close";
+                            text: qsTr("Remove %1 selected from the render queue").arg(root.queuedSelectedCount);
+                            enabled: root.queuedSelectedCount > 0;
+                            onTriggered: root.unqueueSelected();
+                        }
+                        Action {
+                            iconName: "play";
+                            text: qsTr("Render now");
+                            enabled: job_id > 0 && !dlg.isBusy && !dlg.isJobDone;
+                            onTriggered: root.prioritizeItem(item_id);
+                        }
+                        Action {
+                            iconName: "pencil";
+                            text: qsTr("Edit render settings");
+                            // The jobs of the trim ranges of a video are edited through the video itself
+                            enabled: job_id > 0 && job_count == 1 && !dlg.isBusy;
+                            onTriggered: {
+                                const data = render_queue.get_gyroflow_data(job_id);
+                                if (data) window.videoArea.loadGyroflowData(JSON.parse(data), job_id);
+                            }
+                        }
+                        Action {
+                            iconName: "arrow-up";
+                            text: qsTr("Move up in the queue");
+                            enabled: job_id > 0;
+                            onTriggered: root.moveItem(item_id, -1);
+                        }
+                        Action {
+                            iconName: "arrow-down";
+                            text: qsTr("Move down in the queue");
+                            enabled: job_id > 0;
+                            onTriggered: root.moveItem(item_id, 1);
+                        }
+                        Action {
+                            iconName: dlg.isBusy? "close" : "spinner";
+                            text: dlg.isBusy? qsTr("Stop") : qsTr("Reset status");
+                            enabled: job_id > 0 && (dlg.isBusy || dlg.isJobError || dlg.isQuestion || dlg.isJobDone);
+                            onTriggered: root.resetItem(item_id);
+                        }
+                        Action {
+                            iconName: "play";
+                            text: qsTr("Open rendered file");
+                            enabled: !dlg.isFolder && stabilized_state > 0 && Qt.platform.os != "ios";
+                            onTriggered: filesystem.open_file_externally(filesystem.get_file_url(media_library.get_output_folder(item_id), media_library.get_output_filename(item_id, ""), false));
+                        }
+                        Action {
+                            iconName: "info";
+                            text: qsTr("Video details");
+                            enabled: !dlg.isFolder;
+                            onTriggered: root.showDetails(item_id);
+                        }
+                        Action {
+                            iconName: "folder";
+                            text: qsTr("Open file location");
+                            onTriggered: filesystem.open_file_externally(dlg.isFolder? url : filesystem.get_folder(url));
+                        }
+                        Action {
+                            iconName: "bin";
+                            text: root.removableCount > 1? qsTr("Remove %1 selected").arg(root.removableCount)
+                                : root.removableKind == "folder"? qsTr("Remove folder")
+                                : qsTr("Remove video");
+                            enabled: root.removableCount > 0;
+                            onTriggered: root.removeSelected();
+                        }
                     }
-                }
-                Action {
-                    iconName: "arrow-up";
-                    text: qsTr("Move up in the queue");
-                    enabled: job_id > 0;
-                    onTriggered: root.moveItem(item_id, -1);
-                }
-                Action {
-                    iconName: "arrow-down";
-                    text: qsTr("Move down in the queue");
-                    enabled: job_id > 0;
-                    onTriggered: root.moveItem(item_id, 1);
-                }
-                Action {
-                    iconName: dlg.isBusy? "close" : "spinner";
-                    text: dlg.isBusy? qsTr("Stop") : qsTr("Reset status");
-                    enabled: job_id > 0 && (dlg.isBusy || dlg.isJobError || dlg.isQuestion || dlg.isJobDone);
-                    onTriggered: root.resetItem(item_id);
-                }
-                Action {
-                    iconName: "play";
-                    text: qsTr("Open rendered file");
-                    enabled: !dlg.isFolder && stabilized_state > 0 && Qt.platform.os != "ios";
-                    onTriggered: filesystem.open_file_externally(filesystem.get_file_url(media_library.get_output_folder(item_id), media_library.get_output_filename(item_id, ""), false));
-                }
-                Action {
-                    iconName: "info";
-                    text: qsTr("Video details");
-                    enabled: !dlg.isFolder;
-                    onTriggered: root.showDetails(item_id);
-                }
-                Action {
-                    iconName: "folder";
-                    text: qsTr("Open file location");
-                    onTriggered: filesystem.open_file_externally(dlg.isFolder? url : filesystem.get_folder(url));
-                }
-                Action {
-                    iconName: "bin";
-                    text: root.removableCount > 1? qsTr("Remove %1 selected").arg(root.removableCount)
-                        : root.removableKind == "folder"? qsTr("Remove folder")
-                        : qsTr("Remove video");
-                    enabled: root.removableCount > 0;
-                    onTriggered: root.removeSelected();
                 }
             }
 
@@ -994,6 +1040,7 @@ ResizablePanel {
                         name: dlg.isFolder? "folder" : "video";
                         source: "qrc:/resources/icons/svg/" + (dlg.isFolder? "folder" : "video") + ".svg";
                         color: styleTextColor;
+                        opacity: dlg.isPart? 0.5 : 1;
                         height: 14 * dpiScale;
                         width: height;
                         layer.enabled: true;
@@ -1029,7 +1076,7 @@ ResizablePanel {
                         }
                         // Video information, lens profile and motion data of the video
                         LinkButton {
-                            visible: !dlg.isFolder;
+                            visible: !dlg.isFolder && !dlg.isPart;
                             width: 20 * dpiScale;
                             height: 20 * dpiScale;
                             anchors.verticalCenter: parent.verticalCenter;
@@ -1097,6 +1144,7 @@ ResizablePanel {
                         let parts = [];
                         if (duration_ms > 0) parts.push(Math.floor(duration_ms / 60000) + ":" + ("0" + Math.floor((duration_ms % 60000) / 1000)).slice(-2));
                         if (created_at > 0) parts.push(new Date(created_at * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat));
+                        if (part_count > 1) parts.push(qsTr("%1 files joined").arg(part_count));
                         if (range_count > 1) parts.push(output_count > 1? qsTr("%1 trim ranges, %2 files").arg(range_count).arg(output_count) : qsTr("%1 trim ranges").arg(range_count));
                         return parts.join("  |  ");
                     }
@@ -1392,6 +1440,14 @@ ResizablePanel {
                     }
                     settings.setValue("parallelRenders", v);
                 }
+                // The remembered answer of the question when split recordings are added: 0 ask, 1 join, 2 keep the files
+                function setJoinSplitRecordings(v: int, menuItem: Menu): void {
+                    v = Math.min(2, Math.max(v, 0));
+                    for (let i = 0, j = 0; i < menuItem.count; ++i) {
+                        if (menuItem.itemAt(i) instanceof QQC.MenuItem) { menuItem.actionAt(i).checked = j == v; j++;  }
+                    }
+                    settings.setValue("dontShowAgain-join-split-recordings", v);
+                }
                 function setOverwriteAction(v: int, menuItem: Menu): void {
                     v = Math.min(3, Math.max(v, 0));
 
@@ -1435,6 +1491,16 @@ ResizablePanel {
                         Action { text: qsTr("Rename file");    onTriggered: queueSettings.setOverwriteAction(2, overwriteActionMenu); }
                         Action { text: qsTr("Skip file");      onTriggered: queueSettings.setOverwriteAction(3, overwriteActionMenu); }
                         Component.onCompleted: queueSettings.setOverwriteAction(+settings.value("defaultOverwriteAction", 0), overwriteActionMenu);
+                    }
+                    Menu {
+                        id: splitRecordingsMenu;
+                        title: qsTr("Split recordings (eg. GoPro chapters)");
+                        Action { text: qsTr("Ask");               onTriggered: queueSettings.setJoinSplitRecordings(0, splitRecordingsMenu); }
+                        QQC.MenuSeparator { verticalPadding: 5 * dpiScale; }
+                        Action { text: qsTr("Join into one clip"); onTriggered: queueSettings.setJoinSplitRecordings(1, splitRecordingsMenu); }
+                        Action { text: qsTr("Keep the files");     onTriggered: queueSettings.setJoinSplitRecordings(2, splitRecordingsMenu); }
+                        // The answer can also be remembered by the question, which is shown when the menu opens
+                        onAboutToShow: queueSettings.setJoinSplitRecordings(+settings.value("dontShowAgain-join-split-recordings", 0), splitRecordingsMenu);
                     }
                     Menu {
                         id: exportModeMenu;
@@ -1498,7 +1564,7 @@ ResizablePanel {
             open();
         }
         onAccepted: {
-            for (let i = 0; i < selectedFiles.length; i++) media_library.add_url(selectedFiles[i].toString());
+            if (selectedFiles.length) media_library.add_dropped(Array.from(selectedFiles, x => x.toString()).join("\n"));
             if (selectedFiles.length) root.rememberMediaFolder(selectedFiles[0].toString());
         }
     }

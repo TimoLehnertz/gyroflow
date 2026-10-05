@@ -11,14 +11,14 @@ use std::sync::atomic::{ AtomicBool, AtomicUsize, Ordering::SeqCst };
 use std::cell::RefCell;
 
 // Not .lrv: those are the low resolution copies GoPro cameras record next to every video, for previews in their app
-const VIDEO_EXTENSIONS: &[&str] = &[ "mp4", "mov", "mxf", "mkv", "webm", "insv", "avi", "m4v", "mts", "m2ts", "braw", "r3d", "nev" ];
+const VIDEO_EXTENSIONS: &[&str] = &[ "mp4", "mov", "mxf", "mkv", "webm", "insv", "avi", "m4v", "mts", "m2ts", "braw", "r3d", "nev", core::joined_video::EXTENSION ];
 
 // Stabilized state
 const NOT_STABILIZED: i32 = 0;
 const STABILIZED:     i32 = 1;
 const STALE:          i32 = 2;
 
-#[derive(Default, Clone, SimpleListItem, Debug)]
+#[derive(Default, Clone, PartialEq, SimpleListItem, Debug)]
 pub struct MediaItem {
     pub item_id: u32,
     pub parent_id: u32,
@@ -49,6 +49,8 @@ pub struct MediaItem {
     /// First job of the video, all of them are returned by `get_item_jobs`
     pub job_id: u32,
     pub job_count: i32,
+    /// Files of a joined video (a split recording), 0 for other videos
+    pub part_count: i32,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -88,7 +90,18 @@ struct Video {
     expanded: bool,
     selected: bool,
     /// One render job per output file
-    jobs: Vec<JobState>
+    jobs: Vec<JobState>,
+    /// The files of a joined video (see `core::joined_video`), shown below it when it's expanded
+    parts: Vec<JoinedPart>
+}
+
+#[derive(Default, Clone, Debug)]
+struct JoinedPart {
+    /// Of its row, the part itself is not a video of the library
+    id: u32,
+    url: String,
+    filename: String,
+    duration_ms: f64
 }
 
 /// A file the video is exported to: one per trim range if they are exported as separate videos, otherwise one for the whole video
@@ -130,7 +143,7 @@ pub struct MediaLibrary {
     add_folder: qt_method!(fn(&mut self, url: QString)),
     add_files: qt_method!(fn(&mut self, urls: QStringList)),
     add_url: qt_method!(fn(&mut self, url: QString)),
-    add_dropped: qt_method!(fn(&mut self, urls: QStringList)),
+    add_dropped: qt_method!(fn(&mut self, urls: QString)),
     remove_item: qt_method!(fn(&mut self, item_id: u32) -> QVariantList),
     remove_selected: qt_method!(fn(&mut self) -> QVariantList),
     get_removable_selection: qt_method!(fn(&self) -> QVariantList),
@@ -211,12 +224,23 @@ pub struct MediaLibrary {
     pub options_changed: qt_signal!(),
     pub scanning_changed: qt_signal!(),
     pub current_item_changed: qt_signal!(),
+    /// Split recordings were added, `names` lists the files of each one (a line per recording). The answer goes to
+    /// `join_split_recordings`
+    pub split_recordings_found: qt_signal!(names: QString),
+    /// JSON `{ joined: [{ id, parts: [urls], replaced: [ids of the videos of its files] }], errors: [string] }`
+    pub split_recordings_joined: qt_signal!(result: QString),
+    join_split_recordings: qt_method!(fn(&mut self, join: bool)),
 
     standalone: Vec<Video>,
     folders: Vec<Folder>,
 
     next_id: u32,
     pending_scans: Arc<AtomicUsize>,
+    /// Split recordings the user is asked about (the urls of their files)
+    pending_joins: Vec<Vec<String>>,
+    /// Videos added since the last search for split recordings, the only ones it looks at: the user isn't asked again
+    /// about the files they kept separate whenever something else is added
+    added_since_detect: Vec<String>,
     markers: Vec<marker_import::Marker>,
     marker_file_loaded: bool,
 
@@ -264,7 +288,8 @@ impl MediaLibrary {
             parent_id,
             kind: QString::from("video"),
             depth,
-            name: QString::from(v.filename.as_str()),
+            // A joined video is named like the recording, the camera named its first file
+            name: QString::from(v.parts.first().map(|x| x.filename.as_str()).unwrap_or(v.filename.as_str())),
             url: QString::from(v.url.as_str()),
             output_path: QString::from(self.output_path_or_default(&v.url, &v.output_path)),
             display_output_path: QString::from(match outputs.as_slice() {
@@ -272,7 +297,7 @@ impl MediaLibrary {
                 _ => filesystem::display_folder_filename(&folder, &filename)
             }),
             expanded: v.expanded,
-            has_children: false,
+            has_children: !v.parts.is_empty(),
             selected: v.selected,
             is_current: self.current_item == v.id,
             created_at: v.created_at,
@@ -289,6 +314,7 @@ impl MediaLibrary {
             job_message: QString::from(job.message.as_str()),
             job_id: job.job_id,
             job_count: v.jobs.len() as i32,
+            part_count: v.parts.len() as i32,
         }
     }
     /// The state of all jobs of a video, shown on its row: the first error or question, otherwise the furthest one in progress
@@ -323,6 +349,20 @@ impl MediaLibrary {
         let mut ret = Vec::new();
         let add_video = |ret: &mut Vec<MediaItem>, v: &Video, parent_id: u32, depth: i32| {
             ret.push(self.video_to_item(v, parent_id, depth));
+            if v.expanded {
+                for x in &v.parts {
+                    ret.push(MediaItem {
+                        item_id: x.id,
+                        parent_id: v.id,
+                        kind: QString::from("part"),
+                        depth: depth + 1,
+                        name: QString::from(x.filename.as_str()),
+                        url: QString::from(x.url.as_str()),
+                        duration_ms: x.duration_ms,
+                        ..Default::default()
+                    });
+                }
+            }
         };
 
         for v in self.sorted_videos(&self.standalone) {
@@ -352,9 +392,30 @@ impl MediaLibrary {
         ret
     }
 
+    /// Updates the rows in place where it can, instead of resetting the model: after a reset the list creates every row
+    /// again, and dropping files did that for every file and again after every scan, which froze the UI for seconds
     fn rebuild(&mut self) {
         let items = self.build_items();
-        self.items.borrow_mut().reset_data(items);
+        {
+            let mut q = self.items.borrow_mut();
+            let new_ids = items.iter().map(|x| x.item_id).collect::<std::collections::HashSet<_>>();
+            let mut i = 0;
+            while i < q.row_count() as usize {
+                if new_ids.contains(&q[i].item_id) { i += 1; } else { q.remove(i); }
+            }
+            // Then row by row: unchanged rows stay as they are, new ones are inserted, and only the rows that moved (eg.
+            // sorted by the creation time the scan read) are created again
+            for (i, itm) in items.into_iter().enumerate() {
+                if i < q.row_count() as usize && q[i].item_id == itm.item_id {
+                    if q[i] != itm { q.change_line(i, itm); }
+                    continue;
+                }
+                if let Some(j) = (i + 1..q.row_count() as usize).find(|&j| q[j].item_id == itm.item_id) {
+                    q.remove(j);
+                }
+                q.insert(i, itm);
+            }
+        }
         self.items_changed();
     }
 
@@ -432,6 +493,9 @@ impl MediaLibrary {
                 videos.push(self.new_video(file_url, filename));
             }
         }
+        // The files of a split recording joined before are shown below it
+        let part_urls = videos.iter().flat_map(|v| v.parts.iter().map(|x| x.url.clone())).collect::<std::collections::HashSet<_>>();
+        videos.retain(|v| !part_urls.contains(&v.url));
         let id = self.new_id();
         let path = filesystem::url_to_path(&url);
         let mut name = path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or_default().to_string();
@@ -439,6 +503,7 @@ impl MediaLibrary {
         self.folders.push(Folder { id, url, name, expanded: true, videos });
         self.rebuild();
         self.scan_pending();
+        self.detect_split_recordings();
     }
 
     pub fn add_files(&mut self, urls: QStringList) {
@@ -448,6 +513,7 @@ impl MediaLibrary {
         }
         self.rebuild();
         self.scan_pending();
+        self.detect_split_recordings();
     }
 
     /// One file or folder. QML should call this instead of passing a JS array as QStringList,
@@ -456,14 +522,16 @@ impl MediaLibrary {
         self.add_url_impl(&url.to_string(), true);
     }
 
-    /// Adds dropped urls, folders are added as input folders and files as standalone videos
-    pub fn add_dropped(&mut self, urls: QStringList) {
-        let n = urls.len();
-        for i in 0..n {
-            self.add_url_impl(&urls[i].to_string(), false);
+    /// Adds dropped urls, one per line (see `add_url` why not a list): folders are added as input folders and files as
+    /// standalone videos. All of them at once, so the list is updated once and they are scanned in one task, instead of
+    /// one per file, which each took a thread of the pool (that loading the clicked video needs) only to wait for the others
+    pub fn add_dropped(&mut self, urls: QString) {
+        for url in urls.to_string().lines() {
+            self.add_url_impl(url, false);
         }
         self.rebuild();
         self.scan_pending();
+        self.detect_split_recordings();
     }
 
     fn add_url_impl(&mut self, url_str: &str, rebuild: bool) {
@@ -483,19 +551,146 @@ impl MediaLibrary {
         if rebuild {
             self.rebuild();
             self.scan_pending();
+            self.detect_split_recordings();
         }
     }
 
     fn new_video(&mut self, url: String, filename: String) -> Video {
         let id = self.new_id();
+        self.added_since_detect.push(url.clone());
+        let parts = if core::joined_video::is_joined(&url) {
+            core::joined_video::read(&url).unwrap_or_default().into_iter().map(|x| self.new_part(x)).collect()
+        } else {
+            Vec::new()
+        };
         Video {
             id,
             url,
             filename,
             scanning: true,
-            expanded: true,
+            // The files of a joined video are listed only on request
+            expanded: parts.is_empty(),
+            parts,
             ..Default::default()
         }
+    }
+    fn new_part(&mut self, part: core::joined_video::Part) -> JoinedPart {
+        JoinedPart { id: self.new_id(), filename: filesystem::get_filename(&part.url), url: part.url, duration_ms: part.duration_ms }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // ------------------------------------- Split recordings --------------------------------------
+    // ---------------------------------------------------------------------------------------------
+
+    /// The recording a file is a part of and the number of the part, for the cameras that split long recordings into
+    /// files of a few GB (the names `detectVideoSequence` in VideoArea.qml knows)
+    fn split_recording_part(filename: &str) -> Option<(String, u32)> {
+        let upper = filename.to_ascii_uppercase();
+        let stem = upper.strip_suffix(".MP4")?;
+        let digits = |x: &str| !x.is_empty() && x.bytes().all(|c| c.is_ascii_digit());
+        if stem.len() == 8 {
+            // GoPro HERO6 and newer: GX or GH, the part and the recording number, eg. GX012209, GX022209
+            if (stem.starts_with("GX") || stem.starts_with("GH")) && digits(&stem[2..]) {
+                return Some((format!("{}{}", &stem[..2], &stem[4..]), stem[2..4].parse().ok()?));
+            }
+            // GoPro HERO5 and older: GOPR and the recording number, then GP, the part and the recording number
+            if stem.starts_with("GOPR") && digits(&stem[4..]) { return Some((format!("GP{}", &stem[4..]), 0)); }
+            if stem.starts_with("GP") && digits(&stem[2..]) { return Some((format!("GP{}", &stem[4..]), stem[2..4].parse().ok()?)); }
+        }
+        // DJI Action: DJI_, the recording number and the part, eg. DJI_0012_001
+        let (recording, part) = stem.strip_prefix("DJI_")?.split_once('_')?;
+        if recording.len() == 4 && part.len() == 3 && digits(recording) && digits(part) {
+            return Some((format!("DJI_{recording}"), part.parse().ok()?));
+        }
+        None
+    }
+
+    /// Finds the split recordings among the videos that were just added, with the other files of them in their folder,
+    /// and asks the user whether to join them (`split_recordings_found`)
+    fn detect_split_recordings(&mut self) {
+        let added = std::mem::take(&mut self.added_since_detect).into_iter().collect::<std::collections::HashSet<_>>();
+        let mut recordings = std::collections::BTreeMap::<String, std::collections::BTreeMap<u32, String>>::new();
+        let mut folders = std::collections::HashMap::<String, Vec<(String, String)>>::new();
+        for v in self.all_videos().filter(|v| added.contains(&v.url)) {
+            let Some((name, _)) = Self::split_recording_part(&v.filename) else { continue; };
+            let folder = filesystem::get_folder(&v.url);
+            let key = format!("{folder}|{name}");
+            if recordings.contains_key(&key) { continue; }
+            let files = folders.entry(folder.clone()).or_insert_with(|| filesystem::list_folder(&folder));
+            let parts = files.iter().filter_map(|(filename, url)| {
+                let (n, i) = Self::split_recording_part(filename)?;
+                (n == name).then(|| (i, url.clone()))
+            }).collect();
+            recordings.insert(key, parts);
+        }
+        let mut found = Vec::new();
+        for parts in recordings.into_values() {
+            // The parts are numbered one after another, from the first one on
+            let mut files = Vec::new();
+            for (i, url) in parts {
+                if files.is_empty() || parts_continue(&files, i) { files.push((i, url)); } else { break; }
+            }
+            let files = files.into_iter().map(|x| x.1).collect::<Vec<_>>();
+            if files.len() < 2 || self.pending_joins.iter().any(|x| x[0] == files[0]) { continue; }
+            // Already joined (eg. one of its files was added again)
+            if self.all_videos().any(|v| v.parts.first().is_some_and(|x| x.url == files[0])) { continue; }
+            found.push(files);
+        }
+        fn parts_continue(files: &[(u32, String)], i: u32) -> bool { files.last().is_some_and(|x| x.0 + 1 == i) }
+        if found.is_empty() { return; }
+        let names = found.iter().map(|x| x.iter().map(|url| filesystem::get_filename(url)).collect::<Vec<_>>().join(", ")).collect::<Vec<_>>().join("\n");
+        self.pending_joins.extend(found);
+        self.split_recordings_found(QString::from(names));
+    }
+
+    /// The answer to `split_recordings_found`: joining writes the list of the files next to them, and the joined video
+    /// takes the place of its files in the library
+    pub fn join_split_recordings(&mut self, join: bool) {
+        let recordings = std::mem::take(&mut self.pending_joins);
+        if !join { return; }
+        let finished = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, result: Vec<Result<(String, Vec<core::joined_video::Part>), String>>| {
+            this.add_joined(result);
+        });
+        core::run_threaded(move || {
+            finished(recordings.into_iter().map(|files| -> Result<_, String> {
+                let parts = files.iter().map(|url| {
+                    let info = rendering::VideoProcessor::get_video_info(url).map_err(|e| format!("{}: {e:?}", filesystem::get_filename(url)))?;
+                    Ok(core::joined_video::Part { url: url.clone(), duration_ms: info.duration_ms })
+                }).collect::<Result<Vec<_>, String>>()?;
+                let filename = filesystem::filename_with_extension(&filesystem::filename_with_suffix(&filesystem::get_filename(&files[0]), "_joined"), core::joined_video::EXTENSION);
+                let url = core::joined_video::write(&filesystem::get_folder(&files[0]), &filename, &parts).map_err(|e| format!("{filename}: {e}"))?;
+                crate::util::update_file_times(&url, &files[0], None);
+                Ok((url, parts))
+            }).collect());
+        });
+    }
+
+    fn add_joined(&mut self, result: Vec<Result<(String, Vec<core::joined_video::Part>), String>>) {
+        let mut joined = Vec::new();
+        let mut errors = Vec::new();
+        for x in result {
+            let (url, parts) = match x { Ok(x) => x, Err(e) => { errors.push(e); continue; } };
+            let part_urls = parts.iter().map(|x| x.url.clone()).collect::<Vec<_>>();
+            let replaced = self.all_videos().filter(|v| part_urls.contains(&v.url)).map(|v| v.id).collect::<Vec<_>>();
+            let mut video = self.new_video(url.clone(), filesystem::get_filename(&url));
+            if video.parts.is_empty() { video.parts = parts.into_iter().map(|x| self.new_part(x)).collect(); video.expanded = false; }
+            // In place of its first file: in its folder, or among the files added alone
+            let mut placed = false;
+            for f in self.folders.iter_mut() {
+                if !placed && f.videos.iter().any(|v| v.url == part_urls[0]) { f.videos.push(video.clone()); placed = true; }
+                f.videos.retain(|v| !part_urls.contains(&v.url));
+            }
+            if !placed { self.standalone.push(video.clone()); }
+            self.standalone.retain(|v| !part_urls.contains(&v.url));
+            joined.push(serde_json::json!({ "id": video.id, "parts": part_urls, "replaced": replaced }));
+        }
+        if self.current_item > 0 && self.video(self.current_item).is_none() && self.folders.iter().all(|f| f.id != self.current_item) {
+            self.current_item = 0;
+            self.current_item_changed();
+        }
+        self.rebuild();
+        self.scan_pending();
+        self.split_recordings_joined(QString::from(serde_json::json!({ "joined": joined, "errors": errors }).to_string()));
     }
 
     pub fn remove_item(&mut self, item_id: u32) -> QVariantList {
@@ -641,6 +836,12 @@ impl MediaLibrary {
                 }
                 result.lens_warning = true;
                 if size.0 > 0 && fps > 0.0 {
+                    // The camera and lens of a joined video are the ones of its first file
+                    let url = if core::joined_video::is_joined(&url) {
+                        core::joined_video::read(&url).ok().and_then(|x| x.first().map(|x| x.url.clone())).unwrap_or(url.clone())
+                    } else {
+                        url.clone()
+                    };
                     if let Ok(mut file) = filesystem::open_file(&url, false, false) {
                         let filesize = file.size;
                         // Only the lens is shown here, so the first metadata sample is usually enough. Reading all of them

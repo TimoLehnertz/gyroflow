@@ -2,6 +2,7 @@
 // Copyright © 2021-2022 Adrian <adrian.eddy at gmail>
 
 import QtQuick
+import QtQuick.Controls as QQC
 import MDKVideo
 
 import "components/"
@@ -38,7 +39,10 @@ Item {
     property int fullScreen: 0;
     property string detectedCamera: "";
     property real additionalTopMargin: 0;
-    property var mergedFiles: [];
+    // While the motion data loads, the video plays unstabilized instead of being covered until it's loaded
+    readonly property bool showStabilized: stabEnabledBtn.checked && !controller.loading_gyro_in_progress;
+    onShowStabilizedChanged: { controller.stab_enabled = showStabilized; vid.forceRedraw(); vid.fovChanged(); }
+    Component.onCompleted: controller.stab_enabled = showStabilized; // The core starts with it enabled
 
     property Menu.VideoInformation vidInfo: null;
 
@@ -400,13 +404,7 @@ Item {
             videoLoader.cancelable = true;
         }
         function onLoading_gyro_progress(progress: real): void {
-            videoLoader.active = progress < 1;
-            videoLoader.currentFrame = 0;
-            videoLoader.totalFrames = 0;
-            videoLoader.additional = "";
-            videoLoader.text = videoLoader.active? qsTr("Loading gyro data %1...") : "";
-            videoLoader.progress = videoLoader.active? progress : -1;
-            videoLoader.cancelable = true;
+            gyroLoading.progress = progress < 1? progress : 0;
         }
     }
     property Modal externalSdkModal: null;
@@ -492,13 +490,14 @@ Item {
                 return;
             }
             let sequenceList;
-            if (sequenceList = detectVideoSequence(folder, filename)) {
+            // In the main window the media list asks about split recordings, for every way videos are added
+            if (isCalibrator && (sequenceList = detectVideoSequence(folder, filename))) {
                 const list = "<b>" + sequenceList.join(", ") + "</b>";
                 const dlg = messageBox(Modal.Info, qsTr("Split recording has been detected, do you want to automatically join the files (%1) to create one full clip?").arg(list), [
                     { text: qsTr("Yes"), accent: true, clicked: function() {
                         dlg.btnsRow.children[0].enabled = false;
-                        getOutputFile(folder, sequenceList[0], "_joined", "", true, function(outFolder, outFilename, outFullFileUrl) {
-                            root.mergedFiles = sequenceList.map(x => filesystem.get_file_url(folder, x, false).toString());
+                        // Next to the files: the joined video is a list of them (see `joined_video.rs`)
+                        getOutputFile(folder, sequenceList[0], "_joined", "ffconcat", false, function(outFolder, outFilename, outFullFileUrl) {
                             controller.mp4_merge(sequenceList.map(x => filesystem.get_file_url(folder, x, false).toString()), outFolder, outFilename);
                         });
                         return false;
@@ -571,7 +570,7 @@ Item {
             }
             const dlg = messageBox(Modal.Question, qsTr("You have opened multiple files. What do you want to do?"), [
                 { text: qsTr("Add to the file list"), accent: true, clicked: () => {
-                    for (let i = 0; i < urlsCopy.length; i++) media_library.add_url(urlsCopy[i].toString());
+                    media_library.add_dropped(urlsCopy.map(x => x.toString()).join("\n"));
                 } },
                 { text: qsTr("Merge them into one video"), clicked: () => {
                     dlg.btnsRow.children[0].enabled = false;
@@ -579,8 +578,7 @@ Item {
                     dlg.btnsRow.children[2].enabled = false;
                     const filename = filesystem.get_filename(urlsCopy[0]);
                     const folder = filesystem.get_folder(urlsCopy[0]);
-                    getOutputFile(folder, filename, "_joined", "", true, function(outFolder, outFilename, outFullFileUrl) {
-                        root.mergedFiles = urlsCopy.map(x => x.toString());
+                    getOutputFile(folder, filename, "_joined", "ffconcat", false, function(outFolder, outFilename, outFullFileUrl) {
                         controller.mp4_merge(urlsCopy.map(x => x.toString()), outFolder, outFilename);
                     });
                     return false;
@@ -715,8 +713,8 @@ Item {
             spacing: 10 * dpiScale;
             Item {
                 id: vidParent;
-                readonly property real orgW: (stabEnabledBtn.checked && root.outWidth > 0? root.outWidth : (vid.videoWidth * window.lensProfile.input_horizontal_stretch));
-                readonly property real orgH: (stabEnabledBtn.checked && root.outHeight > 0? root.outHeight : (vid.videoHeight * window.lensProfile.input_vertical_stretch));
+                readonly property real orgW: (root.showStabilized && root.outWidth > 0? root.outWidth : (vid.videoWidth * window.lensProfile.input_horizontal_stretch));
+                readonly property real orgH: (root.showStabilized && root.outHeight > 0? root.outHeight : (vid.videoHeight * window.lensProfile.input_vertical_stretch));
                 readonly property real ratio: orgW / Math.max(1, orgH);
                 readonly property real w: vidParentParent.width  / parent.columns - (root.fullScreen? 0 : 20 * dpiScale);
                 readonly property real h: vidParentParent.height / parent.rows    - (root.fullScreen? 0 : 20 * dpiScale);
@@ -740,7 +738,7 @@ Item {
                     anchors.fill: parent;
                     property bool loaded: false;
 
-                    property bool stabEnabled: stabEnabledBtn.checked;
+                    property bool stabEnabled: root.showStabilized;
                     transform: [
                         Scale {
                             readonly property real r: vidInfo.videoRotation * (Math.PI / 180);
@@ -799,6 +797,8 @@ Item {
                         timeline.resetZoom();
 
                         controller.video_file_loaded(vid);
+                        // Already now, not only once the gyro data is loaded: the video plays while it loads, and the playhead needs them
+                        Qt.callLater(timeline.updateDurations);
                         window.motionData.filename = "";
 
                         if (root.pendingGyroflowData) {
@@ -809,21 +809,6 @@ Item {
                         vidInfo.loadFromVideoMetadata(md, vid.videoWidth, vid.videoHeight);
                         window.sync.customSyncTimestamps = [];
 
-                        if (root.mergedFiles.length > 1) {
-                            if (loaded) {
-                                const copy = [...root.mergedFiles];
-                                messageBox(Modal.Question, qsTr("Files merged successfully, do you want to delete the original ones?"), [
-                                    { text: qsTr("Yes"), clicked: function() {
-                                        for (const x of copy) {
-                                            filesystem.move_to_trash(x);
-                                        }
-                                        return true;
-                                    } },
-                                    { text: qsTr("No"), accent: true },
-                                ], null, undefined, "delete-after-join");
-                            }
-                            root.mergedFiles = [];
-                        }
 
                         window.lensProfile.selected_manually = false;
 
@@ -831,6 +816,14 @@ Item {
                     }
                     property bool errorShown: false;
                     onMetadataChanged: {
+                        // The stream of a joined video has no duration, only the files it lists have (see `joined_video.rs`)
+                        if (vid.videoWidth > 0 && vid.duration <= 0) {
+                            const joinedMs = controller.joined_video_duration(root.loadedFileUrl);
+                            if (joinedMs > 0) {
+                                vid.videoLoaded(joinedMs, Math.round(joinedMs / 1000 * vid.frameRate), vid.frameRate, vid.videoWidth, vid.videoHeight);
+                                return; // Comes back here with the duration
+                            }
+                        }
                         if (vid.videoWidth > 0) {
                             // Trigger seek to buffer the video frames
                             if (vid.duration == 0) {
@@ -840,6 +833,7 @@ Item {
                                     vid.volume = volumeSlider.value / 100.0;
                                 })
                             } else {
+                                bufferTrigger.waited = 0;
                                 bufferTrigger.start();
                             }
                         } else if (!errorShown) {
@@ -853,10 +847,16 @@ Item {
                     Timer {
                         id: bufferTrigger;
                         interval: 150;
+                        property int waited: 0;
                         onTriggered: {
-                            if (!vid.videoWidth) bufferTrigger.start();
+                            if (!vid.videoWidth) { bufferTrigger.start(); return; }
+                            // Only once the first frame is shown (which ends the loading screen), unless it doesn't show up on
+                            // its own: seeking while it's decoded made the decoder start over at the seek target, which kept
+                            // the loading screen up for seconds with videos decoded on the CPU (eg. 5.3K GoPro footage)
+                            if (!vid.loaded && ++bufferTrigger.waited < 20) { bufferTrigger.start(); return; }
                             Qt.callLater(() => {
-                                vid.currentFrame++;
+                                // Not `currentFrame++`: until the first frame is shown, it's still the previous video's frame
+                                vid.currentFrame = 1;
                                 Qt.callLater(() => vid.currentFrame = 0);
                                 if (vid.videoWidth) {
                                     stabEnabledBtn.checked = true;
@@ -1092,7 +1092,7 @@ Item {
                                 if (mouse.modifiers & Qt.ShiftModifier) {
                                     timeline.jumpToPrevKeyframe("");
                                 } else if (mouse.modifiers & Qt.ControlModifier) {
-                                    vid.seekToFrameDelta(-10);
+                                    timeline.jumpToPrevTrimBoundary();
                                 } else {
                                     vid.seekToFrameDelta(-1);
                                 }
@@ -1115,7 +1115,7 @@ Item {
                                 if (mouse.modifiers & Qt.ShiftModifier) {
                                     timeline.jumpToNextKeyframe("");
                                 } else if (mouse.modifiers & Qt.ControlModifier) {
-                                    vid.seekToFrameDelta(10);
+                                    timeline.jumpToNextTrimBoundary();
                                 } else {
                                     vid.seekToFrameDelta(1);
                                 }
@@ -1202,7 +1202,6 @@ Item {
                     visible: window.stabilizationEnabled;
                     // Don't use onVisibleChanged: effective visibility also changes when the parent is hidden (e.g. in full screen)
                     Connections { target: window; function onStabilizationEnabledChanged(): void { if (!window.stabilizationEnabled) stabEnabledBtn.checked = false; } }
-                    onCheckedChanged: { controller.stab_enabled = checked; vid.forceRedraw(); vid.fovChanged(); }
                     tooltip: qsTr("Toggle stabilization");
                 }
 
@@ -1354,6 +1353,54 @@ Item {
                 type: InfoMessage.Warning;
                 visible: vid.loaded && !controller.lens_loaded && !isCalibrator;
                 text: qsTr("Lens profile is not loaded, the results will not look correct. Please load a lens profile for your camera.");
+            }
+        }
+        Item {
+            id: gyroLoading;
+            property real progress: 0;
+            visible: opacity > 0;
+            opacity: controller.loading_gyro_in_progress? 1 : 0;
+            Ease on opacity { }
+            anchors.right: parent.right;
+            anchors.rightMargin: 10 * dpiScale;
+            y: infoMessages.y + infoMessages.height + 10 * dpiScale;
+            width: gyroLoadingCol.width + 20 * dpiScale;
+            height: gyroLoadingCol.height + 16 * dpiScale;
+            Rectangle {
+                anchors.fill: parent;
+                color: styleBackground;
+                opacity: 0.8;
+                radius: 5 * dpiScale;
+            }
+            Column {
+                id: gyroLoadingCol;
+                anchors.centerIn: parent;
+                spacing: 6 * dpiScale;
+                BasicText {
+                    leftPadding: 0;
+                    text: qsTr("Loading gyro data %1...").arg("<b>" + (gyroLoading.progress * 100).toFixed(0) + "%</b>");
+                }
+                BasicText {
+                    leftPadding: 0;
+                    font.pixelSize: 11 * dpiScale;
+                    opacity: 0.7;
+                    text: qsTr("The video plays unstabilized until it's loaded.");
+                }
+                Row {
+                    spacing: 8 * dpiScale;
+                    QQC.ProgressBar {
+                        width: 200 * dpiScale;
+                        anchors.verticalCenter: parent.verticalCenter;
+                        value: gyroLoading.progress;
+                    }
+                    LinkButton {
+                        transparent: true;
+                        text: qsTr("Cancel");
+                        leftPadding: 0; rightPadding: 0;
+                        anchors.verticalCenter: parent.verticalCenter;
+                        onClicked: controller.cancel_current_operation();
+                    }
+                }
             }
         }
     }
