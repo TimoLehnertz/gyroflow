@@ -12,9 +12,20 @@ Item {
     property var trimRanges: [];
     // The range the playhead is in, or the last one it was in. -1 if there are no ranges
     property int activeTrimRange: -1;
+    // The trim range at the position, the smallest one where ranges overlap (it's the one that's otherwise hard to get to).
+    // `strict` excludes the start and the end of the ranges. -1 if the position is in none of them
+    function trimRangeAt(pos: real, strict: bool): int {
+        let found = -1;
+        for (let i = 0; i < trimRanges.length; ++i) {
+            const [start, end] = trimRanges[i];
+            const inside = strict? (pos > start && pos < end) : (pos >= start && pos <= end);
+            if (inside && (found < 0 || end - start < trimRanges[found][1] - trimRanges[found][0])) found = i;
+        }
+        return found;
+    }
     function updateActiveTrimRange(): void {
         if (!trimRanges.length) { activeTrimRange = -1; return; }
-        const inside = trimRanges.findIndex(x => position >= x[0] && position <= x[1]);
+        const inside = trimRangeAt(position, false);
         if (inside >= 0) activeTrimRange = inside;
         else activeTrimRange = Math.max(0, Math.min(activeTrimRange, trimRanges.length - 1));
     }
@@ -60,7 +71,7 @@ Item {
     function setPosition(pos: real): void {
         // With the playback restricted to the active range, seeking into another range makes that one active first
         if (restrictTrim) {
-            const range = trimRanges.findIndex(x => pos >= x[0] && pos <= x[1]);
+            const range = trimRangeAt(pos, false);
             if (range >= 0) activeTrimRange = range;
         }
         const frame = frameAtPosition(pos);
@@ -132,7 +143,7 @@ Item {
     // Splits the range the position is in, otherwise adds a new range starting there (10 s, or until the next range)
     function addTrimRange(pos: real): void {
         const length = orgDurationMs > 0? 10000 / orgDurationMs : 0.1;
-        const inside = trimRanges.findIndex(x => pos > x[0] && pos < x[1]);
+        const inside = trimRangeAt(pos, true);
         if (inside >= 0) {
             trimRanges.splice(inside + 1, 0, [pos, trimRanges[inside][1]]);
             trimRanges[inside][1] = pos;
@@ -923,6 +934,8 @@ Item {
                     trimStart: modelData[0];
                     trimEnd: modelData[1];
                     isActive: index == root.activeTrimRange;
+                    // Where ranges overlap, the smaller one is on top, so it can be clicked and its ends dragged
+                    z: 1 - (modelData[1] - modelData[0]);
                     // Its key in the render queue (by its id), or the one of the whole video when the ranges are joined into one
                     queueStatus: window.mediaPanel? (window.mediaPanel.keyStates[(modelData[2] || { }).uid || "-"] || window.mediaPanel.keyStates[""] || "") : "";
                     y: (root.fullScreen || window.isMobileLayout? 0 : 35) * dpiScale;
