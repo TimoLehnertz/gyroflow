@@ -24,6 +24,7 @@ Item {
     // A time in seconds, the label on the left
     component TimeRow: Label {
         property alias value: field.value;
+        function focusField(): void { field.forceActiveFocus(); field.selectAll(); }
         position: Label.LeftPosition;
         NumberField {
             id: field;
@@ -48,10 +49,14 @@ Item {
         root.clips = itemIds.map(id => Object.assign({ id: id }, JSON.parse(media_library.get_trim_ranges(id) || "{}")))
                             .filter(x => x.ranges && x.ranges.length > 0 && x.duration_ms > 0);
         for (const row of [extendLeftRow, extendRightRow, moveLeftRow, moveRightRow]) row.value = 0;
+        if (!root.shown) root.focusBefore = root.Window.activeFocusItem;
         root.shown = true;
+        extendLeftRow.focusField();
     }
     function close(): void {
         root.shown = false;
+        if (root.focusBefore) root.focusBefore.forceActiveFocus();
+        root.focusBefore = null;
     }
     function confirm(): void {
         root.accepted(root.clips.map(x => x.id), root.extendLeftMs, root.extendRightMs, root.shiftMs);
@@ -70,11 +75,12 @@ Item {
         return m + ":" + (sec < 10? "0" : "") + sec.toFixed(2);
     }
 
-    Shortcut {
-        sequence: "Esc";
-        enabled: root.shown;
-        onActivated: root.close();
-    }
+    // While it's shown it has the keyboard: the keys typed in it aren't shortcuts of the main view (accepting the override
+    // event stops a shortcut), and it closes with Esc. The focus goes back where it was when it closes
+    readonly property bool blocksShortcuts: root.shown;
+    property Item focusBefore: null;
+    Keys.onShortcutOverride: (event) => { if (root.shown) event.accepted = true; }
+    Keys.onEscapePressed: root.close();
 
     MouseArea {
         anchors.fill: parent;

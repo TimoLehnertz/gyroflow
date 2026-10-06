@@ -7,7 +7,16 @@ import Gyroflow
 import "components/"
 
 Item {
+    id: root;
     property VideoArea videoArea;
+
+    // A modal that's open has the keyboard, its keys aren't for the main view (the shortcuts are stopped by the modal itself)
+    function keyboardInModal(): bool {
+        for (let item = main_window.activeFocusItem; item; item = item.parent) {
+            if (item.blocksShortcuts) return true;
+        }
+        return false;
+    }
 
     // Play/Pause
     Shortcut {
@@ -391,6 +400,8 @@ Item {
     Connections {
         target: ui_tools;
         function onTransport_key(key: int, pressed: bool): void {
+            // Not while a modal has the keyboard (see `blocksShortcuts`), only its release, so a held key doesn't stay down
+            if (pressed && root.keyboardInModal()) return;
             if (key == Qt.Key_K) {
                 transport.kDown = pressed;
                 if (pressed) transport.setRate(0);

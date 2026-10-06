@@ -32,7 +32,9 @@ Item {
         const saved = +settings.value("markerOffsetHours", 0);
         root.setOffsetSeconds(Math.round(saved * 3600));
         queueImported.checked = +settings.value("markerQueueImported", 1) > 0;
+        if (!root.shown) root.focusBefore = root.Window.activeFocusItem;
         root.shown = true;
+        root.forceActiveFocus();
         if (root.hasFile) root.refresh();
     }
     // The offset is entered as [-]H[:MM[:SS]], eg. "2", "-3:30" or "5:45:30"
@@ -70,7 +72,15 @@ Item {
     }
     function close(): void {
         root.shown = false;
+        if (root.focusBefore) root.focusBefore.forceActiveFocus();
+        root.focusBefore = null;
     }
+    // While it's shown it has the keyboard: the keys typed in it aren't shortcuts of the main view (accepting the override
+    // event stops a shortcut), and it closes with Esc. The focus goes back where it was when it closes
+    readonly property bool blocksShortcuts: root.shown;
+    property Item focusBefore: null;
+    Keys.onShortcutOverride: (event) => { if (root.shown) event.accepted = true; }
+    Keys.onEscapePressed: root.close();
     function loadFiles(urls: var): void {
         // The markers loaded before are gone, also when the files can't be read
         root.fileName = "";
