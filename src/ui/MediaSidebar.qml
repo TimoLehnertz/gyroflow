@@ -85,6 +85,29 @@ ResizablePanel {
         // Not while the settings of an item are still being applied to the main view
         onTriggered: if (!window.videoArea.pendingGyroflowData) root.saveCurrentSettings();
     }
+    // So are all other settings: the list shows if the output files are outdated by them (see `get_output_states`).
+    // Stabilization, lens, background, keyframes and synchronization changes are recomputed, export options aren't, so
+    // those are compared once a second while a video is shown
+    Connections {
+        target: controller;
+        function onRequest_recompute(): void { rangesSaveTimer.restart(); }
+        function onKeyframes_changed(): void { rangesSaveTimer.restart(); }
+        function onOffsets_updated(): void { rangesSaveTimer.restart(); }
+    }
+    Timer {
+        interval: 1000;
+        repeat: true;
+        running: media_library.current_item > 0 && window.videoArea.vid.loaded && !!window.exportSettings;
+        property string lastOptions: "";
+        property int lastItem: 0;
+        onTriggered: {
+            const options = JSON.stringify(window.exportSettings.getExportOptions());
+            const changed = lastItem == media_library.current_item && options != lastOptions;
+            lastOptions = options;
+            lastItem = media_library.current_item;
+            if (changed) rangesSaveTimer.restart();
+        }
+    }
     property int itemBeforeJoin: 0;
     // Between finding a split recording and joining it: a dropped video is opened after that, as the joined one if it's one of its files
     property bool joinPending: false;
