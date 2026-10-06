@@ -693,15 +693,108 @@ impl MediaLibrary {
         None
     }
 
+    /// Newer DJI cameras (eg. Osmo Action 4) name every file after the time it starts and a counter, also the files
+    /// of a split recording: DJI_20261005132932_0003_D.MP4, DJI_20261005133310_0004_D.MP4. Returns the kind of
+    /// recording (the letter at the end), the counter and the start time in seconds. The files only tell they are
+    /// one recording by the next one starting where the previous one ends (see `dji_split_recordings`)
+    fn dji_dated_part(filename: &str) -> Option<(String, u32, i64)> {
+        let upper = filename.to_ascii_uppercase();
+        let stem = upper.strip_suffix(".MP4")?;
+        let mut it = stem.strip_prefix("DJI_")?.splitn(3, '_');
+        let (time, counter, kind) = (it.next()?, it.next()?, it.next().unwrap_or_default());
+        if time.len() != 14 || counter.len() != 4 || !counter.bytes().all(|c| c.is_ascii_digit()) { return None; }
+        let start = chrono::NaiveDateTime::parse_from_str(time, "%Y%m%d%H%M%S").ok()?.and_utc().timestamp();
+        Some((kind.to_string(), counter.parse().ok()?, start))
+    }
+
+    /// The duration of an MP4 file from its header (`mvhd`), a few small reads instead of opening the whole video
+    fn mp4_duration_ms(url: &str) -> Option<f64> {
+        use std::io::{ Read, Seek, SeekFrom };
+        let mut file = filesystem::open_file(url, false, false).ok()?;
+        let file_size = file.size as u64;
+        let file = file.get_file();
+        let (mut pos, mut end) = (0u64, file_size);
+        while pos + 8 <= end {
+            file.seek(SeekFrom::Start(pos)).ok()?;
+            let mut header = [0u8; 8];
+            file.read_exact(&mut header).ok()?;
+            let mut size = u32::from_be_bytes(header[0..4].try_into().ok()?) as u64;
+            let mut header_size = 8;
+            if size == 1 {
+                let mut large = [0u8; 8];
+                file.read_exact(&mut large).ok()?;
+                size = u64::from_be_bytes(large);
+                header_size = 16;
+            } else if size == 0 {
+                size = end - pos;
+            }
+            if size < header_size { return None; }
+            match &header[4..8] {
+                b"moov" => { end = (pos + size).min(end); pos += header_size; }
+                b"mvhd" => {
+                    let mut buf = [0u8; 32];
+                    file.read_exact(&mut buf).ok()?;
+                    let (timescale, duration) = if buf[0] == 1 {
+                        (u32::from_be_bytes(buf[20..24].try_into().ok()?), u64::from_be_bytes(buf[24..32].try_into().ok()?))
+                    } else {
+                        (u32::from_be_bytes(buf[12..16].try_into().ok()?), u32::from_be_bytes(buf[16..20].try_into().ok()?) as u64)
+                    };
+                    return (timescale > 0).then(|| duration as f64 * 1000.0 / timescale as f64);
+                }
+                _ => pos += size,
+            }
+        }
+        None
+    }
+
+    /// The split recordings of the newer DJI cameras in the files of a folder (see `dji_dated_part`), the ones with any of `added`
+    fn dji_split_recordings(&self, files: &[(String, String)], added: &std::collections::HashSet<String>) -> Vec<Vec<String>> {
+        let mut kinds = std::collections::BTreeMap::<String, std::collections::BTreeMap<u32, (i64, String)>>::new();
+        for (filename, url) in files {
+            if let Some((kind, counter, start)) = Self::dji_dated_part(filename) {
+                kinds.entry(kind).or_default().insert(counter, (start, url.clone()));
+            }
+        }
+        let mut found = Vec::new();
+        for parts in kinds.into_values() {
+            let mut chain: Vec<String> = Vec::new();
+            let mut prev: Option<(u32, i64, &String)> = None;
+            for (counter, (start, url)) in &parts {
+                // The next file of the recording starts when the previous one ends: the time in the name is in whole seconds,
+                // a new recording started by hand takes longer than that
+                let continues = prev.is_some_and(|(prev_counter, prev_start, prev_url)| {
+                    if prev_counter + 1 != *counter || *start <= prev_start { return false; }
+                    let duration_ms = self.all_videos().find(|v| &v.url == prev_url && v.duration_ms > 0.0).map(|v| v.duration_ms)
+                        .or_else(|| Self::mp4_duration_ms(prev_url));
+                    duration_ms.is_some_and(|d| ((*start - prev_start) as f64 - d / 1000.0).abs() <= 2.0)
+                });
+                if !continues {
+                    if chain.len() > 1 && chain.iter().any(|x| added.contains(x)) { found.push(std::mem::take(&mut chain)); }
+                    chain.clear();
+                }
+                chain.push(url.clone());
+                prev = Some((*counter, *start, url));
+            }
+            if chain.len() > 1 && chain.iter().any(|x| added.contains(x)) { found.push(chain); }
+        }
+        found
+    }
+
     /// Finds the split recordings among the videos that were just added, with the other files of them in their folder,
     /// and asks the user whether to join them (`split_recordings_found`)
     fn detect_split_recordings(&mut self) {
         let added = std::mem::take(&mut self.added_since_detect).into_iter().collect::<std::collections::HashSet<_>>();
         let mut recordings = std::collections::BTreeMap::<String, std::collections::BTreeMap<u32, String>>::new();
         let mut folders = std::collections::HashMap::<String, Vec<(String, String)>>::new();
+        let mut dji_folders = std::collections::HashSet::<String>::new();
         for v in self.all_videos().filter(|v| added.contains(&v.url)) {
-            let Some((name, _)) = Self::split_recording_part(&v.filename) else { continue; };
             let folder = filesystem::get_folder(&v.url);
+            if Self::dji_dated_part(&v.filename).is_some() {
+                folders.entry(folder.clone()).or_insert_with(|| filesystem::list_folder(&folder));
+                dji_folders.insert(folder);
+                continue;
+            }
+            let Some((name, _)) = Self::split_recording_part(&v.filename) else { continue; };
             let key = format!("{folder}|{name}");
             if recordings.contains_key(&key) { continue; }
             let files = folders.entry(folder.clone()).or_insert_with(|| filesystem::list_folder(&folder));
@@ -711,14 +804,19 @@ impl MediaLibrary {
             }).collect();
             recordings.insert(key, parts);
         }
-        let mut found = Vec::new();
-        for parts in recordings.into_values() {
+        let mut recordings = recordings.into_values().map(|parts| {
             // The parts are numbered one after another, from the first one on
             let mut files = Vec::new();
             for (i, url) in parts {
                 if files.is_empty() || parts_continue(&files, i) { files.push((i, url)); } else { break; }
             }
-            let files = files.into_iter().map(|x| x.1).collect::<Vec<_>>();
+            files.into_iter().map(|x| x.1).collect::<Vec<_>>()
+        }).collect::<Vec<_>>();
+        for folder in &dji_folders {
+            recordings.extend(self.dji_split_recordings(&folders[folder], &added));
+        }
+        let mut found = Vec::new();
+        for files in recordings {
             if files.len() < 2 || self.pending_joins.iter().any(|x| x[0] == files[0]) { continue; }
             // Already joined (eg. one of its files was added again)
             if self.all_videos().any(|v| v.parts.first().is_some_and(|x| x.url == files[0])) { continue; }
@@ -2191,6 +2289,27 @@ mod tests {
         lib.standalone.push(Video { id: 4, url: "file:///a/GX012217.MP4".into(), ..Default::default() });
         lib.remove_joined_parts();
         assert_eq!(lib.standalone.iter().map(|v| v.id).collect::<Vec<_>>(), vec![1, 4]);
+    }
+
+    #[test]
+    fn dji_files_are_one_recording_when_the_next_starts_where_the_previous_ends() {
+        assert_eq!(MediaLibrary::dji_dated_part("DJI_20261005132932_0003_D.MP4").map(|x| (x.0, x.1)), Some(("D".into(), 3)));
+        assert_eq!(MediaLibrary::dji_dated_part("._DJI_20261005132932_0003_D.MP4"), None);
+        assert_eq!(MediaLibrary::dji_dated_part("DJI_0012_001.MP4"), None);
+        // From an Osmo Action 4: 0003 to 0005 is one recording, 0001 and 0002 were started one after another by hand
+        let files = [("20261005132544_0001", 55330.0), ("20261005132707_0002", 87120.0), ("20261005132932_0003", 217090.0),
+                     ("20261005133310_0004", 217120.0), ("20261005133647_0005", 22500.0), ("20261005152827_0006", 0.0)]
+            .map(|(name, duration_ms)| (format!("DJI_{name}_D.MP4"), format!("file:///card/DJI_{name}_D.MP4"), duration_ms));
+        let mut lib = MediaLibrary::default();
+        for (i, (filename, url, duration_ms)) in files.iter().enumerate() {
+            lib.standalone.push(Video { id: i as u32 + 1, url: url.clone(), filename: filename.clone(), duration_ms: *duration_ms, ..Default::default() });
+        }
+        let list = files.iter().map(|x| (x.0.clone(), x.1.clone())).collect::<Vec<_>>();
+        let added = |names: &[usize]| names.iter().map(|i| files[*i].1.clone()).collect();
+        let expected = vec![vec![files[2].1.clone(), files[3].1.clone(), files[4].1.clone()]];
+        assert_eq!(lib.dji_split_recordings(&list, &added(&[0, 1, 2, 3, 4, 5])), expected);
+        assert_eq!(lib.dji_split_recordings(&list, &added(&[4])), expected);
+        assert!(lib.dji_split_recordings(&list, &added(&[0, 1])).is_empty());
     }
 
     fn outputs(settings: serde_json::Value) -> Vec<(i32, String)> {
