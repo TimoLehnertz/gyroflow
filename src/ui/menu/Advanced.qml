@@ -23,6 +23,7 @@ MenuItem {
         property alias featherPixels: featherPixels.value;
         property alias defaultSuffix: defaultSuffix.text;
         property alias playSounds: playSounds.checked;
+        property alias restorePreviousQueue: restorePreviousQueue.checked;
         property alias r3dConvertFormat: r3dConvertFormat.currentIndex;
         property alias r3dColorMode: r3dColorMode.currentIndex;
         property alias r3dGammaCurve: r3dGammaCurve.currentIndex;
@@ -398,6 +399,25 @@ MenuItem {
         id: playSounds;
         text: qsTr("Notification sounds");
         checked: true;
+    }
+    Row {
+        width: parent.width;
+        spacing: 10 * dpiScale;
+        CheckBox {
+            id: restorePreviousQueue;
+            text: qsTr("Restore queue on start");
+            tooltip: qsTr("Add the unfinished items of the render queue of previous sessions back to the queue when Gyroflow starts.\nWhen disabled, they are kept until they are restored with the button next to it.");
+            checked: true;
+            width: parent.width - restoreQueueNow.width - parent.spacing;
+            anchors.verticalCenter: parent.verticalCenter;
+        }
+        Button {
+            id: restoreQueueNow;
+            text: qsTr("Restore now");
+            tooltip: qsTr("Add the unfinished items of the render queue of previous sessions to the queue now.");
+            anchors.verticalCenter: parent.verticalCenter;
+            onClicked: window.mediaPanel.restorePreviousQueue(true);
+        }
     }
     Item { width: 1; height: 10 * dpiScale; }
     LinkButton {

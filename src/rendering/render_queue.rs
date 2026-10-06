@@ -344,6 +344,10 @@ pub struct RenderQueue {
     stabilizer: Arc<StabilizationManager>,
 
     processing_resolution: i32,
+
+    /// Unfinished jobs of previous sessions that weren't added back to the queue yet.
+    /// They are kept in the saved queue, so they can still be restored later.
+    previous_queue: Vec<serde_json::Value>,
 }
 
 macro_rules! update_model {
@@ -371,6 +375,7 @@ impl RenderQueue {
             default_suffix: QString::from("_stabilized"),
             processing_resolution: 720,
             stabilizer,
+            previous_queue: Self::load_previous_render_queue(),
             ..Default::default()
         }
     }
@@ -935,7 +940,8 @@ impl RenderQueue {
     }
 
     pub fn save_render_queue(&self) {
-        let mut all = Vec::new();
+        // Keep the not yet restored jobs of previous sessions, until they are restored
+        let mut all = self.previous_queue.clone();
         for v in self.queue.borrow().iter() {
             if v.total_frames > 0 && v.status != JobStatus::Finished {
                 if let Ok(data) = serde_json::from_str(&self.get_gyroflow_data(v.job_id).to_string()) as serde_json::Result<serde_json::Value> {
@@ -946,31 +952,33 @@ impl RenderQueue {
         gyroflow_core::settings::set("renderQueue", serde_json::to_value(&all).unwrap_or_default());
     }
 
-    pub fn restore_render_queue(&mut self, additional_data: String) -> bool {
-        let rq = gyroflow_core::settings::get("renderQueue", Default::default());
-        let rqv = match rq {
-            serde_json::Value::String(v) => serde_json::from_str(&v) as serde_json::Result<Vec<serde_json::Value>>,
-            serde_json::Value::Array(v) => Ok(v),
-            _ => return false
-        };
-        if let Ok(val) = rqv {
-            for x in &val {
-                if let Some(project) = x.get("project_file").and_then(|x| x.as_str()) {
-                    #[allow(unused_mut)]
-                    let mut project = project.to_string();
-                    #[cfg(any(target_os = "macos", target_os = "ios"))]
-                    if let Some(bookmark) = x.get("project_file_bookmark").and_then(|x| x.as_str()).filter(|x| !x.is_empty()) {
-                        let (resolved, _is_stale) = filesystem::apple::resolve_bookmark(bookmark, None);
-                        if !resolved.is_empty() { project = resolved; }
-                    }
-                    self.add_file(project, String::new(), additional_data.clone());
-                } else if let Ok(data) = serde_json::to_string(&x) {
-                    self.add_file(data, String::new(), additional_data.clone());
-                }
-            }
-            return !val.is_empty();
+    /// Reads the jobs saved by previous sessions. This happens before the queue is saved for the first time.
+    fn load_previous_render_queue() -> Vec<serde_json::Value> {
+        match gyroflow_core::settings::get("renderQueue", Default::default()) {
+            serde_json::Value::String(v) => serde_json::from_str(&v).unwrap_or_default(),
+            serde_json::Value::Array(v) => v,
+            _ => Vec::new()
         }
-        false
+    }
+
+    /// Adds the unfinished jobs of previous sessions back to the queue. Returns false when there are none.
+    pub fn restore_render_queue(&mut self, additional_data: String) -> bool {
+        let val = std::mem::take(&mut self.previous_queue);
+        for x in &val {
+            if let Some(project) = x.get("project_file").and_then(|x| x.as_str()) {
+                #[allow(unused_mut)]
+                let mut project = project.to_string();
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
+                if let Some(bookmark) = x.get("project_file_bookmark").and_then(|x| x.as_str()).filter(|x| !x.is_empty()) {
+                    let (resolved, _is_stale) = filesystem::apple::resolve_bookmark(bookmark, None);
+                    if !resolved.is_empty() { project = resolved; }
+                }
+                self.add_file(project, String::new(), additional_data.clone());
+            } else if let Ok(data) = serde_json::to_string(&x) {
+                self.add_file(data, String::new(), additional_data.clone());
+            }
+        }
+        !val.is_empty()
     }
 
     fn get_gyroflow_data_internal(stab: &StabilizationManager, additional_data: &str, render_options: &RenderOptions) -> Option<String> {

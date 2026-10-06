@@ -764,19 +764,27 @@ ResizablePanel {
         }
     }
 
-    // Unfinished jobs of the previous session are added back to the queue and show up in the list above
+    // Adds the unfinished jobs of previous sessions back to the queue, they show up in the list above.
+    // When there are none and `reportNone` is set, it says so.
+    function restorePreviousQueue(reportNone: bool): void {
+        if (render_queue.restore_render_queue(window.getAdditionalProjectDataJson())) {
+            messageBox(Modal.Info, qsTr("You have unfinished tasks in the render queue."), [
+                { text: qsTr("Open render queue"), accent: true, clicked: function() { root.showQueue(); } },
+                { text: qsTr("Ok") }
+            ]);
+        } else if (reportNone) {
+            messageBox(Modal.Info, qsTr("There are no unfinished tasks from previous sessions."), [ { text: qsTr("Ok") } ]);
+        }
+    }
+
+    // Unfinished jobs of previous sessions are restored on start, unless disabled in the advanced settings.
+    // Otherwise they are kept and can be restored later from there.
     Timer {
         interval: 100;
         running: window.exportSettings != null && window.sync != null;
         onTriggered: {
-            Qt.callLater(() => {
-                if (render_queue.restore_render_queue(window.getAdditionalProjectDataJson())) {
-                    messageBox(Modal.Info, qsTr("You have unfinished tasks in the render queue."), [
-                        { text: qsTr("Open render queue"), accent: true, clicked: function() { root.showQueue(); } },
-                        { text: qsTr("Ok") }
-                    ]);
-                }
-            });
+            if (settings.value("restorePreviousQueue", true) === false) return;
+            Qt.callLater(() => root.restorePreviousQueue(false));
         }
     }
 
