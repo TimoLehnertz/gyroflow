@@ -202,6 +202,15 @@ Item {
         }
         render_queue.editing_job_id = +queueJobId;
     }
+    function applyTrimRanges(obj: var, duration_ms: real): void {
+        if (obj.hasOwnProperty("trim_ranges_ms")) {
+            // The output path (and with separate settings, the stabilization settings) of each range are kept with it
+            const info = obj.trim_range_info || [];
+            timeline.setTrimRanges(obj.trim_ranges_ms.map((x, i) => [x[0] / duration_ms, (x[1] < 0? duration_ms + x[1] : x[1]) / duration_ms, info[i] || ({ })]));
+        } else if (obj.hasOwnProperty("trim_ranges")) {
+            timeline.setTrimRanges(obj.trim_ranges);
+        }
+    }
     Connections {
         target: controller;
         function onGyroflow_file_loaded(obj: var): void {
@@ -231,13 +240,7 @@ Item {
                     root.separateRangeSettings = obj.trim_range_config == "separate";
                     root.displayedRangeInfo = null;
                 }
-                if (obj.hasOwnProperty("trim_ranges_ms")) {
-                    // The output path (and with separate settings, the stabilization settings) of each range are kept with it
-                    const info = obj.trim_range_info || [];
-                    timeline.setTrimRanges(obj.trim_ranges_ms.map((x, i) => [x[0] / duration_ms, (x[1] < 0? duration_ms + x[1] : x[1]) / duration_ms, info[i] || ({ })]));
-                } else if (obj.hasOwnProperty("trim_ranges")) {
-                    timeline.setTrimRanges(obj.trim_ranges);
-                }
+                root.applyTrimRanges(obj, duration_ms);
                 window.motionData.loadGyroflow(obj);
                 window.stab.loadGyroflow(obj);
                 window.advanced.loadGyroflow(obj);
@@ -807,8 +810,14 @@ Item {
                         Qt.callLater(timeline.updateDurations);
                         window.motionData.filename = "";
 
-                        if (root.pendingGyroflowData) {
-                            Qt.callLater(root.loadGyroflowData, root.pendingGyroflowData, root.pendingQueueJobId);
+                        const pending = root.pendingGyroflowData;
+                        if (pending) {
+                            // The video plays while the gyro data loads, and the settings are only applied once it's loaded.
+                            // Its trim ranges are shown right away, the timeline would show the whole video until then
+                            if (pending.toString() == '[object Object]' && !pending.project_file) {
+                                root.applyTrimRanges(pending, (pending.video_info || { }).duration_ms || vid.duration);
+                            }
+                            Qt.callLater(root.loadGyroflowData, pending, root.pendingQueueJobId);
                         } else {
                             controller.load_telemetry(root.loadedFileUrl, true, vid, -1, 0);
                         }
