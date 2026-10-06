@@ -615,36 +615,12 @@ Rectangle {
                         icon.width: 18 * dpiScale;
                         icon.height: 18 * dpiScale;
                         iconName: "menu";
-                        tooltip: qsTr("Project files, presets and applying the settings to other ranges, clips or the queue");
+                        tooltip: qsTr("Project files");
                         onClicked: moreMenu.popup(moreBtn, 0, -moreMenu.height);
                         Components.Menu {
                             id: moreMenu;
                             Action { iconName: "save"; text: qsTr("Export project file"); onTriggered: window.saveProject("WithGyroData"); }
                             Action { iconName: "save"; text: qsTr("Save project file"); enabled: controller.project_file_url != ""; onTriggered: window.saveProject(""); }
-                            Action { iconName: "settings"; text: qsTr("Create settings preset"); onTriggered: renderBtn.openSettingsSelector("preset"); }
-                            QQC.MenuSeparator { verticalPadding: 5 * dpiScale; }
-                            // The settings shown in the main view, to the queue, the other trim ranges of the video or the other videos
-                            Components.Menu {
-                                title: qsTr("Apply settings to…");
-                                Action { iconName: "queue"; text: qsTr("The render queue…"); enabled: render_queue.queue.rowCount() > 0; onTriggered: renderBtn.openSettingsSelector("apply"); }
-                                QQC.MenuSeparator { verticalPadding: 5 * dpiScale; }
-                                Action {
-                                    iconName: "gyroflow";
-                                    text: qsTr("All ranges of this clip (stabilization)");
-                                    enabled: videoArea.separateRangeSettings;
-                                    onTriggered: {
-                                        videoArea.applySettingsToAllRanges();
-                                        mediaPanel.saveCurrentSettings();
-                                        showNotification(Modal.Success, qsTr("Stabilization settings applied to all trim ranges of this video."));
-                                    }
-                                }
-                                Action {
-                                    iconName: "gyroflow";
-                                    text: qsTr("All other clips (stabilization)");
-                                    enabled: videoArea.vid.loaded;
-                                    onTriggered: mediaPanel.applyStabilizationToAll();
-                                }
-                            }
                         }
                     }
                 }
@@ -678,11 +654,73 @@ Rectangle {
             Hr { id: syncHr; visible: window.stabilizationEnabled; }
             ItemLoader { id: stab; visible: status == Loader.Ready && window.stabilizationEnabled; sourceComponent: Component { Menu.Stabilization { } } }
             Hr { id: stabHr; visible: window.stabilizationEnabled; }
-            ItemLoader { id: exportSettings; sourceComponent: Component { Menu.Export { showBtn: !window.isMobileLayout; } } }
-            Hr { id: exportHr; visible: !isMobileLayout; }
             ItemLoader { id: advanced; sourceComponent: Component { Menu.Advanced { } } }
-            Hr { id: advancedHr; visible: nlePlugins.active }
+            // On the mobile layout it's the last one of the parameters tab, before the plugins
+            Hr { id: advancedHr; visible: !isMobileLayout || nlePlugins.active }
+            ItemLoader { id: exportSettings; sourceComponent: Component { Menu.Export { showBtn: !window.isMobileLayout; } } }
+            Hr { id: exportHr; visible: !isMobileLayout && nlePlugins.active; }
             ItemLoader { id: nlePlugins; active: controller.is_nle_installed(); sourceComponent: Component { Menu.NlePlugins { } } }
+
+            // Stays at the bottom of the panel while the settings above scroll: applying the settings shown to other
+            // ranges, clips or the queue, and creating a preset from them
+            Item {
+                id: settingsFooter;
+                Component.onCompleted: { parent = rightPanel; rightPanel.bottomPadding = Qt.binding(() => settingsFooter.visible? settingsFooter.height : 0); }
+                visible: !isMobileLayout && !videoArea.isCalibrator;
+                width: parent? parent.width : 0;
+                height: 48 * dpiScale;
+                y: parent? parent.height - height : 0;
+                Hr { width: parent.width; anchors.top: parent.top; }
+                Row {
+                    id: settingsFooterRow;
+                    anchors.verticalCenter: parent.verticalCenter;
+                    anchors.horizontalCenter: parent.horizontalCenter;
+                    spacing: 8 * dpiScale;
+                    readonly property real buttonWidth: (settingsFooter.width - 3 * spacing) / 2;
+                    Button {
+                        id: applySettingsBtn;
+                        width: settingsFooterRow.buttonWidth;
+                        height: 30 * dpiScale;
+                        font.pixelSize: 12 * dpiScale;
+                        iconName: "gyroflow";
+                        text: qsTr("Apply settings");
+                        rightPadding: 28 * dpiScale;
+                        tooltip: qsTr("Apply the settings shown to other ranges, clips or the render queue");
+                        onClicked: applySettingsMenu.popup(applySettingsBtn, 0, -applySettingsMenu.height);
+                        DropdownChevron { opened: applySettingsMenu.visible; }
+                        Components.Menu {
+                            id: applySettingsMenu;
+                            Action { iconName: "queue"; text: qsTr("To the render queue…"); enabled: render_queue.queue.rowCount() > 0; onTriggered: renderBtn.openSettingsSelector("apply"); }
+                            QQC.MenuSeparator { verticalPadding: 5 * dpiScale; }
+                            Action {
+                                iconName: "gyroflow";
+                                text: qsTr("To all ranges of this clip (stabilization)");
+                                enabled: videoArea.separateRangeSettings;
+                                onTriggered: {
+                                    videoArea.applySettingsToAllRanges();
+                                    mediaPanel.saveCurrentSettings();
+                                    showNotification(Modal.Success, qsTr("Stabilization settings applied to all trim ranges of this video."));
+                                }
+                            }
+                            Action {
+                                iconName: "gyroflow";
+                                text: qsTr("To all other clips (stabilization)");
+                                enabled: videoArea.vid.loaded;
+                                onTriggered: mediaPanel.applyStabilizationToAll();
+                            }
+                        }
+                    }
+                    Button {
+                        width: settingsFooterRow.buttonWidth;
+                        height: 30 * dpiScale;
+                        font.pixelSize: 12 * dpiScale;
+                        iconName: "settings";
+                        text: qsTr("Create preset");
+                        tooltip: qsTr("Create a settings preset from the settings shown");
+                        onClicked: renderBtn.openSettingsSelector("preset");
+                    }
+                }
+            }
             LinkButton {
                 id: mobileSettingsBtn;
                 visible: isMobileLayout;
