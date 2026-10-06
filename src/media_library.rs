@@ -1532,10 +1532,19 @@ impl MediaLibrary {
             Self::assign_range_paths(&mut data, &base);
         }
         let data = data.to_string();
+        // Files without the hash of their settings (rendered before it was written, or found before the video had settings)
+        // were rendered with the settings it's opened with first: later changes make them outdated
+        let unknown = self.video(item_id).map(|v| self.outputs(v, None).into_iter()
+            .filter(|x| v.output_hashes.get(&x.url()).is_some_and(|h| h.is_empty()))
+            .map(|x| (x.url(), x.range_index)).collect::<Vec<_>>()).unwrap_or_default();
         let Some(v) = self.video_mut(item_id) else { return; };
         // The trim ranges (and with them the output files) are edited in the timeline of the main view
         let outputs_changed = Self::range_info(&v.settings) != Self::range_info(&Some(data.clone()));
         v.settings = Some(data);
+        for (url, range_index) in unknown {
+            let hash = Self::output_hash(&v.settings, range_index);
+            v.output_hashes.insert(url, hash);
+        }
         self.reconcile_keys(item_id);
         if outputs_changed {
             self.rebuild();
