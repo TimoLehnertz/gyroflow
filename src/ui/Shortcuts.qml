@@ -457,9 +457,10 @@ Item {
         }
     }
 
-    // Previous file in folder
+    // Previous file in folder. While the media list has the focus, Ctrl+A selects all of its items instead
     Shortcut {
         sequence: "Ctrl+A";
+        enabled: !(window.mediaPanel && window.mediaPanel.listHasFocus);
         onActivated: {
             const url = filesystem.get_next_file_url(videoArea.loadedFileUrl, -1);
             if (url && url.toString()) videoArea.loadFile(url);

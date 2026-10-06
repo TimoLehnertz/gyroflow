@@ -30,6 +30,8 @@ ResizablePanel {
     // Job of the item loaded in the main view, so the bottom bar can show whether it's in the queue
     property int currentJobId: 0;
     property alias queueModal: queueModalLoader;
+    // Shortcuts that act on the selection of the list instead (eg. Ctrl+A) while it has the focus
+    readonly property bool listHasFocus: lv.activeFocus;
     readonly property bool listHasFocus: lv.activeFocus;
     // Jobs queued from here, the user already decided to (re-)stabilize these items, so their output is always overwritten
     property var ownJobs: ({ });
@@ -1090,6 +1092,13 @@ ResizablePanel {
         spacing: 2 * dpiScale;
         model: media_library.items;
         focus: true;
+        // Ctrl+A selects all items while the list has the focus, otherwise it's the previous file of the folder (Shortcuts.qml)
+        Shortcut {
+            sequence: StandardKey.SelectAll;
+            context: Qt.WidgetWithChildrenShortcut;
+            enabled: lv.activeFocus;
+            onActivated: { media_library.select_all(true); root.refreshState(); }
+        }
         Shortcut {
             sequences: ["Delete", "Backspace"];
             context: Qt.WidgetWithChildrenShortcut;

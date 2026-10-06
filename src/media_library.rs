@@ -1205,9 +1205,11 @@ impl MediaLibrary {
         }
         self.update_selection_rows();
     }
+    /// Selects all videos the list shows (the ones matching the search), or none
     pub fn select_all(&mut self, selected: bool) {
+        let shown = self.all_videos().filter(|v| self.matches_search(v)).map(|v| v.id).collect::<std::collections::HashSet<_>>();
         for v in self.all_videos_mut() {
-            Self::select_video(v, selected);
+            Self::select_video(v, selected && shown.contains(&v.id));
         }
         self.update_selection_rows();
     }
