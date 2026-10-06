@@ -1134,9 +1134,15 @@ ResizablePanel {
                         }
                         Action {
                             iconName: "play";
-                            text: qsTr("Open rendered file");
+                            text: qsTr("Open stabilized file");
                             enabled: !dlg.isFolder && stabilized_state > 0 && Qt.platform.os != "ios";
                             onTriggered: filesystem.open_file_externally(filesystem.get_file_url(media_library.get_output_folder(item_id), media_library.get_output_filename(item_id, ""), false));
+                        }
+                        Action {
+                            iconName: "folder";
+                            text: qsTr("Open stabilized file location");
+                            enabled: !dlg.isFolder && stabilized_state > 0 && Qt.platform.os != "ios";
+                            onTriggered: filesystem.open_file_externally(media_library.get_output_folder(item_id));
                         }
                         Action {
                             iconName: "info";
