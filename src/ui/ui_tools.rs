@@ -32,6 +32,10 @@ pub struct UITools {
 
     language_changed: qt_signal!(),
 
+    // A press or release of J, K or L (Qt.Key_*), see `util::catch_transport_keys`
+    transport_key: qt_signal!(key: i32, pressed: bool),
+    transport_key_event: qt_method!(fn(&self, key: i32, pressed: bool)),
+
     calibrator_ctl: Option<RefCell<Controller>>,
 
     #[cfg(target_os = "windows")]
@@ -201,6 +205,8 @@ impl UITools {
             }
         }
     }
+
+    fn transport_key_event(&self, key: i32, pressed: bool) { self.transport_key(key, pressed); }
 
     pub fn closing(&mut self) {
         #[cfg(target_os = "windows")]

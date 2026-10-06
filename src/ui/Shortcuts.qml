@@ -187,14 +187,23 @@ Item {
         onActivated: videoArea.timeline.setDisplayMode(3);
     }
 
+    // One second forward / back
+    Shortcut {
+        sequence: "Shift+Right";
+        onActivated: videoArea.vid.seekToFrameDelta(Math.max(1, Math.round(videoArea.vid.frameRate)));
+    }
+    Shortcut {
+        sequence: "Shift+Left";
+        onActivated: videoArea.vid.seekToFrameDelta(-Math.max(1, Math.round(videoArea.vid.frameRate)));
+    }
     // Next keyframe
     Shortcut {
-        sequences: ["Shift+Right", "Shift+Page Down"];
+        sequences: ["Shift+Page Down"];
         onActivated: videoArea.timeline.jumpToNextKeyframe("");
     }
     // Previous keyframe
     Shortcut {
-        sequences: ["Shift+Left", "Shift+Page Up"];
+        sequences: ["Shift+Page Up"];
         onActivated: videoArea.timeline.jumpToPrevKeyframe("");
     }
 
@@ -265,33 +274,136 @@ Item {
         onActivated: videoArea.gridGuide.isBlack = !videoArea.gridGuide.isBlack;
     }
 
-    // Play backwards
-    Shortcut {
-        id: j;
-        sequence: "J";
-        property int currentX: 1;
-        onActivated: {
-            //videoArea.vid.playbackRate = -1 * [1, 2, 4, 8, 16][currentX++ % 5];
-            videoArea.vid.seekToFrameDelta(-500);
-            videoArea.vid.play();
+    // J / K / L playback, as in DaVinci Resolve: J plays backward and L forward, pressed again they shuttle faster
+    // (2x, 4x, 8x, 16x), K stops. Holding K with J or L plays slowly, and tapping J or L while K is held steps one frame.
+    QtObject {
+        id: transport;
+        property bool jDown: false;
+        property bool kDown: false;
+        property bool lDown: false;
+        // Signed speed of the shuttle, 0 when stopped
+        property real rate: 0;
+        // Playing slowly while K and J / L are held, it stops when one of them is released
+        property bool slow: false;
+        // The playback speed chosen in the video area, the shuttle speeds are multiples of it
+        property real baseRate: 1;
+
+        function setRate(r: real): void {
+            const vid = videoArea.vid;
+            if (transport.rate == 0) transport.baseRate = vid.playbackRate > 0? vid.playbackRate : 1;
+            transport.rate = r;
+            if (r > 0) {
+                reverseTimer.stop();
+                vid.playbackRate = r * transport.baseRate;
+                vid.play();
+            } else if (r < 0) {
+                vid.pause();
+                reverseTimer.begin(-r * transport.baseRate);
+            } else {
+                reverseTimer.stop();
+                vid.pause();
+                vid.playbackRate = transport.baseRate;
+                transport.slow = false;
+            }
+        }
+        function shuttle(dir: int): void {
+            transport.slow = false;
+            // Faster in the same direction, otherwise normal speed in this one
+            if (Math.sign(transport.rate) == dir && Math.abs(transport.rate) >= 1) {
+                transport.setRate(dir * Math.min(16, Math.abs(transport.rate) * 2));
+            } else {
+                transport.setRate(dir);
+            }
+        }
+        function pressed(dir: int): void {
+            if (!videoArea.vid.loaded) return;
+            if (transport.kDown) {
+                // One frame, and playing slowly if the key stays down
+                transport.setRate(0);
+                videoArea.vid.seekToFrameDelta(dir);
+                slowTimer.dir = dir;
+                slowTimer.restart();
+            } else {
+                transport.shuttle(dir);
+            }
+        }
+        function released(): void {
+            slowTimer.stop();
+            if (transport.slow) transport.setRate(0);
         }
     }
-    // Play/Pause + reset playback rate
-    Shortcut {
-        sequences: ["K"];
-        onActivated: {
-            videoArea.vid.playbackRate = 1;
-            j.currentX = l.currentX = 0;
-            if (videoArea.vid.playing) videoArea.vid.pause();
-            else                       videoArea.vid.play();
+    Timer {
+        id: slowTimer;
+        interval: 300;
+        property int dir: 1;
+        onTriggered: {
+            if (transport.kDown && (dir > 0? transport.lDown : transport.jDown)) {
+                transport.setRate(dir * 0.25);
+                transport.slow = true;
+            }
         }
     }
-    // Play forward
-    Shortcut {
-        id: l;
-        sequence: "L";
-        property int currentX: 1;
-        onActivated: { videoArea.vid.playbackRate = 1 * [1, 2, 4, 8, 16][currentX++ % 5]; videoArea.vid.play(); }
+    // The player doesn't play backward, so it seeks back in steps, keeping the speed by the time that passed
+    Timer {
+        id: reverseTimer;
+        interval: 40;
+        repeat: true;
+        property real speed: 1;
+        property real lastTime: 0;
+        property real frame: 0;
+        function begin(speed: real): void {
+            reverseTimer.speed = speed;
+            reverseTimer.lastTime = Date.now();
+            reverseTimer.frame = videoArea.vid.currentFrame;
+            reverseTimer.restart();
+        }
+        onTriggered: {
+            const vid = videoArea.vid;
+            const now = Date.now();
+            reverseTimer.frame -= (now - reverseTimer.lastTime) / 1000 * vid.frameRate * reverseTimer.speed;
+            reverseTimer.lastTime = now;
+            if (reverseTimer.frame <= 0) {
+                vid.currentFrame = 0;
+                transport.setRate(0);
+                return;
+            }
+            const target = Math.round(reverseTimer.frame);
+            if (target != vid.currentFrame) vid.currentFrame = target;
+        }
+    }
+    Connections {
+        target: videoArea.vid;
+        // Played or paused another way (eg. Space or the play button) while going backward
+        function onPlayingChanged(): void {
+            if (videoArea.vid.playing && transport.rate < 0) {
+                reverseTimer.stop();
+                transport.rate = 0;
+                transport.slow = false;
+                videoArea.vid.playbackRate = transport.baseRate;
+            } else if (!videoArea.vid.playing && transport.rate > 0) {
+                transport.rate = 0;
+                transport.slow = false;
+                videoArea.vid.playbackRate = transport.baseRate;
+            }
+        }
+    }
+    Connections {
+        target: ui_tools;
+        function onTransport_key(key: int, pressed: bool): void {
+            if (key == Qt.Key_K) {
+                transport.kDown = pressed;
+                if (pressed) transport.setRate(0);
+                else transport.released();
+            } else if (key == Qt.Key_J) {
+                transport.jDown = pressed;
+                if (pressed) transport.pressed(-1);
+                else transport.released();
+            } else if (key == Qt.Key_L) {
+                transport.lDown = pressed;
+                if (pressed) transport.pressed(1);
+                else transport.released();
+            }
+        }
     }
 
     // Horizon lock roll adjustment shortcuts

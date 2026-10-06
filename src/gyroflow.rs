@@ -178,6 +178,8 @@ fn entry() {
     util::register_url_handlers();
 
     let mut engine = QmlEngine::new();
+    // After the engine, which creates the application
+    util::catch_transport_keys(ui_tools_pinned.get_or_create_cpp_object());
     util::catch_qt_file_open(|url| {
         engine.set_property("openFileOnStart".into(), url.into());
     });

@@ -95,6 +95,8 @@ cpp! {{
     #include <QObject>
     #include <QClipboard>
     #include <QEvent>
+    #include <QKeyEvent>
+    #include <QInputMethodQueryEvent>
     #if (__APPLE__ + 0) || (__linux__ + 0)
     #   include <sys/resource.h>
     #endif
@@ -112,6 +114,37 @@ cpp! {{
             return QObject::eventFilter(obj, event);
         }
         std::function<void(QUrl)> m_cb;
+    };
+
+    // Presses and releases of J, K and L for the playback controls, which depend on keys being held (eg. K and L together
+    // play slowly). A QML Shortcut only tells a press, so they are taken from the key events of the windows.
+    class TransportKeyFilter : public QObject {
+    public:
+        TransportKeyFilter(QObject *target) : m_target(target) { }
+        bool eventFilter(QObject *obj, QEvent *event) override {
+            if ((event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease) && obj->isWindowType()) {
+                auto ke = static_cast<QKeyEvent *>(event);
+                const int key = ke->key();
+                if (!ke->isAutoRepeat() && (key == Qt::Key_J || key == Qt::Key_K || key == Qt::Key_L)) {
+                    const bool pressed = event->type() == QEvent::KeyPress;
+                    bool skip = false;
+                    if (pressed) {
+                        // Not with modifiers (other shortcuts), and not while typing in a text field
+                        skip = (ke->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) != 0;
+                        if (QObject *fo = QGuiApplication::focusObject(); fo && !skip) {
+                            QInputMethodQueryEvent query(Qt::ImEnabled);
+                            QCoreApplication::sendEvent(fo, &query);
+                            skip = query.value(Qt::ImEnabled).toBool();
+                        }
+                    }
+                    if (!skip) {
+                        QMetaObject::invokeMethod(m_target, "transport_key_event", Qt::DirectConnection, Q_ARG(int, key), Q_ARG(bool, pressed));
+                    }
+                }
+            }
+            return QObject::eventFilter(obj, event);
+        }
+        QObject *m_target;
     };
 }}
 #[cfg(target_os = "android")]
@@ -178,6 +211,13 @@ pub fn catch_qt_file_open<F: FnMut(QUrl)>(cb: F) {
                 let _ = Box::into_raw(cb); // leak again so it doesn't get deleted here
             });
         }));
+    });
+}
+
+/// Sends the presses and releases of J, K and L to `transport_key_event` of `target`
+pub fn catch_transport_keys(target: *mut c_void) {
+    cpp!(unsafe [target as "QObject *"] {
+        qGuiApp->installEventFilter(new TransportKeyFilter(target));
     });
 }
 
