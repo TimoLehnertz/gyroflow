@@ -202,7 +202,7 @@ deploy *param:
         cp -f  "$PROJECT_DIR/target/deploy/gyroflow"          "$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/MacOS/"
         strip "$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/MacOS/gyroflow"
         cp -Rf "$PROJECT_DIR/target/Frameworks/mdk.framework" "$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/Frameworks/" || true
-        cp -Rf "$PROJECT_DIR/target/x86_64-apple-darwin/Frameworks/mdk.framework" "$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/Frameworks/"
+        cp -Rf "$PROJECT_DIR/target/x86_64-apple-darwin/Frameworks/mdk.framework" "$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/Frameworks/" || true
         # cp -Rf "$PROJECT_DIR/resources/camera_presets"        "$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/Resources/"
         # rm -rf "$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/Resources/camera_presets/.git"
         cp -f "$PROJECT_DIR/resources/camera_presets/profiles.cbor.gz" "$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/Resources/camera_presets/profiles.cbor.gz"
