@@ -40,7 +40,11 @@ Rectangle {
     // where it was when it closes
     readonly property bool blocksShortcuts: root.opened;
     property Item focusBefore: null;
+    // Counted while it's open, see `modalHasKeyboard` of App.qml
+    function countOpen(open: bool): void { if (typeof window !== "undefined" && window.modalOpened) window.modalOpened(open); }
+    Component.onDestruction: if (root.opened) root.countOpen(false);
     onOpenedChanged: {
+        root.countOpen(opened);
         if (opened) {
             root.focusBefore = root.Window.activeFocusItem;
             root.forceActiveFocus();

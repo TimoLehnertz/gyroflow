@@ -899,6 +899,7 @@ Item {
                 }
 
                 TapHandler {
+                    enabled: !(typeof window !== "undefined" && window.modalHasKeyboard);
                     onTapped: timeline.focus = true;
                     onDoubleTapped: root.fullScreen = root.fullScreen? 0 : 1;
                 }
@@ -931,6 +932,7 @@ Item {
                     sourceRect: Qt.rect((vidParent.width - (vidParent.width / secondPreview.ratio)) / 2, (vidParent.height - (vidParent.height / secondPreview.ratio)) / 2, vidParent.width / secondPreview.ratio, vidParent.height / secondPreview.ratio);
                 }
                 TapHandler {
+                    enabled: !(typeof window !== "undefined" && window.modalHasKeyboard);
                     onTapped: timeline.focus = true;
                     onDoubleTapped: root.fullScreen = root.fullScreen? 0 : 1;
                 }

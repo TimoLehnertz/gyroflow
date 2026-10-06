@@ -106,6 +106,13 @@ Rectangle {
 
     readonly property bool wasModified: window.videoArea.vid.loaded;
     property bool isDialogOpened: false;
+    // The number of modals that are open (they count themselves in `modalOpened`). Meanwhile the keys and the pointer
+    // handlers of the main view ignore what happens: a pointer handler also gets the clicks in a modal above it (eg. the
+    // TapHandler of the video focused the timeline, so the keys typed in the modal were its shortcuts and the dropdowns of
+    // the modal closed right away). The dropdowns of a modal are in the overlay, outside of it, so it's not by the focus
+    property int openModals: 0;
+    readonly property bool modalHasKeyboard: openModals > 0;
+    function modalOpened(opened: bool): void { window.openModals = Math.max(0, window.openModals + (opened? 1 : -1)); }
 
     FileDialog {
         id: fileDialog;

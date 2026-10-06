@@ -14,6 +14,9 @@ Item {
     id: root;
 
     property bool shown: false;
+    // Counted while it's open, the main view ignores the clicks and keys meanwhile (see `modalHasKeyboard` of App.qml)
+    onShownChanged: if (typeof window !== "undefined" && window.modalOpened) window.modalOpened(shown);
+    Component.onDestruction: if (shown && typeof window !== "undefined" && window.modalOpened) window.modalOpened(false);
     opacity: shown? 1 : 0;
     visible: opacity > 0;
     Ease on opacity { duration: 300; }

@@ -53,6 +53,7 @@ Rectangle {
 
         DragHandler {
             id: rpd;
+            enabled: !(typeof window !== "undefined" && window.modalHasKeyboard);
             target: null;
             onActiveChanged: {
                 if (!active) {

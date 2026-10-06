@@ -53,11 +53,12 @@ Rectangle {
             }
             DragHandler {
                 id: leftTrimDrag;
+                enabled: !(typeof window !== "undefined" && window.modalHasKeyboard);
                 target: null;
                 onActiveChanged: if (!active) { root.changeTrimStart(Math.max(0.0, root.trimStart + root.trimStartAdjustment)); root.trimStartAdjustment = 0; }
                 onActiveTranslationChanged: root.trimStartAdjustment = (leftTrimDrag.activeTranslation.x / root.parent.width) * root.visibleRange;
             }
-            TapHandler { onDoubleTapped: root.reset(); }
+            TapHandler { enabled: !(typeof window !== "undefined" && window.modalHasKeyboard); onDoubleTapped: root.reset(); }
         }
 
         Rectangle {
@@ -85,11 +86,12 @@ Rectangle {
             }
             DragHandler {
                 id: rightTrimDrag;
+                enabled: !(typeof window !== "undefined" && window.modalHasKeyboard);
                 target: null;
                 onActiveChanged: if (!active) { root.changeTrimEnd(Math.min(1.0, root.trimEnd + root.trimEndAdjustment)); root.trimEndAdjustment = 0; }
                 onActiveTranslationChanged: root.trimEndAdjustment = (rightTrimDrag.activeTranslation.x / root.parent.width) * root.visibleRange;
             }
-            TapHandler { onDoubleTapped: root.reset(); }
+            TapHandler { enabled: !(typeof window !== "undefined" && window.modalHasKeyboard); onDoubleTapped: root.reset(); }
         }
         Rectangle {
             color: parent.color;
@@ -124,6 +126,7 @@ Rectangle {
             }
             DragHandler {
                 id: moveDrag;
+                enabled: !(typeof window !== "undefined" && window.modalHasKeyboard);
                 target: null;
                 xAxis.enabled: true;
                 yAxis.enabled: false;

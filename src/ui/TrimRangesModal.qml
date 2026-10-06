@@ -78,6 +78,10 @@ Item {
     // While it's shown it has the keyboard: the keys typed in it aren't shortcuts of the main view (accepting the override
     // event stops a shortcut), and it closes with Esc. The focus goes back where it was when it closes
     readonly property bool blocksShortcuts: root.shown;
+    // Counted while it's open, see `modalHasKeyboard` of App.qml
+    function countOpen(open: bool): void { if (typeof window !== "undefined" && window.modalOpened) window.modalOpened(open); }
+    onShownChanged: root.countOpen(root.shown);
+    Component.onDestruction: if (root.shown) root.countOpen(false);
     property Item focusBefore: null;
     Keys.onShortcutOverride: (event) => { if (root.shown) event.accepted = true; }
     Keys.onEscapePressed: root.close();

@@ -12,6 +12,9 @@ Item {
     id: root;
 
     property bool shown: false;
+    // Counted while it's open, the main view ignores the clicks and keys meanwhile (see `modalHasKeyboard` of App.qml)
+    onShownChanged: if (typeof window !== "undefined" && window.modalOpened) window.modalOpened(shown);
+    Component.onDestruction: if (shown && typeof window !== "undefined" && window.modalOpened) window.modalOpened(false);
     property alias col: col;
     // The panels declared inside go into the scrollable column
     default property alias data: col.data;

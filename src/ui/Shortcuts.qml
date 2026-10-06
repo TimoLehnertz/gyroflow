@@ -11,12 +11,7 @@ Item {
     property VideoArea videoArea;
 
     // A modal that's open has the keyboard, its keys aren't for the main view (the shortcuts are stopped by the modal itself)
-    function keyboardInModal(): bool {
-        for (let item = main_window.activeFocusItem; item; item = item.parent) {
-            if (item.blocksShortcuts) return true;
-        }
-        return false;
-    }
+    function keyboardInModal(): bool { return !!window.modalHasKeyboard; }
 
     // Play/Pause
     Shortcut {
