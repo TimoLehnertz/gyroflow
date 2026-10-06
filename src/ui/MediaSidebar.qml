@@ -1546,6 +1546,7 @@ ResizablePanel {
         Item {
             width: parent.width;
             height: 24 * dpiScale;
+            visible: whenDoneBtn.visible;
             LinkButton {
                 id: whenDoneBtn;
                 visible: !isMobile;
@@ -1575,107 +1576,6 @@ ResizablePanel {
                     itemHeight: 25 * dpiScale;
                     font.pixelSize: 11 * dpiScale;
                     onClicked: i => whenDoneBtn.currentOption = i;
-                }
-            }
-            LinkButton {
-                id: queueSettings;
-                anchors.right: parent.right;
-                anchors.verticalCenter: parent.verticalCenter;
-                leftPadding: 2 * dpiScale; rightPadding: 2 * dpiScale;
-                font.pixelSize: 10 * dpiScale;
-                text: qsTr("Queue settings");
-                onClicked: if (queueSettingsMenu.visible) { queueSettingsMenu.dismiss(); } else { queueSettingsMenu.popup(queueSettings, 0, -queueSettingsMenu.height); }
-
-                function setParallelRenders(v: int, menuItem: Menu): void {
-                    v = Math.min(6, Math.max(v, 1));
-
-                    render_queue.parallel_renders = v;
-
-                    for (let i = 0; i < menuItem.count; ++i) {
-                        if (menuItem.itemAt(i) instanceof QQC.MenuItem) { menuItem.actionAt(i).checked = i == v - 1; }
-                    }
-                    settings.setValue("parallelRenders", v);
-                }
-                // The remembered answer of the question when split recordings are added: 0 ask, 1 join, 2 keep the files
-                function setJoinSplitRecordings(v: int, menuItem: Menu): void {
-                    v = Math.min(2, Math.max(v, 0));
-                    for (let i = 0, j = 0; i < menuItem.count; ++i) {
-                        if (menuItem.itemAt(i) instanceof QQC.MenuItem) { menuItem.actionAt(i).checked = j == v; j++;  }
-                    }
-                    settings.setValue("dontShowAgain-join-split-recordings", v);
-                }
-                function setOverwriteAction(v: int, menuItem: Menu): void {
-                    v = Math.min(3, Math.max(v, 0));
-
-                    render_queue.overwrite_mode = v;
-
-                    for (let i = 0, j = 0; i < menuItem.count; ++i) {
-                        if (menuItem.itemAt(i) instanceof QQC.MenuItem) { menuItem.actionAt(i).checked = j == v; j++;  }
-                    }
-                    settings.setValue("defaultOverwriteAction", v);
-                }
-                function setExportMode(v: int, menuItem: Menu): void {
-                    v = Math.min(4, Math.max(v, 0));
-
-                    render_queue.export_project = v;
-
-                    for (let i = 0; i < menuItem.count; ++i) {
-                        if (menuItem.itemAt(i) instanceof QQC.MenuItem) { menuItem.actionAt(i).checked = i == v; }
-                    }
-                    settings.setValue("exportMode", v);
-                }
-
-                Menu {
-                    id: queueSettingsMenu;
-                    Menu {
-                        id: parallelRendersMenu;
-                        title: qsTr("Number of parallel renders");
-                        Action { text: "1"; onTriggered: queueSettings.setParallelRenders(1, parallelRendersMenu);  }
-                        Action { text: "2"; onTriggered: queueSettings.setParallelRenders(2, parallelRendersMenu);  }
-                        Action { text: "3"; onTriggered: queueSettings.setParallelRenders(3, parallelRendersMenu);  }
-                        Action { text: "4"; onTriggered: queueSettings.setParallelRenders(4, parallelRendersMenu);  }
-                        Action { text: "5"; onTriggered: queueSettings.setParallelRenders(5, parallelRendersMenu);  }
-                        Action { text: "6"; onTriggered: queueSettings.setParallelRenders(6, parallelRendersMenu);  }
-                        Component.onCompleted: queueSettings.setParallelRenders(+settings.value("parallelRenders", 1), parallelRendersMenu);
-                    }
-                    Menu {
-                        id: overwriteActionMenu;
-                        title: qsTr("Default overwrite action");
-                        Action { text: qsTr("Ask");            onTriggered: queueSettings.setOverwriteAction(0, overwriteActionMenu); }
-                        QQC.MenuSeparator { verticalPadding: 5 * dpiScale; }
-                        Action { text: qsTr("Overwrite file"); onTriggered: queueSettings.setOverwriteAction(1, overwriteActionMenu); }
-                        Action { text: qsTr("Rename file");    onTriggered: queueSettings.setOverwriteAction(2, overwriteActionMenu); }
-                        Action { text: qsTr("Skip file");      onTriggered: queueSettings.setOverwriteAction(3, overwriteActionMenu); }
-                        Component.onCompleted: queueSettings.setOverwriteAction(+settings.value("defaultOverwriteAction", 0), overwriteActionMenu);
-                    }
-                    Menu {
-                        id: splitRecordingsMenu;
-                        title: qsTr("Split recordings (eg. GoPro chapters)");
-                        Action { text: qsTr("Ask");               onTriggered: queueSettings.setJoinSplitRecordings(0, splitRecordingsMenu); }
-                        QQC.MenuSeparator { verticalPadding: 5 * dpiScale; }
-                        Action { text: qsTr("Join into one clip"); onTriggered: queueSettings.setJoinSplitRecordings(1, splitRecordingsMenu); }
-                        Action { text: qsTr("Keep the files");     onTriggered: queueSettings.setJoinSplitRecordings(2, splitRecordingsMenu); }
-                        // The answer can also be remembered by the question, which is shown when the menu opens
-                        onAboutToShow: queueSettings.setJoinSplitRecordings(+settings.value("dontShowAgain-join-split-recordings", 0), splitRecordingsMenu);
-                    }
-                    Menu {
-                        id: exportModeMenu;
-                        title: qsTr("Export mode");
-                        Action { text: qsTr("Stabilized video");                               onTriggered: queueSettings.setExportMode(0, exportModeMenu); }
-                        Action { text: qsTr("Project file");                                   onTriggered: queueSettings.setExportMode(1, exportModeMenu); }
-                        Action { text: qsTr("Project file (including gyro data)");             onTriggered: queueSettings.setExportMode(2, exportModeMenu); }
-                        Action { text: qsTr("Project file (including processed gyro data)");   onTriggered: queueSettings.setExportMode(3, exportModeMenu); }
-                        Action { text: qsTr("Stabilized video + Project file with gyro data"); onTriggered: queueSettings.setExportMode(4, exportModeMenu); }
-                        Component.onCompleted: queueSettings.setExportMode(+settings.value("exportMode", 0), exportModeMenu);
-                    }
-                    QQC.MenuSeparator { verticalPadding: 5 * dpiScale; }
-                    Action { checked: settings.value("showQueueWhenAdding", true); text: qsTr("Show the media list when adding an item"); onTriggered: { checked = !checked; settings.setValue("showQueueWhenAdding", checked); } }
-                    Action { text: qsTr("Clear render queue"); onTriggered: {
-                        messageBox(Modal.Warning, qsTr("Are you sure you want to remove all items from the render queue?"), [
-                            { text: qsTr("Yes"), clicked: () => { render_queue.clear(); media_library.clear_job_statuses(); } },
-                            { text: qsTr("No"), accent: true },
-                        ]);
-                    } }
                 }
             }
         }

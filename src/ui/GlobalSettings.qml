@@ -15,7 +15,7 @@ Modal {
     accentButton: 0;
     onClicked: hide();
 
-    function show(): void { opened = true; window.isDialogOpened = true; }
+    function show(): void { splitRecordings.load(); opened = true; window.isDialogOpened = true; }
     function hide(): void { opened = false; window.isDialogOpened = false; }
 
     Component.onCompleted: {
@@ -367,6 +367,88 @@ Modal {
             text: "_stabilized";
             width: parent.width;
             onTextChanged: { render_queue.default_suffix = text; media_library.default_suffix = text; }
+        }
+    }
+
+    SectionTitle { text: qsTr("Render queue"); }
+    Label {
+        position: Label.LeftPosition;
+        text: qsTr("Number of parallel renders");
+        ComboBox {
+            id: parallelRenders;
+            model: ["1", "2", "3", "4", "5", "6"];
+            font.pixelSize: 12 * dpiScale;
+            width: parent.width;
+            function apply(): void {
+                render_queue.parallel_renders = currentIndex + 1;
+                settings.setValue("parallelRenders", currentIndex + 1);
+            }
+            Component.onCompleted: { currentIndex = Math.min(6, Math.max(+settings.value("parallelRenders", 1), 1)) - 1; apply(); }
+            onActivated: apply();
+        }
+    }
+    Label {
+        position: Label.LeftPosition;
+        text: qsTr("Default overwrite action");
+        ComboBox {
+            id: overwriteAction;
+            model: [QT_TRANSLATE_NOOP("Popup", "Ask"), QT_TRANSLATE_NOOP("Popup", "Overwrite file"), QT_TRANSLATE_NOOP("Popup", "Rename file"), QT_TRANSLATE_NOOP("Popup", "Skip file")];
+            font.pixelSize: 12 * dpiScale;
+            width: parent.width;
+            function apply(): void {
+                render_queue.overwrite_mode = currentIndex;
+                settings.setValue("defaultOverwriteAction", currentIndex);
+            }
+            Component.onCompleted: { currentIndex = Math.min(3, Math.max(+settings.value("defaultOverwriteAction", 0), 0)); apply(); }
+            onActivated: apply();
+        }
+    }
+    Label {
+        position: Label.LeftPosition;
+        text: qsTr("Export mode");
+        ComboBox {
+            id: exportMode;
+            model: [QT_TRANSLATE_NOOP("Popup", "Stabilized video"), QT_TRANSLATE_NOOP("Popup", "Project file"), QT_TRANSLATE_NOOP("Popup", "Project file (including gyro data)"), QT_TRANSLATE_NOOP("Popup", "Project file (including processed gyro data)"), QT_TRANSLATE_NOOP("Popup", "Stabilized video + Project file with gyro data")];
+            font.pixelSize: 12 * dpiScale;
+            width: parent.width;
+            function apply(): void {
+                render_queue.export_project = currentIndex;
+                settings.setValue("exportMode", currentIndex);
+            }
+            Component.onCompleted: { currentIndex = Math.min(4, Math.max(+settings.value("exportMode", 0), 0)); apply(); }
+            onActivated: apply();
+        }
+    }
+    Label {
+        position: Label.TopPosition;
+        text: qsTr("Split recordings (eg. GoPro chapters)");
+        ComboBox {
+            id: splitRecordings;
+            // The remembered answer of the question when split recordings are added: 0 ask, 1 join, 2 keep the files.
+            // The question can remember it too, so it's read again when the dialog opens
+            model: [QT_TRANSLATE_NOOP("Popup", "Ask"), QT_TRANSLATE_NOOP("Popup", "Join into one clip"), QT_TRANSLATE_NOOP("Popup", "Keep the files")];
+            font.pixelSize: 12 * dpiScale;
+            width: parent.width;
+            function load(): void { currentIndex = Math.min(2, Math.max(+settings.value("dontShowAgain-join-split-recordings", 0), 0)); }
+            Component.onCompleted: load();
+            onActivated: settings.setValue("dontShowAgain-join-split-recordings", currentIndex);
+        }
+    }
+    CheckBox {
+        id: showQueueWhenAdding;
+        text: qsTr("Show the media list when adding an item");
+        Component.onCompleted: checked = +settings.value("showQueueWhenAdding", 1) > 0;
+        onToggled: settings.setValue("showQueueWhenAdding", checked? 1 : 0);
+    }
+    LinkButton {
+        text: qsTr("Clear render queue");
+        textColor: "#f67575";
+        leftPadding: 0;
+        onClicked: {
+            messageBox(Modal.Warning, qsTr("Are you sure you want to remove all items from the render queue?"), [
+                { text: qsTr("Yes"), clicked: () => { render_queue.clear(); media_library.clear_job_statuses(); } },
+                { text: qsTr("No"), accent: true },
+            ]);
         }
     }
 
