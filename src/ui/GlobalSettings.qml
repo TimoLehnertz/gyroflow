@@ -38,6 +38,7 @@ Modal {
         property alias gpudecode: gpudecode.checked;
         property alias defaultSuffix: defaultSuffix.text;
         property alias playSounds: playSounds.checked;
+        property alias restorePreviousQueue: restorePreviousQueue.checked;
         property alias useVulkanEncoder: useVulkanEncoder.checked;
         property alias useD3D12Encoder: useD3D12Encoder.checked;
         property alias r3dConvertFormat: r3dConvertFormat.currentIndex;
@@ -439,6 +440,25 @@ Modal {
         text: qsTr("Show the media list when adding an item");
         Component.onCompleted: checked = +settings.value("showQueueWhenAdding", 1) > 0;
         onToggled: settings.setValue("showQueueWhenAdding", checked? 1 : 0);
+    }
+    Row {
+        width: parent.width;
+        spacing: 10 * dpiScale;
+        CheckBox {
+            id: restorePreviousQueue;
+            text: qsTr("Restore queue on start");
+            tooltip: qsTr("Add the unfinished items of the render queue of previous sessions back to the queue when Gyroflow starts.\nWhen disabled, they are kept until they are restored with the button next to it.");
+            checked: true;
+            width: parent.width - restoreQueueNow.width - parent.spacing;
+            anchors.verticalCenter: parent.verticalCenter;
+        }
+        Button {
+            id: restoreQueueNow;
+            text: qsTr("Restore now");
+            tooltip: qsTr("Add the unfinished items of the render queue of previous sessions to the queue now.");
+            anchors.verticalCenter: parent.verticalCenter;
+            onClicked: window.mediaPanel.restorePreviousQueue(true);
+        }
     }
     LinkButton {
         text: qsTr("Clear render queue");
