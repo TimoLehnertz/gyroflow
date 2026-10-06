@@ -438,8 +438,8 @@ Item {
                     calibrator_window.lensCalib.previewResolution = 2;
                 }
             } else {
-                if (settings.value("previewResolution", -1) == -1 && window.advanced.previewResolution == 0) {
-                    window.advanced.previewResolution = 2;
+                if (settings.value("previewResolution", -1) == -1 && window.globalSettings.previewResolution == 0) {
+                    window.globalSettings.previewResolution = 2;
                 }
             }
         }
@@ -533,7 +533,7 @@ Item {
         if (!isCalibrator) {
             // The output path of a video in the media library is managed there
             if (!window.outputFile.pathMode) {
-                const suffix = window.advanced.defaultSuffix.text;
+                const suffix = window.globalSettings.defaultSuffix.text;
                 window.outputFile.setFilename(filesystem.filename_with_suffix(filename, suffix).replace(/%0[0-9]+d/, ""));
 
                 const preservedPath = settings.value("preservedOutputPath", "");
@@ -1442,7 +1442,7 @@ Item {
                 videoLoader.currentFrame = frame;
                 videoLoader.totalFrames = total_frames;
                 videoLoader.additional = "";
-                videoLoader.text = videoLoader.active? (is_conversion? qsTr("Converting to %1 %2...").arg(window.advanced.r3dConvertFormat.currentText) : qsTr("Rendering %1...")) : "";
+                videoLoader.text = videoLoader.active? (is_conversion? qsTr("Converting to %1 %2...").arg(window.globalSettings.r3dConvertFormat.currentText) : qsTr("Rendering %1...")) : "";
                 videoLoader.progress = videoLoader.active? progress : -1;
                 videoLoader.cancelable = true;
                 videoLoader.startTime = start_time;

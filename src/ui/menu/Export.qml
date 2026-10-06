@@ -93,8 +93,6 @@ MenuItem {
         property alias keyframeDistance: keyframeDistance.value;
         property alias preserveOtherTracks: preserveOtherTracks.checked;
         property alias padWithBlack: padWithBlack.checked;
-        property alias useVulkanEncoder: useVulkanEncoder.checked;
-        property alias useD3D12Encoder: useD3D12Encoder.checked;
         property alias metadataComment: metadataComment.text;
         property alias audioCodec: audioCodec.currentIndex;
         property alias interpolationMethod: interpolationMethod.currentIndex;
@@ -662,56 +660,11 @@ MenuItem {
                 currentIndex: 2;
             }
         }
-        Label {
-            position: Label.TopPosition;
-            text: qsTr("Device for rendering");
-            visible: root.outGpu && renderingDevice.model.length > 0;
-            ComboBox {
-                id: renderingDevice;
-                model: [];
-                font.pixelSize: 12 * dpiScale;
-                width: parent.width;
-                currentIndex: 0;
-                property bool preventChange: true;
-                property var orgList: [];
-                Connections {
-                    target: controller;
-                    function onGpu_list_loaded(list: list<string>): void {
-                        const saved = settings.value("renderingDevice", defaultInitializedDevice);
-                        const toRemove = [ "[OpenCL]", "[wgpu]", "(Vulkan)", "(Metal)", "(Dx12)", "(Dx11)", "(Gl)" ];
-                        list = list.map(x => {
-                            for (const keyword of toRemove) {
-                                x = x.replace(keyword, "").trim()
-                            }
-                            if (Qt.platform.os == "ios" && x.toLowerCase().includes("apple m")) {
-                                root.exportFormats[2]['gpu'] = true; // ProRes is supported on apple silicon
-                            }
-                            return x;
-                        });
-                        list = [...new Set(list)];
-
-                        renderingDevice.orgList = list;
-                        renderingDevice.preventChange = true;
-                        renderingDevice.model = list;
-                        for (let i = 0; i < list.length; ++i) {
-                            if (list[i] == saved) {
-                                renderingDevice.currentIndex = i;
-                                break;
-                            }
-                        }
-                        if (saved != defaultInitializedDevice) {
-                            Qt.callLater(renderingDevice.updateController);
-                        }
-                        renderingDevice.preventChange = false;
-                    }
-                }
-                onCurrentTextChanged: {
-                    if (preventChange) return;
-                    Qt.callLater(renderingDevice.updateController);
-                }
-                function updateController(): void {
-                    controller.set_rendering_gpu_type_from_name(renderingDevice.currentText);
-                    settings.setValue("renderingDevice", renderingDevice.orgList[renderingDevice.currentIndex]);
+        Connections {
+            target: controller;
+            function onGpu_list_loaded(list: list<string>): void {
+                if (Qt.platform.os == "ios" && list.some(x => x.toLowerCase().includes("apple m"))) {
+                    root.exportFormats[2]['gpu'] = true; // ProRes is supported on apple silicon
                 }
             }
         }
@@ -739,24 +692,6 @@ MenuItem {
                     if (outputFolder) settings.setValue("preservedOutputPath", outputFolder);
                 }
             }
-        }
-        CheckBox {
-            visible: Qt.platform.os == "linux" || Qt.platform.os == "windows";
-            id: useVulkanEncoder;
-            text: qsTr("Use experimental Vulkan encoder (HEVC only)");
-            checked: false;
-            width: parent.width;
-            Component.onCompleted: contentItem.wrapMode = Text.WordWrap;
-            onCheckedChanged: Qt.callLater(renderingDevice.updateController);
-        }
-        CheckBox {
-            visible: Qt.platform.os == "windows";
-            id: useD3D12Encoder;
-            text: qsTr("Use experimental D3D12 encoder (HEVC and AVC)");
-            checked: false;
-            width: parent.width;
-            Component.onCompleted: contentItem.wrapMode = Text.WordWrap;
-            onCheckedChanged: Qt.callLater(renderingDevice.updateController);
         }
     }
 }

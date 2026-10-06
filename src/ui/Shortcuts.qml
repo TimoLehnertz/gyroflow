@@ -221,6 +221,7 @@ Item {
     // Close the render queue, or exit full screen mode
     Shortcut {
         sequence: "Esc";
+        enabled: !(typeof window !== "undefined" && window.globalSettings && window.globalSettings.opened); // Esc closes the settings
         onActivated: {
             const queueModal = window.mediaPanel? window.mediaPanel.queueModal.item : null;
             if (queueModal && queueModal.shown) {

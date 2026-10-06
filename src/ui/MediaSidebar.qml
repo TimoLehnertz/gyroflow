@@ -811,8 +811,21 @@ ResizablePanel {
             Image {
                 id: logo;
                 source: "qrc:/resources/logo" + (style === "dark"? "_white" : "_black") + ".svg"
-                sourceSize.width: Math.min(220 * dpiScale, parent.width * 0.8);
+                sourceSize.width: Math.min(220 * dpiScale, parent.width * 0.8 - 2 * settingsBtn.width);
                 anchors.centerIn: parent;
+            }
+            LinkButton {
+                id: settingsBtn;
+                width: 32 * dpiScale;
+                height: 32 * dpiScale;
+                leftPadding: 0; rightPadding: 0;
+                iconName: "settings";
+                textColor: styleTextColor;
+                transparent: true;
+                anchors.right: parent.right;
+                anchors.verticalCenter: parent.verticalCenter;
+                tooltip: qsTr("Settings");
+                onClicked: window.globalSettings.show();
             }
         }
         Hr { width: parent.width; }
@@ -1743,7 +1756,7 @@ ResizablePanel {
     }
 
     Component.onCompleted: {
-        if (window.advanced) media_library.default_suffix = window.advanced.defaultSuffix.text;
+        if (window.globalSettings) media_library.default_suffix = window.globalSettings.defaultSuffix.text;
         root.refreshState();
     }
 }
