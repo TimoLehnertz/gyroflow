@@ -265,7 +265,7 @@ Rectangle {
                         // With trim ranges exported as separate videos, the jobs of the other ranges render after it
                         property int directJobId: 0;
                         property var directNextJobs: [];
-                        // The trim range "Stabilize now" renders, -1 for all of them
+                        // The trim range "Stabilize now" renders, -1 for the whole video
                         property int directRange: -1;
                         property bool resumeQueueAfter: false;
 
@@ -275,11 +275,11 @@ Rectangle {
                         property bool addQueueDelayed: false;
                         Timer { id: delayAddQueue; interval: 2000; onTriggered: renderBtn.addQueueDelayed = false; }
 
-                        function startAction(action: string): void {
+                        function startAction(action: string, fileConfirmed: bool): void {
                             // A path that's still being typed is the one to render to
                             outputFile.commit();
                             renderBtn.pendingAction = action;
-                            renderBtn.allowFile = false;
+                            renderBtn.allowFile = !!fileConfirmed;
                             renderBtn.allowLens = false;
                             renderBtn.allowSync = false;
                             window.videoArea.vid.pause();
@@ -323,12 +323,21 @@ Rectangle {
                         readonly property string activeRangeState: mediaPanel.keyStates[rangeUid(activeRange)] || "";
                         readonly property bool activeRangeQueued: activeRangeState.length > 0;
                         readonly property int queuedRangeCount: videoArea.timeline.trimRanges.filter((x, i) => !!mediaPanel.keyStates[rangeUid(i)]).length;
-                        function stabilizeNow(): void { renderBtn.stabilizeRange(-1); }
-                        function stabilizeRange(range: int): void {
-                            renderBtn.directRange = range;
-                            renderBtn.startAction("now");
+                        // "Stabilize now": the active trim range when they are exported as separate videos (the one the
+                        // output path in the bottom bar is of), otherwise the whole video. The destination is picked in a
+                        // file dialog, starting with that output path, and stays the output path of the range or video
+                        function stabilizeNow(): void {
+                            if (!renderBtn.canExport) return;
+                            outputFile.commit();
+                            outputFile.chooseFile(function(_) {
+                                if (!renderBtn.canExport) return;
+                                renderBtn.directRange = mediaPanel.activeRange();
+                                // The file was picked in the dialog, which asks itself whether to replace an existing one
+                                // (a folder picked when sandboxed doesn't, so it's asked when rendering)
+                                renderBtn.startAction("now", !isSandboxed);
+                            });
                         }
-                        // With several trim ranges exported as separate videos, "Stabilize now" asks if it's all of them or only the active one
+                        // With several trim ranges exported as separate videos, the queue button is about the active one
                         readonly property bool canChooseRange: exportbar.separateRanges && exportbar.rangeCount > 1 && videoArea.timeline.activeTrimRange >= 0;
                         // The direct render is done, let the queue continue where it was paused
                         // Cancelled: the files of the other trim ranges aren't rendered either
@@ -588,23 +597,11 @@ Rectangle {
                         icon.height: 14 * dpiScale;
                         iconName: "video";
                         enabled: renderBtn.canExport;
-                        tooltip: qsTr("Renders this video right away, before everything else in the render queue. The queue is resumed afterwards.");
-                        text: qsTr("Stabilize now");
-                        rightPadding: renderBtn.canChooseRange? 30 * dpiScale : leftPadding;
-                        onClicked: {
-                            if (renderBtn.canChooseRange) stabilizeNowMenu.popup(stabilizeNowBtn, 0, -stabilizeNowMenu.height);
-                            else renderBtn.stabilizeNow();
-                        }
-                        DropdownChevron { visible: renderBtn.canChooseRange; opened: stabilizeNowMenu.visible; color: stabilizeNowBtn.textColor; }
-                        Components.Menu {
-                            id: stabilizeNowMenu;
-                            Action { iconName: "video"; text: qsTr("All %1 ranges").arg(exportbar.rangeCount); onTriggered: renderBtn.stabilizeRange(-1); }
-                            Action {
-                                iconName: "video";
-                                text: qsTr("Only the active range (%1)").arg(videoArea.timeline.activeTrimRange + 1);
-                                onTriggered: renderBtn.stabilizeRange(videoArea.timeline.activeTrimRange);
-                            }
-                        }
+                        tooltip: exportbar.separateRanges && exportbar.rangeCount > 0
+                                 ? qsTr("Choose where to save the active range, and render it right away, before everything else in the render queue. The queue is resumed afterwards.")
+                                 : qsTr("Choose where to save this video, and render it right away, before everything else in the render queue. The queue is resumed afterwards.");
+                        text: qsTr("Stabilize now…");
+                        onClicked: renderBtn.stabilizeNow();
                     }
                     // The actions that are used less often, so the bar stays compact
                     LinkButton {

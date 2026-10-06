@@ -590,6 +590,37 @@ ResizablePanel {
         root.applyRangeSettings(root.loadedItem(), ids, outputs);
         return ids;
     }
+    // "Stabilize now" of the bottom bar for a video of the list: it's opened first if it isn't the one in the main view,
+    // and its active range (or the whole video) is rendered once it's ready
+    property int pendingStabilizeItem: 0;
+    function stabilizeItem(itemId: int): void {
+        if (itemId != media_library.current_item) {
+            media_library.select_only(itemId);
+            root.lastClickedId = itemId;
+            root.loadItem(itemId);
+        }
+        root.pendingStabilizeItem = itemId;
+        stabilizeWhenReady.elapsed = 0;
+        stabilizeWhenReady.restart();
+    }
+    Timer {
+        id: stabilizeWhenReady;
+        interval: 200;
+        repeat: true;
+        property int elapsed: 0;
+        onTriggered: {
+            const id = root.pendingStabilizeItem;
+            elapsed += interval;
+            // Another video was opened meanwhile, or it doesn't load
+            if (id != media_library.current_item || elapsed > 120000) { stop(); root.pendingStabilizeItem = 0; return; }
+            const ready = window.renderBtn.canExport && !controller.loading_gyro_in_progress && !window.videoArea.pendingGyroflowData
+                       && media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString());
+            if (!ready) return;
+            stop();
+            root.pendingStabilizeItem = 0;
+            window.renderBtn.stabilizeNow();
+        }
+    }
     // Video information, lens profile and motion data are set up for the video in the main view, load it first
     function showDetails(itemId: int): void {
         if (itemId != media_library.current_item) {
@@ -1073,6 +1104,12 @@ ResizablePanel {
                             text: qsTr("Remove %1 selected from the render queue").arg(root.queuedSelectedCount);
                             enabled: root.queuedSelectedCount > 0;
                             onTriggered: root.unqueueSelected();
+                        }
+                        Action {
+                            iconName: "video";
+                            text: qsTr("Stabilize now…");
+                            enabled: !dlg.isFolder && !dlg.isPart;
+                            onTriggered: root.stabilizeItem(item_id);
                         }
                         Action {
                             iconName: "pencil";

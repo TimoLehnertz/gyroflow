@@ -13,6 +13,8 @@ TextField {
     rightPadding: linkBtn.width;
 
     property var cbAfterSelect: null;
+    // Called with the chosen file when it's picked in `chooseFile`
+    property var cbAfterFileSelect: null;
     property bool folderOnly: false;
 
     signal folderSelectionCanceled();
@@ -151,6 +153,16 @@ TextField {
         outputFolderDialog.open();
     }
 
+    // Opens the dialog of the "..." button with the current path, and calls `cb` once a destination is picked
+    function chooseFile(cb: var): void {
+        if (isSandboxed || root.folderOnly) {
+            root.selectFolder(root.folderUrl, cb);
+            return;
+        }
+        root.cbAfterFileSelect = cb;
+        linkBtn.openFileDialog();
+    }
+
     LinkButton {
         id: linkBtn;
         anchors.right: parent.right;
@@ -164,6 +176,10 @@ TextField {
                 outputFolderDialog.open();
                 return;
             }
+            root.cbAfterFileSelect = null;
+            openFileDialog();
+        }
+        function openFileDialog(): void {
             outputFileDialog.defaultSuffix = root.filename.substring(root.filename.length - 3);
             outputFileDialog.currentFolder = root.getFolderForDialog(root.folderUrl);
             outputFileDialog.selectedFile = filesystem.get_file_url(root.folderUrl, root.filename, false);
@@ -183,7 +199,13 @@ TextField {
                 root.setUrl(outputFileDialog.selectedFile);
             }
             window.exportSettings.updateCodecParams();
+            if (root.cbAfterFileSelect) {
+                const cb = root.cbAfterFileSelect;
+                root.cbAfterFileSelect = null;
+                Qt.callLater(cb, outputFileDialog.selectedFile);
+            }
         }
+        onRejected: root.cbAfterFileSelect = null;
     }
     QQD.FolderDialog {
         id: outputFolderDialog;
