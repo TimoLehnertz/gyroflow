@@ -30,8 +30,6 @@ ResizablePanel {
     // Job of the item loaded in the main view, so the bottom bar can show whether it's in the queue
     property int currentJobId: 0;
     property alias queueModal: queueModalLoader;
-    // Shortcuts that act on the selection of the list instead (eg. Ctrl+A) while it has the focus
-    readonly property bool listHasFocus: lv.activeFocus;
     readonly property bool listHasFocus: lv.activeFocus;
     // Jobs queued from here, the user already decided to (re-)stabilize these items, so their output is always overwritten
     property var ownJobs: ({ });
@@ -661,7 +659,27 @@ ResizablePanel {
             stop();
             root.pendingRangeJumpItem = 0;
             const frames = timeline.trimBoundaryFrames();
-            if (frames.length) window.videoArea.vid.currentFrame = root.pendingRangeJumpForward? frames[0] : frames[frames.length - 1];
+            if (!frames.length) return;
+            rangeJumpVerify.target = root.pendingRangeJumpForward? frames[0] : frames[frames.length - 1];
+            rangeJumpVerify.item = id;
+            rangeJumpVerify.tries = 0;
+            window.videoArea.vid.currentFrame = rangeJumpVerify.target;
+            rangeJumpVerify.restart();
+        }
+    }
+    // The player ignores a seek while the previous one isn't finished (eg. the one that shows the first frame of a video
+    // that was just loaded), so the jump is repeated until the playhead is there
+    Timer {
+        id: rangeJumpVerify;
+        interval: 100;
+        repeat: true;
+        property int target: -1;
+        property int item: 0;
+        property int tries: 0;
+        onTriggered: {
+            const vid = window.videoArea.vid;
+            if (item != media_library.current_item || vid.playing || Math.abs(vid.currentFrame - target) <= 1 || ++tries > 30) { stop(); return; }
+            vid.currentFrame = target;
         }
     }
     // "Modify trim ranges": the trim ranges of the selected videos are extended or moved in a modal (TrimRangesModal.qml)
