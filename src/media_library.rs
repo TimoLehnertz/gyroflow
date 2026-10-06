@@ -189,7 +189,7 @@ pub struct MediaLibrary {
     find_by_url: qt_method!(fn(&self, url: QString) -> u32),
     get_item_index: qt_method!(fn(&self, item_id: u32) -> i32),
 
-    load_markers: qt_method!(fn(&mut self, url: QString) -> QString),
+    load_markers: qt_method!(fn(&mut self, urls: QString) -> QString),
     preview_markers: qt_method!(fn(&self, offset_seconds: f64) -> QString),
     nearby_marker_matches: qt_method!(fn(&self, offset_seconds: f64) -> QString),
     import_markers: qt_method!(fn(&mut self, offset_seconds: f64) -> QString),
@@ -1193,28 +1193,42 @@ impl MediaLibrary {
         }).to_string()
     }
 
-    /// Read and validate a markers.json file. Preview and import then use the cached markers.
-    pub fn load_markers(&mut self, url: QString) -> QString {
+    /// Read and validate markers.json files, one url per line (see `add_url` why not a list). The markers of several files are
+    /// merged into one set (the same marker in more than one file only once). Preview and import then use the cached markers.
+    pub fn load_markers(&mut self, urls: QString) -> QString {
         self.markers.clear();
         self.marker_file_loaded = false;
-        let path = filesystem::url_to_path(&Self::to_url(&url.to_string(), false));
-        let json = match std::fs::read_to_string(&path) {
-            Ok(json) => json,
-            Err(e) => return Self::marker_error(format!("Could not read markers file: {e}")),
-        };
-        match marker_import::parse(&json) {
-            Ok(markers) => {
-                let ins = markers.iter().filter(|m| matches!(m, marker_import::Marker::In { .. })).count();
-                let outs = markers.iter().filter(|m| matches!(m, marker_import::Marker::Out { .. })).count();
-                self.markers = markers;
-                self.marker_file_loaded = true;
-                QString::from(serde_json::json!({
-                    "name": filesystem::get_filename(&url.to_string()),
-                    "count": self.markers.len(), "ins": ins, "outs": outs,
-                }).to_string())
-            }
-            Err(e) => Self::marker_error(e),
+        let list = urls.to_string();
+        let mut urls: Vec<String> = Vec::new();
+        for url in list.lines().map(str::trim).filter(|x| !x.is_empty()) {
+            if !urls.iter().any(|x| x == url) { urls.push(url.to_string()); }
         }
+        if urls.is_empty() { return Self::marker_error("Choose a markers.json file first.".into()); }
+        let mut markers: Vec<marker_import::Marker> = Vec::new();
+        for url in &urls {
+            let name = filesystem::get_filename(url);
+            let path = filesystem::url_to_path(&Self::to_url(url, false));
+            let json = match std::fs::read_to_string(&path) {
+                Ok(json) => json,
+                Err(e) => return Self::marker_error(if urls.len() > 1 { format!("Could not read markers file {name}: {e}") } else { format!("Could not read markers file: {e}") }),
+            };
+            match marker_import::parse(&json) {
+                Ok(parsed) => for m in parsed {
+                    if !markers.contains(&m) { markers.push(m); }
+                },
+                Err(e) => return Self::marker_error(if urls.len() > 1 { format!("{name}: {e}") } else { e }),
+            }
+        }
+        let ins = markers.iter().filter(|m| matches!(m, marker_import::Marker::In { .. })).count();
+        let outs = markers.iter().filter(|m| matches!(m, marker_import::Marker::Out { .. })).count();
+        self.markers = markers;
+        self.marker_file_loaded = true;
+        QString::from(serde_json::json!({
+            "name": filesystem::get_filename(&urls[0]),
+            "names": urls.iter().map(|x| filesystem::get_filename(x)).collect::<Vec<_>>(),
+            "files": urls.len(),
+            "count": self.markers.len(), "ins": ins, "outs": outs,
+        }).to_string())
     }
 
     /// Match cached markers against the current videos without changing the sidebar.

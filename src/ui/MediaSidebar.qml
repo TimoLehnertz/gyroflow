@@ -257,19 +257,20 @@ ResizablePanel {
         function onCheckedChanged(): void { root.updateOutputFile(); }
     }
 
-    property string pendingMarkerFile: "";
+    // The dropped markers.json files, their markers are merged
+    property var pendingMarkerFiles: [];
 
-    function openImportMarkers(url): void {
+    function openImportMarkers(urls): void {
         root.saveCurrentSettings();
-        root.pendingMarkerFile = url || "";
+        root.pendingMarkerFiles = urls || [];
         importModalLoader.active = true;
         if (importModalLoader.item) root.finishOpenImportMarkers();
     }
     function finishOpenImportMarkers(): void {
         const modal = importModalLoader.item;
-        if (root.pendingMarkerFile) {
-            modal.loadFile(root.pendingMarkerFile);
-            root.pendingMarkerFile = "";
+        if (root.pendingMarkerFiles.length) {
+            modal.loadFiles(root.pendingMarkerFiles);
+            root.pendingMarkerFiles = [];
         }
         modal.open();
     }
@@ -290,7 +291,7 @@ ResizablePanel {
             if (root.joinPending) root.openAfterJoin = openId;
             else root.openItem(openId);
         }
-        if (jsons.length) root.openImportMarkers(jsons[0]);
+        if (jsons.length) root.openImportMarkers(jsons);
     }
     function applyImportedMarkers(offsetHours: real, queue: bool): void {
         const result = JSON.parse(media_library.import_markers(offsetHours * 3600));

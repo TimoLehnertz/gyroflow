@@ -12,6 +12,9 @@ Item {
     property bool shown: false;
     property string fileName: "";
     property int markerCount: 0;
+    // More than one file: their markers were merged
+    property int fileCount: 0;
+    property var mergedNames: [];
     property var preview: ({ videos: [], unmatched: [], untouched: [], sections: 0, matched: 0 });
     property bool hasFile: root.fileName.length > 0;
     property real offsetHours: 0;
@@ -68,14 +71,22 @@ Item {
     function close(): void {
         root.shown = false;
     }
-    function loadFile(url: string): void {
-        const result = JSON.parse(media_library.load_markers(url));
+    function loadFiles(urls: var): void {
+        // The markers loaded before are gone, also when the files can't be read
+        root.fileName = "";
+        root.markerCount = 0;
+        root.fileCount = 0;
+        root.mergedNames = [];
+        const result = JSON.parse(media_library.load_markers(Array.from(urls, x => x.toString()).join("\n")));
         if (result.error) {
+            root.refresh();
             messageBox(Modal.Error, result.error, [ { text: qsTr("Ok") } ]);
             return;
         }
-        root.fileName = result.name || qsTr("markers.json");
+        root.fileCount = result.files || 1;
+        root.fileName = root.fileCount > 1? qsTr("%1 files").arg(root.fileCount) : (result.name || qsTr("markers.json"));
         root.markerCount = result.count || 0;
+        root.mergedNames = result.names || [];
         root.refresh();
     }
     function refresh(): void {
@@ -196,6 +207,13 @@ Item {
                 id: col;
                 width: parent.width - (bodyScroll.visible? bodyScroll.width : 0);
                 spacing: 10 * dpiScale;
+
+                InfoMessageSmall {
+                    show: root.fileCount > 1;
+                    type: InfoMessage.Info;
+                    t.font.bold: true;
+                    text: qsTr("The markers of %1 files were merged.").arg(root.fileCount) + "\n" + root.mergedNames.join(", ");
+                }
 
                 BasicText {
                     width: parent.width;
@@ -409,7 +427,8 @@ Item {
         title: qsTr("Choose markers.json");
         type: "markers";
         nameFilters: [qsTr("JSON files") + " (*.json)"];
-        fileMode: FileDialog.OpenFile;
-        onAccepted: root.loadFile(selectedFile.toString());
+        // Several files are merged, like several dropped ones
+        fileMode: FileDialog.OpenFiles;
+        onAccepted: root.loadFiles(selectedFiles);
     }
 }

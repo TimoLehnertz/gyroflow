@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path};
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Marker {
     In {
