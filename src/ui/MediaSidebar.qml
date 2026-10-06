@@ -1311,6 +1311,7 @@ ResizablePanel {
                     width: parent.width;
                     height: 16 * dpiScale;
                     RangeTrack {
+                        id: rangeTrack;
                         x: 24 * dpiScale;
                         width: parent.width - x;
                         height: 12 * dpiScale;
@@ -1323,7 +1324,7 @@ ResizablePanel {
                                  : x[2]? styleQueuedColor
                                  : x[3] == "changed"? "#f6a00b"
                                  : x[3] == "stabilized"? "#70e574"
-                                 : Qt.rgba(styleTextColor.r, styleTextColor.g, styleTextColor.b, 0.75),
+                                 : rangeTrack.rangeColor,
                             tooltip: qsTr("Range %1").arg(i + 1) + ": " + (x[2] == "done"? qsTr("Done") : x[2] == "error"? qsTr("Error")
                                    : x[2] == "rendering" || x[2] == "processing"? qsTr("Rendering") : x[2]? qsTr("Queued")
                                    : x[3] == "changed"? qsTr("Stabilized, but its settings changed since")

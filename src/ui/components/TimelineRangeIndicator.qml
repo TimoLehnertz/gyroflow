@@ -19,10 +19,12 @@ Rectangle {
 
     x: parent.width * mapToVisibleArea(Math.max(0.0, trimStart + trimStartAdjustment));
     width: Math.max(10, parent.width * mapToVisibleArea(Math.min(1.0, trimEnd + trimEndAdjustment)) - x);
-    // The active range has its own color, the accent color (blue) is too close to the color of what's queued
-    color: isActive? Qt.rgba(styleActiveRangeColor.r, styleActiveRangeColor.g, styleActiveRangeColor.b, 0.22) : "#12ffffff";
+    // The active range has its own color, the accent color (blue) is too close to the color of what's queued.
+    // The theme colors are strings, as a `color` their channels can be used
+    readonly property color activeColor: styleActiveRangeColor;
+    color: isActive? Qt.rgba(activeColor.r, activeColor.g, activeColor.b, 0.22) : "#12ffffff";
     border.width: 2 * dpiScale;
-    border.color: isActive? styleActiveRangeColor : Qt.rgba(styleActiveRangeColor.r, styleActiveRangeColor.g, styleActiveRangeColor.b, 0.4);
+    border.color: isActive? activeColor : Qt.rgba(activeColor.r, activeColor.g, activeColor.b, 0.4);
     radius: 3 * dpiScale;
     clip: true;
     function mapToVisibleArea(v: real): real { return parent.parent.parent.mapToVisibleArea(v); }

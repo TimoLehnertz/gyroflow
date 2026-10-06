@@ -9,6 +9,9 @@ Item {
     id: root;
     // [{ start, end, color, tooltip }], start and end as a fraction of the duration. Without a color it's the accent color
     property var ranges: [];
+    // The theme colors are strings, these are the ones of the track and of a range without its own color
+    readonly property color trackColor: style === "light"? "#b4b4b4" : "#6b6b6b";
+    readonly property color rangeColor: style === "light"? "#4a4a4a" : "#d8d8d8";
     implicitHeight: 12 * dpiScale;
 
     Rectangle {
@@ -16,7 +19,7 @@ Item {
         height: Math.max(2 * dpiScale, Math.round(parent.height * 0.3));
         anchors.verticalCenter: parent.verticalCenter;
         radius: height / 2;
-        color: Qt.rgba(styleTextColor.r, styleTextColor.g, styleTextColor.b, 0.22);
+        color: root.trackColor;
     }
     Repeater {
         model: root.ranges;
