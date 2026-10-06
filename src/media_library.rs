@@ -188,6 +188,7 @@ pub struct MediaLibrary {
     set_current_item: qt_method!(fn(&mut self, item_id: u32)),
     current_item: qt_property!(u32; NOTIFY current_item_changed),
     get_item_kind: qt_method!(fn(&self, item_id: u32) -> QString),
+    get_adjacent_ranged_item: qt_method!(fn(&self, item_id: u32, forward: bool) -> u32),
     get_item_url: qt_method!(fn(&self, item_id: u32) -> QString),
     get_item_name: qt_method!(fn(&self, item_id: u32) -> QString),
     is_item_url: qt_method!(fn(&self, item_id: u32, url: QString) -> bool),
@@ -1235,6 +1236,15 @@ impl MediaLibrary {
         self.current_item_changed();
     }
 
+    /// The next (or previous) video in the order of the list that has trim ranges, 0 if there is none
+    pub fn get_adjacent_ranged_item(&self, item_id: u32, forward: bool) -> u32 {
+        let mut order = self.sorted_videos(&self.standalone);
+        for f in &self.folders { order.extend(self.sorted_videos(&f.videos)); }
+        let Some(pos) = order.iter().position(|v| v.id == item_id) else { return 0; };
+        let has_ranges = |v: &&Video| v.settings.as_ref().and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok()).is_some_and(|x| !Self::trim_ranges_ms(&x).is_empty());
+        let found = if forward { order[pos + 1..].iter().copied().find(has_ranges) } else { order[..pos].iter().rev().copied().find(has_ranges) };
+        found.map(|v| v.id).unwrap_or_default()
+    }
     pub fn get_item_kind(&self, item_id: u32) -> QString {
         if self.folders.iter().any(|f| f.id == item_id) { return QString::from("folder"); }
         if self.video(item_id).is_some() { return QString::from("video"); }

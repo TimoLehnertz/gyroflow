@@ -349,13 +349,17 @@ Item {
         }
         return frames.sort((a, b) => a - b);
     }
+    // Past the last (or before the first) range of the video, it continues with the next (previous) one in the media list
+    // that has ranges, at its first range start (last range end)
     function jumpToNextTrimBoundary(): void {
         const frame = trimBoundaryFrames().find(f => f > vid.currentFrame);
         if (frame !== undefined) vid.currentFrame = frame;
+        else if (window.mediaPanel && !isCalibrator) window.mediaPanel.openAdjacentRangedClip(true);
     }
     function jumpToPrevTrimBoundary(): void {
         const frame = trimBoundaryFrames().reverse().find(f => f < vid.currentFrame);
         if (frame !== undefined) vid.currentFrame = frame;
+        else if (window.mediaPanel && !isCalibrator) window.mediaPanel.openAdjacentRangedClip(false);
     }
 
     function addAutoSyncPoint(pos: real): void {

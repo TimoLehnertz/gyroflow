@@ -617,6 +617,42 @@ ResizablePanel {
         root.applyRangeSettings(root.loadedItem(), ids, outputs);
         return ids;
     }
+    // Ctrl+Left / Right past the first / last trim range of the video: the previous / next video with ranges is opened, and
+    // the playhead goes to the end of its last range / the start of its first one once it's loaded
+    property int pendingRangeJumpItem: 0;
+    property bool pendingRangeJumpForward: true;
+    function openAdjacentRangedClip(forward: bool): void {
+        const itemId = media_library.get_adjacent_ranged_item(media_library.current_item, forward);
+        if (itemId <= 0) return;
+        media_library.select_only(itemId);
+        root.lastClickedId = itemId;
+        const index = media_library.get_item_index(itemId);
+        if (index >= 0) lv.positionViewAtIndex(index, ListView.Contain);
+        root.loadItem(itemId);
+        root.pendingRangeJumpItem = itemId;
+        root.pendingRangeJumpForward = forward;
+        rangeJumpWhenReady.elapsed = 0;
+        rangeJumpWhenReady.restart();
+    }
+    Timer {
+        id: rangeJumpWhenReady;
+        interval: 100;
+        repeat: true;
+        property int elapsed: 0;
+        onTriggered: {
+            const id = root.pendingRangeJumpItem;
+            elapsed += interval;
+            if (id != media_library.current_item || elapsed > 60000) { stop(); root.pendingRangeJumpItem = 0; return; }
+            const timeline = window.videoArea.timeline;
+            const ready = window.videoArea.vid.loaded && !window.videoArea.videoLoader.active && !window.videoArea.pendingGyroflowData
+                       && media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString()) && timeline.trimRanges.length > 0;
+            if (!ready) return;
+            stop();
+            root.pendingRangeJumpItem = 0;
+            const frames = timeline.trimBoundaryFrames();
+            if (frames.length) window.videoArea.vid.currentFrame = root.pendingRangeJumpForward? frames[0] : frames[frames.length - 1];
+        }
+    }
     // "Stabilize now" of the bottom bar for a video of the list: it's opened first if it isn't the one in the main view,
     // and its active range (or the whole video) is rendered once it's ready
     property int pendingStabilizeItem: 0;
