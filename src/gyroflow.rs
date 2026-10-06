@@ -173,9 +173,14 @@ fn entry() {
     {
         // A job that starts rendering asks the media library for the hash of the settings of its output file. Both live
         // until the end of this function, which runs the app
+        // While the library is busy itself (eg. the job is started from one of its signals), the table it keeps is used
         let ml_ptr: *const RefCell<media_library::MediaLibrary> = &ml;
+        let hashes = ml.borrow().expected_hashes.clone();
         rq.borrow_mut().hash_provider = Some(Box::new(move |job_id, url, range_index| {
-            unsafe { &*ml_ptr }.try_borrow_mut().ok()?.hash_for_render(job_id, url, range_index)
+            match unsafe { &*ml_ptr }.try_borrow_mut() {
+                Ok(mut ml) => ml.hash_for_render(job_id, url, range_index),
+                Err(_) => media_library::MediaLibrary::lookup_expected_hash(&hashes, url, range_index),
+            }
         }));
     }
 

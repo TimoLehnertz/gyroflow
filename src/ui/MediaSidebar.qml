@@ -1040,14 +1040,16 @@ ResizablePanel {
             // Being in the render queue is shown independently of the selection, an item can be both
             property bool isInQueue: queue_state.length > 0;
 
-            color: selected?     "#33ffffff"
-                 : isJobError?   "#30ed7676"
-                 : isQuestion?   "#30" + styleAccentColor.toString().substring(1)
+            // The state of the item, which also shows while it's selected (a bit stronger then, the border marks the selection)
+            readonly property color stateColor: isJobError? "#ed7676"
+                 : isQuestion?   styleAccentColor
                  // All of it is in the render queue (all of its trim ranges, or the whole video)
-                 : queue_state == "all"? Qt.rgba(styleQueuedColor.r, styleQueuedColor.g, styleQueuedColor.b, 0.2)
-                 : stabilized_state == 1? "#3070e574"
-                 : stabilized_state == 2? "#30f6a00b"
+                 : queue_state == "all"? styleQueuedColor
+                 : stabilized_state == 1? "#70e574"
+                 : stabilized_state == 2? "#f6a00b"
                  : "transparent";
+            color: stateColor.a > 0? Qt.rgba(stateColor.r, stateColor.g, stateColor.b, selected? 0.38 : 0.19)
+                 : selected? "#33ffffff" : "transparent";
             border.width: selected || is_current? 1 * dpiScale : 0;
             border.color: selected? "#99ffffff" : styleAccentColor;
 

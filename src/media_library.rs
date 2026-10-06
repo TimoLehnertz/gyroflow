@@ -156,9 +156,14 @@ struct ScanResult {
     lens_warning: bool
 }
 
+/// The hash of the settings of every output file, by the url of its video and its trim range (-1: the whole video), see
+/// `MediaLibrary::output_hash`. Shared with the render queue, which reads it while the library can be busy itself
+pub type ExpectedHashes = Arc<parking_lot::Mutex<std::collections::HashMap<(String, i32), String>>>;
+
 #[derive(Default, QObject)]
 pub struct MediaLibrary {
     base: qt_base_class!(trait QObject),
+    pub expected_hashes: ExpectedHashes,
 
     pub items: qt_property!(RefCell<SimpleListModel<MediaItem>>; NOTIFY items_changed),
 
@@ -406,6 +411,11 @@ impl MediaLibrary {
         let count = v.jobs.len() as i32;
         let queue = self.queue_display(v);
         let stabilized = self.stabilized_state(v, &self.outputs(v, None));
+        {
+            let mut hashes = self.expected_hashes.lock();
+            hashes.retain(|k, _| k.0 != v.url);
+            self.store_expected_hashes(&mut hashes, v);
+        }
         self.patch_row(video_id, |x| {
             x.stabilized_state = stabilized;
             x.queue_state = queue.queue_state;
@@ -471,6 +481,11 @@ impl MediaLibrary {
     /// Updates the rows in place where it can, instead of resetting the model: after a reset the list creates every row
     /// again, and dropping files did that for every file and again after every scan, which froze the UI for seconds
     fn rebuild(&mut self) {
+        {
+            let mut hashes = self.expected_hashes.lock();
+            hashes.clear();
+            for v in self.all_videos() { self.store_expected_hashes(&mut hashes, v); }
+        }
         let items = self.build_items();
         {
             let mut q = self.items.borrow_mut();
@@ -1076,8 +1091,21 @@ impl MediaLibrary {
         if to_check.is_empty() { return; }
 
         let checked = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, (video_id, hashes): (u32, Vec<(String, Option<String>)>)| {
+            let Some(v) = this.video(video_id) else { return; };
+            let outputs = this.outputs(v, None);
+            let output_hashes = hashes.into_iter().filter_map(|(url, hash): (String, Option<String>)| {
+                let mut hash = hash?;
+                if hash.is_empty() {
+                    // Without a hash in the file, it was rendered with the settings it had when it was found: changing them
+                    // afterwards makes it outdated
+                    hash = v.output_hashes.get(&url).cloned().filter(|x| !x.is_empty()).unwrap_or_else(|| {
+                        outputs.iter().find(|x| x.url() == url).map(|x| Self::output_hash(&v.settings, x.range_index)).unwrap_or_default()
+                    });
+                }
+                Some((url, hash))
+            }).collect();
             let Some(v) = this.video_mut(video_id) else { return; };
-            v.output_hashes = hashes.into_iter().filter_map(|(url, hash)| Some((url, hash?))).collect();
+            v.output_hashes = output_hashes;
             this.update_stabilized_row(video_id);
         });
 
@@ -1759,8 +1787,19 @@ impl MediaLibrary {
             "frames": frames,
         }))
     }
-    /// Whether the output file exists (`STABILIZED`), and if its settings changed since it was rendered (`STALE`). A file
-    /// without the hash (eg. rendered by an older version or another app) is taken as up to date, we can't tell
+    fn store_expected_hashes(&self, hashes: &mut std::collections::HashMap<(String, i32), String>, v: &Video) {
+        for output in self.outputs(v, None) {
+            hashes.insert((v.url.clone(), output.range_index), Self::output_hash(&v.settings, output.range_index));
+        }
+    }
+    /// The hash of the output file a job renders, by the url of its video and its trim range, from the table the library keeps
+    pub fn lookup_expected_hash(hashes: &ExpectedHashes, url: &str, range_index: Option<usize>) -> Option<String> {
+        let key = (Self::to_url(url, false), range_index.map(|x| x as i32).unwrap_or(-1));
+        hashes.lock().get(&key).cloned().filter(|x| !x.is_empty())
+    }
+    /// Whether the output file exists (`STABILIZED`), and if its settings changed since it was rendered (`STALE`). The hash
+    /// it was rendered with is the one in the file, or for a file without it (eg. rendered by an older version or another
+    /// app) the one of the settings the video had when the file was found (see `refresh_outputs`)
     fn output_state(v: &Video, output: &OutputFile) -> i32 {
         let Some(hash) = v.output_hashes.get(&output.url()) else { return NOT_STABILIZED; };
         let current = Self::output_hash(&v.settings, output.range_index);
@@ -2267,6 +2306,7 @@ impl MediaLibrary {
             if let Some(v) = self.video(item_id) {
                 if let Some(output) = self.outputs(v, None).into_iter().find(|x| x.seq == seq) {
                     let url = output.url();
+                    let hash = if hash.is_empty() { Self::output_hash(&v.settings, output.range_index) } else { hash };
                     if let Some(v) = self.video_mut(item_id) { v.output_hashes.insert(url, hash); }
                 }
             }
