@@ -283,18 +283,19 @@ ResizablePanel {
     // The dropped markers.json files, their markers are merged
     property var pendingMarkerFiles: [];
 
+    // The modal is created the first time it's opened: then it's opened once it's loaded (`onLoaded`, which runs while
+    // `active` is set), otherwise right away. Opening it in both places opened it twice the first time
     function openImportMarkers(urls): void {
         root.saveCurrentSettings();
-        root.pendingMarkerFiles = urls || [];
-        importModalLoader.active = true;
-        if (importModalLoader.item) root.finishOpenImportMarkers();
-    }
-    function finishOpenImportMarkers(): void {
-        const modal = importModalLoader.item;
-        if (root.pendingMarkerFiles.length) {
-            modal.loadFiles(root.pendingMarkerFiles);
-            root.pendingMarkerFiles = [];
+        if (importModalLoader.item) {
+            root.showImportMarkers(importModalLoader.item, urls || []);
+        } else {
+            root.pendingMarkerFiles = urls || [];
+            importModalLoader.active = true;
         }
+    }
+    function showImportMarkers(modal: var, urls: var): void {
+        if (urls.length) modal.loadFiles(urls);
         modal.open();
     }
     function handleDroppedUrls(urls) {
@@ -685,16 +686,16 @@ ResizablePanel {
     // "Modify trim ranges": the trim ranges of the selected videos are extended or moved in a modal (TrimRangesModal.qml)
     property var rangedSelection: [];
     property var pendingTrimRangeItems: [];
+    // Opened once, like the marker import (see `openImportMarkers`)
     function openTrimRangesModal(itemIds: var): void {
         // The ranges of the video in the main view are the ones it has there
         root.saveCurrentSettings();
-        root.pendingTrimRangeItems = itemIds;
-        trimModalLoader.active = true;
-        if (trimModalLoader.item) root.finishOpenTrimRangesModal();
-    }
-    function finishOpenTrimRangesModal(): void {
-        trimModalLoader.item.open(root.pendingTrimRangeItems);
-        root.pendingTrimRangeItems = [];
+        if (trimModalLoader.item) {
+            trimModalLoader.item.open(itemIds);
+        } else {
+            root.pendingTrimRangeItems = itemIds;
+            trimModalLoader.active = true;
+        }
     }
     function applyTrimRanges(itemIds: var, extendLeftMs: real, extendRightMs: real, shiftMs: real): void {
         root.saveCurrentSettings();
@@ -1110,23 +1111,16 @@ ResizablePanel {
         spacing: 2 * dpiScale;
         model: media_library.items;
         focus: true;
-        // Ctrl+A selects all items while the list has the focus, otherwise it's the previous file of the folder (Shortcuts.qml)
-        Shortcut {
-            sequence: StandardKey.SelectAll;
-            context: Qt.WidgetWithChildrenShortcut;
-            enabled: lv.activeFocus;
-            onActivated: { media_library.select_all(true); root.refreshState(); }
-        }
-        Shortcut {
-            sequences: ["Delete", "Backspace"];
-            context: Qt.WidgetWithChildrenShortcut;
-            // Only while the list has the focus, otherwise Delete removes the active trim range of the timeline
-            enabled: root.removableCount > 0 && lv.activeFocus;
-            onActivated: root.removeSelected();
-        }
+        // Keys while the list has the focus: Delete removes the selected items (otherwise it removes the active trim range of
+        // the timeline) and Ctrl+A selects all of them (otherwise it opens the previous file of the folder). The shortcuts of
+        // Shortcuts.qml for the same keys are disabled meanwhile (`listHasFocus`), a `Shortcut` here can't be limited to the list
         Keys.onPressed: (event) => {
             if (event.key === Qt.Key_Delete || event.key === Qt.Key_Backspace) {
                 if (root.removableCount > 0) root.removeSelected();
+                event.accepted = true;
+            } else if (event.matches(StandardKey.SelectAll)) {
+                media_library.select_all(true);
+                root.refreshState();
                 event.accepted = true;
             }
         }
@@ -1780,7 +1774,7 @@ ResizablePanel {
                 onAccepted: (offsetHours, queue) => root.applyImportedMarkers(offsetHours, queue);
             }
         }
-        onLoaded: root.finishOpenImportMarkers();
+        onLoaded: { root.showImportMarkers(item, root.pendingMarkerFiles); root.pendingMarkerFiles = []; }
     }
     Loader {
         id: trimModalLoader;
@@ -1793,7 +1787,7 @@ ResizablePanel {
                 onAccepted: (itemIds, extendLeftMs, extendRightMs, shiftMs) => root.applyTrimRanges(itemIds, extendLeftMs, extendRightMs, shiftMs);
             }
         }
-        onLoaded: root.finishOpenTrimRangesModal();
+        onLoaded: { item.open(root.pendingTrimRangeItems); root.pendingTrimRangeItems = []; }
     }
 
     Component.onCompleted: {
