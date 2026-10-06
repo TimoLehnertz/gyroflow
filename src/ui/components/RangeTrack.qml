@@ -16,7 +16,7 @@ Item {
         height: Math.max(2 * dpiScale, Math.round(parent.height * 0.3));
         anchors.verticalCenter: parent.verticalCenter;
         radius: height / 2;
-        color: Qt.rgba(styleTextColor.r, styleTextColor.g, styleTextColor.b, 0.14);
+        color: Qt.rgba(styleTextColor.r, styleTextColor.g, styleTextColor.b, 0.22);
     }
     Repeater {
         model: root.ranges;
