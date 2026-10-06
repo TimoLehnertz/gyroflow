@@ -62,33 +62,43 @@ Item {
         }
     }
 
-    // Stopping at the end of a trim range: the timestamp of the previous frame while playing, and where playback started,
-    // so playing on from the end of a range where it stopped doesn't stop there again
+    // Stopping at the end of a trim range: the timestamp of the previous frame while playing, and the end it stopped at,
+    // so playing on from there doesn't stop at it again
     property real lastPlayTs: -1;
-    property real playStartTs: 0;
+    property real stoppedAtEndMs: -1;
     Connections {
         target: vid;
-        function onPlayingChanged(): void { root.playStartTs = vid.timestamp; root.lastPlayTs = vid.playing? vid.timestamp : -1; }
+        function onPlayingChanged(): void { root.lastPlayTs = vid.playing? vid.timestamp : -1; }
     }
     function checkRangeEnd(): void {
         const ts = vid.timestamp;
         const prev = root.lastPlayTs;
         root.lastPlayTs = vid.playing? ts : -1;
-        if (!root.stopAtRangeEnd || !vid.playing || !root.trimRanges.length || prev < 0 || root.orgDurationMs <= 0) return;
         const frameMs = 1000 / Math.max(1, vid.frameRate);
-        const minEndMs = root.playStartTs + 1.5 * frameMs;
-        const stopAt = (end) => { vid.pause(); root.setPosition(end); };
-        if (ts > prev && ts - prev < 1000 * Math.max(1, vid.playbackRate)) {
-            // Played over the end of a range, and not seeked over it
+        // Played on past the end it stopped at, or moved away from it
+        if (root.stoppedAtEndMs >= 0 && Math.abs(ts - root.stoppedAtEndMs) > 2 * frameMs) root.stoppedAtEndMs = -1;
+        if (!root.stopAtRangeEnd || !vid.playing || !root.trimRanges.length || prev < 0 || root.orgDurationMs <= 0) return;
+        const stopAt = (end, endMs) => {
+            vid.pause();
+            root.stoppedAtEndMs = endMs;
+            root.lastPlayTs = -1;
+            root.setPosition(end);
+        };
+        const step = ts - prev;
+        // Moving forward frame by frame, not a seek (eg. a click into a range while playing)
+        if (step > 0 && step < 1000 * Math.max(1, vid.playbackRate)) {
+            // Stops on the frame before the end would be passed, instead of showing frames after it and going back:
+            // the end is between the previous frame and the next one
+            const next = ts + Math.max(step, frameMs) * 0.99;
             for (const range of root.trimRanges) {
                 const endMs = range[1] * root.orgDurationMs;
-                if (endMs > prev && endMs <= ts && endMs > minEndMs) return stopAt(range[1]);
+                if (endMs > prev && endMs <= next && Math.abs(endMs - root.stoppedAtEndMs) > frameMs / 2) return stopAt(range[1], endMs);
             }
-        } else if (ts < prev && root.restrictTrim && root.activeTrimRange >= 0) {
-            // Restricted to the active range, the player starts it again from its start
+        } else if (step < 0 && root.restrictTrim && root.activeTrimRange >= 0) {
+            // Restricted to the active range, the player started it again from its start
             const range = root.trimRanges[root.activeTrimRange];
             const endMs = range[1] * root.orgDurationMs;
-            if (ts <= range[0] * root.orgDurationMs + 1000 && prev >= endMs - 1000 * Math.max(1, vid.playbackRate) && endMs > minEndMs) return stopAt(range[1]);
+            if (ts <= range[0] * root.orgDurationMs + 1000 && prev >= endMs - 1000 * Math.max(1, vid.playbackRate) && Math.abs(endMs - root.stoppedAtEndMs) > frameMs / 2) return stopAt(range[1], endMs);
         }
     }
 
@@ -942,13 +952,13 @@ Item {
                         text: qsTr("Restrict playback to the active trim range");
                         onTriggered: root.restrictTrim = !root.restrictTrim;
                     }
-                    Action {
-                        enabled: root.trimActive;
-                        checked: enabled && root.stopAtRangeEnd;
-                        iconName: "pause";
-                        text: qsTr("Stop playback at the end of a trim range");
-                        onTriggered: root.stopAtRangeEnd = !root.stopAtRangeEnd;
-                    }
+                }
+                Action {
+                    checkable: true;
+                    checked: root.stopAtRangeEnd;
+                    iconName: "pause";
+                    text: qsTr("Stop playback at the end of a trim range");
+                    onTriggered: root.stopAtRangeEnd = checked;
                 }
                 QQC.MenuSeparator { verticalPadding: 5 * dpiScale; }
                 Menu {
