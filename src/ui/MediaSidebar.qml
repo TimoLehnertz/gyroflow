@@ -653,6 +653,32 @@ ResizablePanel {
             if (frames.length) window.videoArea.vid.currentFrame = root.pendingRangeJumpForward? frames[0] : frames[frames.length - 1];
         }
     }
+    // "Modify trim ranges": the trim ranges of the selected videos are extended or moved in a modal (TrimRangesModal.qml)
+    property var rangedSelection: [];
+    property var pendingTrimRangeItems: [];
+    function openTrimRangesModal(itemIds: var): void {
+        // The ranges of the video in the main view are the ones it has there
+        root.saveCurrentSettings();
+        root.pendingTrimRangeItems = itemIds;
+        trimModalLoader.active = true;
+        if (trimModalLoader.item) root.finishOpenTrimRangesModal();
+    }
+    function finishOpenTrimRangesModal(): void {
+        trimModalLoader.item.open(root.pendingTrimRangeItems);
+        root.pendingTrimRangeItems = [];
+    }
+    function applyTrimRanges(itemIds: var, extendLeftMs: real, extendRightMs: real, shiftMs: real): void {
+        root.saveCurrentSettings();
+        const count = media_library.modify_trim_ranges(JSON.stringify(itemIds), extendLeftMs, extendRightMs, shiftMs);
+        // The video in the main view shows its new ranges, like after a marker import
+        const current = media_library.current_item;
+        if (itemIds.includes(current) && window.videoArea.vid.loaded && !window.videoArea.videoLoader.active && !controller.loading_gyro_in_progress) {
+            root.loadItemSettings(current);
+        }
+        for (const id of itemIds) root.markQueuedJobOutdated(id);
+        root.refreshState();
+        showNotification(Modal.Success, qsTr("Trim ranges of %1 videos changed.").arg("<b>" + count + "</b>"));
+    }
     // "Stabilize now" of the bottom bar for a video of the list: it's opened first if it isn't the one in the main view,
     // and its active range (or the whole video) is rendered once it's ready
     property int pendingStabilizeItem: 0;
@@ -1148,6 +1174,8 @@ ResizablePanel {
                     if (dlg.isPart) return;
                     lv.forceActiveFocus();
                     if (!selected) root.clickItem(item_id, Qt.NoModifier);
+                    root.saveCurrentSettings();
+                    root.rangedSelection = media_library.get_ranged_selection();
                     itemMenu.popup(dlg, mx, my);
                 }
             }
@@ -1169,6 +1197,12 @@ ResizablePanel {
                             text: qsTr("Remove %1 selected from the render queue").arg(root.queuedSelectedCount);
                             enabled: root.queuedSelectedCount > 0;
                             onTriggered: root.unqueueSelected();
+                        }
+                        Action {
+                            iconName: "pencil";
+                            text: qsTr("Modify trim ranges…");
+                            enabled: root.rangedSelection.length > 0;
+                            onTriggered: root.openTrimRangesModal(root.rangedSelection);
                         }
                         Action {
                             iconName: "video";
@@ -1711,6 +1745,19 @@ ResizablePanel {
             }
         }
         onLoaded: root.finishOpenImportMarkers();
+    }
+    Loader {
+        id: trimModalLoader;
+        active: false;
+        parent: window;
+        anchors.fill: parent;
+        z: 101;
+        sourceComponent: Component {
+            TrimRangesModal {
+                onAccepted: (itemIds, extendLeftMs, extendRightMs, shiftMs) => root.applyTrimRanges(itemIds, extendLeftMs, extendRightMs, shiftMs);
+            }
+        }
+        onLoaded: root.finishOpenTrimRangesModal();
     }
 
     Component.onCompleted: {

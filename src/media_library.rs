@@ -189,6 +189,9 @@ pub struct MediaLibrary {
     current_item: qt_property!(u32; NOTIFY current_item_changed),
     get_item_kind: qt_method!(fn(&self, item_id: u32) -> QString),
     get_adjacent_ranged_item: qt_method!(fn(&self, item_id: u32, forward: bool) -> u32),
+    get_ranged_selection: qt_method!(fn(&self) -> QVariantList),
+    get_trim_ranges: qt_method!(fn(&self, item_id: u32) -> QString),
+    modify_trim_ranges: qt_method!(fn(&mut self, item_ids: QString, extend_left_ms: f64, extend_right_ms: f64, shift_ms: f64) -> i32),
     get_item_url: qt_method!(fn(&self, item_id: u32) -> QString),
     get_item_name: qt_method!(fn(&self, item_id: u32) -> QString),
     is_item_url: qt_method!(fn(&self, item_id: u32, url: QString) -> bool),
@@ -2055,6 +2058,55 @@ impl MediaLibrary {
     pub fn get_queueable_selection(&self) -> QVariantList {
         QVariantList::from_iter(self.all_videos().filter(|v| v.selected && v.jobs.is_empty()).map(|v| v.id).collect::<Vec<_>>())
     }
+    /// Selected videos that have trim ranges, in the order of the list
+    pub fn get_ranged_selection(&self) -> QVariantList {
+        let mut order = self.sorted_videos(&self.standalone);
+        for f in &self.folders { order.extend(self.sorted_videos(&f.videos)); }
+        QVariantList::from_iter(order.into_iter().filter(|v| v.selected && !Self::video_trim_ranges(v).1.is_empty()).map(|v| v.id).collect::<Vec<_>>())
+    }
+    /// The duration of the video and its trim ranges in ms, with an end counted from the end of the video resolved
+    fn video_trim_ranges(v: &Video) -> (f64, Vec<(f64, f64)>) {
+        let obj = v.settings.as_ref().and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok()).unwrap_or_default();
+        let duration = obj.get("video_info").and_then(|x| x.get("duration_ms")).and_then(|x| x.as_f64()).filter(|x| *x > 0.0).unwrap_or(v.duration_ms);
+        let ranges = Self::trim_ranges_ms(&obj).into_iter().map(|(start, end)| (start, if end < 0.0 { duration + end } else { end })).collect();
+        (duration, ranges)
+    }
+    /// `{ name, duration_ms, ranges: [[start_ms, end_ms]] }` of the video
+    pub fn get_trim_ranges(&self, item_id: u32) -> QString {
+        let Some(v) = self.video(item_id) else { return QString::default(); };
+        let (duration, ranges) = Self::video_trim_ranges(v);
+        QString::from(serde_json::json!({ "name": v.filename, "duration_ms": duration, "ranges": ranges.iter().map(|r| [r.0, r.1]).collect::<Vec<_>>() }).to_string())
+    }
+    /// The trim ranges of a video with their starts moved `extend_left_ms` earlier, their ends `extend_right_ms` later, and
+    /// all of it by `shift_ms` (later if it's positive), within the video. A range that would end before it starts stays as it is
+    pub fn modified_trim_range(range: (f64, f64), duration: f64, extend_left_ms: f64, extend_right_ms: f64, shift_ms: f64) -> (f64, f64) {
+        let start = (range.0 - extend_left_ms + shift_ms).clamp(0.0, duration);
+        let end = (range.1 + extend_right_ms + shift_ms).clamp(0.0, duration);
+        if end - start < 1.0 { range } else { (start, end) }
+    }
+    /// Applies `modified_trim_range` to all trim ranges of the videos (a JSON array of ids). Every range keeps its id, output
+    /// path and own settings. Returns the number of videos that changed
+    pub fn modify_trim_ranges(&mut self, item_ids: QString, extend_left_ms: f64, extend_right_ms: f64, shift_ms: f64) -> i32 {
+        let ids = serde_json::from_str::<Vec<u32>>(&item_ids.to_string()).unwrap_or_default();
+        let mut changed = Vec::new();
+        for id in ids {
+            let Some(v) = self.video_mut(id) else { continue; };
+            let (duration, ranges) = Self::video_trim_ranges(v);
+            if ranges.is_empty() || duration <= 0.0 { continue; }
+            let Some(mut obj) = v.settings.as_ref().and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok()).filter(|x| x.is_object()) else { continue; };
+            let modified = ranges.iter().map(|r| Self::modified_trim_range(*r, duration, extend_left_ms, extend_right_ms, shift_ms)).collect::<Vec<_>>();
+            if modified == ranges { continue; }
+            obj["trim_ranges_ms"] = serde_json::json!(modified.iter().map(|r| [r.0, r.1]).collect::<Vec<_>>());
+            if let serde_json::Value::Object(o) = &mut obj { o.remove("trim_ranges"); }
+            v.settings = Some(obj.to_string());
+            changed.push(id);
+        }
+        for &id in &changed {
+            self.reconcile_keys(id);
+            self.update_stabilized_row(id);
+        }
+        changed.len() as i32
+    }
     /// Selected videos that are in the render queue and can be removed from it
     pub fn get_queued_selection(&self) -> QVariantList {
         QVariantList::from_iter(self.all_videos().filter(|v| v.selected && !v.jobs.is_empty()).map(|v| v.id).collect::<Vec<_>>())
@@ -2442,6 +2494,20 @@ mod tests {
         own["trim_range_info"][1]["stabilization"] = serde_json::json!({ "fov": 2.0, "method": "Default" });
         assert_eq!(hash(own.clone(), 0), hash(base.clone(), 0));
         assert_ne!(hash(own, 1), hash(base, 1));
+    }
+
+    #[test]
+    fn trim_ranges_are_extended_and_moved_within_the_video() {
+        let m = |r, l, ri, sh| MediaLibrary::modified_trim_range(r, 10000.0, l, ri, sh);
+        assert_eq!(m((2000.0, 4000.0), 500.0, 0.0, 0.0), (1500.0, 4000.0));
+        assert_eq!(m((2000.0, 4000.0), 0.0, 500.0, 0.0), (2000.0, 4500.0));
+        assert_eq!(m((2000.0, 4000.0), 0.0, 0.0, -1000.0), (1000.0, 3000.0));
+        assert_eq!(m((2000.0, 4000.0), 0.0, 0.0, 1000.0), (3000.0, 5000.0));
+        // Not before the start or after the end of the video
+        assert_eq!(m((500.0, 4000.0), 1000.0, 0.0, 0.0), (0.0, 4000.0));
+        assert_eq!(m((8000.0, 9500.0), 0.0, 0.0, 1000.0), (9000.0, 10000.0));
+        // A range that would be gone stays as it is
+        assert_eq!(m((9000.0, 9500.0), 0.0, 0.0, 2000.0), (9000.0, 9500.0));
     }
 
     #[test]

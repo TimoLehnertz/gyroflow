@@ -2,6 +2,7 @@ App 1.0 App.qml
 CalibrationTarget 1.0 CalibrationTarget.qml
 Calibrator 1.0 Calibrator.qml
 ImportMarkersModal 1.0 ImportMarkersModal.qml
+TrimRangesModal 1.0 TrimRangesModal.qml
 MediaSidebar 1.0 MediaSidebar.qml
 RenderQueueModal 1.0 RenderQueueModal.qml
 VideoDetailsModal 1.0 VideoDetailsModal.qml
