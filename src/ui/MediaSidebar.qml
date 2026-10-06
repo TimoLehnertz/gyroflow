@@ -371,17 +371,6 @@ ResizablePanel {
         render_queue.move_item(job_id, -1000000);
         render_queue.start();
     }
-    // All jobs of a video (one per output file), keeping their order
-    function prioritizeItem(itemId: int): void {
-        const jobs = media_library.get_item_jobs(itemId);
-        for (let i = jobs.length - 1; i >= 0; --i) render_queue.move_item(jobs[i], -1000000);
-        render_queue.start();
-    }
-    function moveItem(itemId: int, step: int): void {
-        let jobs = media_library.get_item_jobs(itemId);
-        if (step > 0) jobs = jobs.reverse();
-        for (const jobId of jobs) render_queue.move_item(jobId, step);
-    }
     // The render queue is an ordered set of keys, a video of the list and what of it is rendered (its `seq`: the id of a
     // trim range, or "" for the whole video). The keys are kept by the media library, which decides what's queued (see
     // "Render queue keys" in media_library.rs). This only does the work it asks for: every key gets its own job, which
@@ -1072,6 +1061,7 @@ ResizablePanel {
                 sourceComponent: Component {
                     Menu {
                         font.pixelSize: 11.5 * dpiScale;
+                        hideDisabled: true;
                         Action {
                             iconName: "queue";
                             text: qsTr("Add %1 selected to the render queue").arg(root.queueableCount);
@@ -1085,12 +1075,6 @@ ResizablePanel {
                             onTriggered: root.unqueueSelected();
                         }
                         Action {
-                            iconName: "play";
-                            text: qsTr("Render now");
-                            enabled: job_id > 0 && !dlg.isBusy && !dlg.isJobDone;
-                            onTriggered: root.prioritizeItem(item_id);
-                        }
-                        Action {
                             iconName: "pencil";
                             text: qsTr("Edit render settings");
                             // The jobs of the trim ranges of a video are edited through the video itself
@@ -1100,18 +1084,6 @@ ResizablePanel {
                                 const data = render_queue.get_gyroflow_data(job_id);
                                 if (data) window.videoArea.loadGyroflowData(JSON.parse(data), job_id);
                             }
-                        }
-                        Action {
-                            iconName: "arrow-up";
-                            text: qsTr("Move up in the queue");
-                            enabled: job_id > 0;
-                            onTriggered: root.moveItem(item_id, -1);
-                        }
-                        Action {
-                            iconName: "arrow-down";
-                            text: qsTr("Move down in the queue");
-                            enabled: job_id > 0;
-                            onTriggered: root.moveItem(item_id, 1);
                         }
                         Action {
                             iconName: dlg.isBusy? "close" : "spinner";

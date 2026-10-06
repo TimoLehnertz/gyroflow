@@ -17,6 +17,8 @@ QQC.Menu {
     font.pixelSize: 11.5 * dpiScale;
 
     property var colors: [];
+    // Leave out the items that can't be used now, instead of showing them disabled
+    property bool hideDisabled: false;
 
     // For compatibility with Qt < 6.5
     function setIcon(iconName: string): void {
@@ -51,6 +53,8 @@ QQC.Menu {
         icon.width: itemHeight / 2 + 1 * dpiScale;
         icon.height: itemHeight / 2 + 1 * dpiScale;
         font: parentMenu? parentMenu.font : undefined;
+        visible: !parentMenu || !parentMenu.hideDisabled || enabled;
+        height: visible? implicitHeight : 0;
 
         Component.onCompleted: {
             if (icon.name && icon.name.indexOf(";") > 0) {

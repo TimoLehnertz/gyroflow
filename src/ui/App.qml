@@ -686,13 +686,20 @@ Rectangle {
                         text: qsTr("Apply settings");
                         rightPadding: 28 * dpiScale;
                         tooltip: qsTr("Apply the settings shown to other ranges, clips or the render queue");
+                        enabled: applyToQueue.enabled || applyToRanges.enabled || applyEverywhere.enabled;
                         onClicked: applySettingsMenu.popup(applySettingsBtn, 0, -applySettingsMenu.height);
                         DropdownChevron { opened: applySettingsMenu.visible; }
                         Components.Menu {
                             id: applySettingsMenu;
-                            Action { iconName: "queue"; text: qsTr("To the render queue…"); enabled: render_queue.queue.rowCount() > 0; onTriggered: renderBtn.openSettingsSelector("apply"); }
-                            QQC.MenuSeparator { verticalPadding: 5 * dpiScale; }
+                            hideDisabled: true;
+                            Action { id: applyToQueue; iconName: "queue"; text: qsTr("To the render queue…"); enabled: render_queue.queue.rowCount() > 0; onTriggered: renderBtn.openSettingsSelector("apply"); }
+                            QQC.MenuSeparator {
+                                verticalPadding: 5 * dpiScale;
+                                visible: applyToQueue.enabled && (applyToRanges.enabled || applyEverywhere.enabled);
+                                height: visible? implicitHeight : 0;
+                            }
                             Action {
+                                id: applyToRanges;
                                 iconName: "gyroflow";
                                 text: qsTr("To all ranges of this clip (stabilization)");
                                 enabled: videoArea.separateRangeSettings;
@@ -703,8 +710,9 @@ Rectangle {
                                 }
                             }
                             Action {
+                                id: applyEverywhere;
                                 iconName: "gyroflow";
-                                text: qsTr("To all other clips (stabilization)");
+                                text: qsTr("Everywhere");
                                 enabled: videoArea.vid.loaded;
                                 onTriggered: mediaPanel.applyStabilizationToAll();
                             }
