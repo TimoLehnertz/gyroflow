@@ -1345,8 +1345,10 @@ impl MediaLibrary {
         self.marker_file_loaded = false;
         let list = urls.to_string();
         let mut urls: Vec<String> = Vec::new();
+        // A drop has each file in its urls and again in its text, eg. as a path or encoded differently: one file is one url
         for url in list.lines().map(str::trim).filter(|x| !x.is_empty()) {
-            if !urls.iter().any(|x| x == url) { urls.push(url.to_string()); }
+            let url = Some(Self::to_url(url, false)).filter(|x| !x.is_empty()).unwrap_or_else(|| url.to_string());
+            if !urls.contains(&url) { urls.push(url); }
         }
         if urls.is_empty() { return Self::marker_error("Choose a markers.json file first.".into()); }
         let mut markers: Vec<marker_import::Marker> = Vec::new();
