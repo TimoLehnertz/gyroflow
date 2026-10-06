@@ -1027,7 +1027,10 @@ Item {
                 model: root.trimRanges;
                 Rectangle {
                     readonly property Item range: rangeIndicators.count > index? rangeIndicators.itemAt(index) : null;
-                    readonly property string status: window.mediaPanel? (window.mediaPanel.keyStates[(modelData[2] || { }).uid || "-"] || window.mediaPanel.keyStates[""] || "") : "";
+                    readonly property string seq: (modelData[2] || { }).uid || "-";
+                    // In the queue, otherwise whether its file exists and if its settings changed since it was rendered
+                    readonly property string status: window.mediaPanel? (window.mediaPanel.keyStates[seq] || window.mediaPanel.keyStates[""]
+                                                                      || window.mediaPanel.outputStates[seq] || window.mediaPanel.outputStates[""] || "") : "";
                     visible: root.trimActive && !!range && status.length > 0;
                     x: range? range.x : 0;
                     width: range? range.width : 0;
@@ -1035,7 +1038,8 @@ Item {
                     z: 2;
                     height: 3 * dpiScale;
                     radius: height / 2;
-                    color: status == "done"? "#70e574" : status == "error" || status == "question"? "#ed7676" : styleQueuedColor;
+                    color: status == "done" || status == "stabilized"? "#70e574" : status == "changed"? "#f6a00b"
+                         : status == "error" || status == "question"? "#ed7676" : styleQueuedColor;
                 }
             }
         }

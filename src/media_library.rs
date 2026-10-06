@@ -201,7 +201,7 @@ pub struct MediaLibrary {
     get_range_settings: qt_method!(fn(&self, item_id: u32, range_index: i32) -> QString),
     apply_stabilization_to_all: qt_method!(fn(&mut self, data: QString, except_item_id: u32) -> usize),
     apply_settings_to_queued: qt_method!(fn(&mut self, data: QString) -> QVariantList),
-    settings_hash: qt_method!(fn(&self, item_id: u32) -> QString),
+    get_output_states: qt_method!(fn(&self, item_id: u32) -> QString),
     get_output_settings: qt_method!(fn(&self, item_id: u32) -> QString),
 
     get_output_path: qt_method!(fn(&self, item_id: u32) -> QString),
@@ -364,12 +364,14 @@ impl MediaLibrary {
         let obj = v.settings.as_ref().and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok()).unwrap_or_default();
         let ranges = Self::trim_ranges_ms(&obj);
         let joined = available.len() == 1 && available[0].is_empty();
+        let outputs = self.outputs(v, None);
+        let output_state = |seq: &str| outputs.iter().find(|x| x.seq == seq).map(|x| Self::output_state_name(Self::output_state(v, x))).unwrap_or_default();
         let bar = if ranges.is_empty() || v.duration_ms <= 0.0 { String::new() } else {
             serde_json::json!(ranges.iter().enumerate().map(|(i, r)| {
                 // Joined into one video, all ranges are in the queue with it
                 let seq = if joined { String::new() } else { Self::range_uid(&obj, i) };
                 let end = if r.1 < 0.0 { v.duration_ms + r.1 } else { r.1 };
-                serde_json::json!([(r.0 / v.duration_ms).clamp(0.0, 1.0), (end / v.duration_ms).clamp(0.0, 1.0), state(&seq)])
+                serde_json::json!([(r.0 / v.duration_ms).clamp(0.0, 1.0), (end / v.duration_ms).clamp(0.0, 1.0), state(&seq), output_state(&seq)])
             }).collect::<Vec<_>>()).to_string()
         };
         MediaItem {
@@ -403,7 +405,9 @@ impl MediaLibrary {
         let job = Self::job_summary(&v.jobs);
         let count = v.jobs.len() as i32;
         let queue = self.queue_display(v);
+        let stabilized = self.stabilized_state(v, &self.outputs(v, None));
         self.patch_row(video_id, |x| {
+            x.stabilized_state = stabilized;
             x.queue_state = queue.queue_state;
             x.queued_count = queue.queued_count;
             x.key_count = queue.key_count;
@@ -1504,15 +1508,13 @@ impl MediaLibrary {
         // The trim ranges (and with them the output files) are edited in the timeline of the main view
         let outputs_changed = Self::range_info(&v.settings) != Self::range_info(&Some(data.clone()));
         v.settings = Some(data);
-        self.refresh_job_hash(item_id);
         self.reconcile_keys(item_id);
         if outputs_changed {
             self.rebuild();
             self.refresh_outputs();
         } else {
+            // The trim ranges could have moved, and the output files could be outdated now
             self.update_stabilized_row(item_id);
-            // The trim ranges could have moved
-            self.update_job_row(item_id);
         }
     }
 
@@ -1628,7 +1630,6 @@ impl MediaLibrary {
         }
         for id in ids {
             self.update_stabilized_row(id);
-            self.refresh_job_hash(id);
         }
         count
     }
@@ -1674,19 +1675,12 @@ impl MediaLibrary {
         }
         for &id in &ids {
             self.update_stabilized_row(id);
-            self.refresh_job_hash(id);
             self.reconcile_keys(id);
         }
         QVariantList::from_iter(ids)
     }
 
     /// The stabilization settings the video is rendered with, including the ones of its trim ranges if they have their own
-    fn effective_stabilization(settings: &Option<String>) -> serde_json::Value {
-        let Some(obj) = settings.as_ref().and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok()) else { return serde_json::Value::Null; };
-        let stab = obj.get("stabilization").cloned().unwrap_or(serde_json::Value::Null);
-        let ranges = (0..Self::trim_ranges_ms(&obj).len()).filter_map(|i| Self::range_stabilization(&obj, i)).collect::<Vec<_>>();
-        if ranges.is_empty() { stab } else { serde_json::json!({ "stabilization": stab, "trim_ranges": ranges }) }
-    }
     /// Stabilization settings of a trim range, if the video has separate settings for each range
     fn range_stabilization(obj: &serde_json::Value, range_index: usize) -> Option<serde_json::Value> {
         Self::range_setting(obj, range_index, "stabilization")
@@ -1710,35 +1704,106 @@ impl MediaLibrary {
         if obj.get("trim_range_config").and_then(|x| x.as_str()) != Some("separate") { return None; }
         obj.get("trim_range_info")?.get(range_index)?.get(key).filter(|x| x.is_object()).cloned()
     }
-    pub fn settings_hash(&self, item_id: u32) -> QString {
-        let settings = self.item_settings(item_id).map(|(_, s, _)| s.clone()).unwrap_or_default();
-        QString::from(rendering::render_queue::stabilization_settings_hash(&Self::effective_stabilization(&settings)))
+    /// Hash of everything that goes into the output file of the trim range `range_index` (-1: the whole video, or all of
+    /// its ranges joined into one): the stabilization and export settings (the range's own, if it has them), the
+    /// background, the lens, the motion data and its synchronization, the keyframes, and the frames that are rendered.
+    /// Not the output path: where the file is doesn't change what's in it. Empty if the video has no settings yet
+    fn output_hash(settings: &Option<String>, range_index: i32) -> String {
+        let Some(obj) = settings.as_ref().and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok()).filter(|x| x.is_object()) else { return String::new(); };
+        let get = |k: &str| obj.get(k).cloned().unwrap_or(serde_json::Value::Null);
+        let range = usize::try_from(range_index).ok();
+
+        let stabilization = range.and_then(|i| Self::range_stabilization(&obj, i)).unwrap_or_else(|| get("stabilization"));
+        let mut output = get("output");
+        if let (Some(own), serde_json::Value::Object(o)) = (range.and_then(|i| Self::range_output(&obj, i)), &mut output) {
+            if let serde_json::Value::Object(own) = own { o.extend(own); }
+        }
+        if let serde_json::Value::Object(o) = &mut output {
+            for k in ["output_folder", "output_filename", "output_folder_bookmark", "output_path", "metadata", "export_trims_separately", "trim_range_index", "input_filename", "input_url"] {
+                o.remove(k);
+            }
+        }
+        let gyro_source = get("gyro_source");
+        let gyro = ["lpf", "mf", "rotation", "acc_rotation", "imu_orientation", "gyro_bias", "integration_method", "sample_index", "optical_correction_enabled", "optical_correction_strength", "ignore_file_motion"]
+            .iter().map(|k| (k.to_string(), gyro_source.get(*k).cloned().unwrap_or(serde_json::Value::Null))).collect::<serde_json::Map<_, _>>();
+
+        // The input frames: of the range, of all ranges when they are joined, or of the whole video without ranges
+        let info = get("video_info");
+        let fps = info.get("fps").and_then(|x| x.as_f64()).unwrap_or_default();
+        let duration_ms = info.get("duration_ms").and_then(|x| x.as_f64()).unwrap_or_default();
+        let frame = |ms: f64| (ms * fps / 1000.0).round() as i64;
+        let ranges = Self::trim_ranges_ms(&obj);
+        let frames = match range {
+            Some(i) => ranges.get(i).map(|r| vec![*r]).unwrap_or_default(),
+            None => ranges,
+        }.into_iter().map(|(start, end)| {
+            let end = if end < 0.0 { duration_ms + end } else { end };
+            [frame(start), frame(end)]
+        }).collect::<Vec<_>>();
+        let frames = if frames.is_empty() { vec![[0, info.get("num_frames").and_then(|x| x.as_i64()).unwrap_or_else(|| frame(duration_ms))]] } else { frames };
+
+        rendering::render_queue::settings_hash(&serde_json::json!({
+            "stabilization": stabilization,
+            "output": output,
+            "background": {
+                "color":   get("background_color"),
+                "mode":    get("background_mode"),
+                "margin":  get("background_margin"),
+                "feather": get("background_margin_feather"),
+            },
+            "light_refraction_coefficient": get("light_refraction_coefficient"),
+            "lens": get("calibration_data"),
+            "gyro_source": gyro,
+            "offsets": get("offsets"),
+            "keyframes": get("keyframes"),
+            "frames": frames,
+        }))
     }
-    /// Stabilized when all output files exist and were rendered with the current settings, changed when one of them wasn't
+    /// Whether the output file exists (`STABILIZED`), and if its settings changed since it was rendered (`STALE`). A file
+    /// without the hash (eg. rendered by an older version or another app) is taken as up to date, we can't tell
+    fn output_state(v: &Video, output: &OutputFile) -> i32 {
+        let Some(hash) = v.output_hashes.get(&output.url()) else { return NOT_STABILIZED; };
+        let current = Self::output_hash(&v.settings, output.range_index);
+        if !hash.is_empty() && !current.is_empty() && *hash != current { STALE } else { STABILIZED }
+    }
+    fn output_state_name(state: i32) -> &'static str {
+        match state { STABILIZED => "stabilized", STALE => "changed", _ => "" }
+    }
+    /// Changed when one of the output files is, stabilized when all of them exist
     fn stabilized_state(&self, v: &Video, outputs: &[OutputFile]) -> i32 {
-        let current = rendering::render_queue::stabilization_settings_hash(&Self::effective_stabilization(&v.settings));
-        let hashes = outputs.iter().map(|x| v.output_hashes.get(&x.url())).collect::<Vec<_>>();
-        // Files rendered by older versions don't have the hash, we can't tell if they are up to date
-        if hashes.iter().any(|x| x.map_or(false, |hash| !hash.is_empty() && *hash != current)) {
+        let states = outputs.iter().map(|x| Self::output_state(v, x)).collect::<Vec<_>>();
+        if states.contains(&STALE) {
             STALE
-        } else if !hashes.is_empty() && hashes.iter().all(|x| x.is_some()) {
+        } else if !states.is_empty() && states.iter().all(|x| *x == STABILIZED) {
             STABILIZED
         } else {
             NOT_STABILIZED
         }
     }
-    /// The jobs of a queued video are kept in sync with its settings, so they also render with the new hash
-    fn refresh_job_hash(&mut self, item_id: u32) {
-        let hash = self.settings_hash(item_id).to_string();
-        if let Some(v) = self.video_mut(item_id) {
-            for job in v.jobs.iter_mut().filter(|x| x.status == "queued") { job.hash = hash.clone(); }
-        }
+    /// The state of every output file of the video, by its key (see `JobState::seq`): "stabilized", "changed" or missing
+    pub fn get_output_states(&self, item_id: u32) -> QString {
+        let states = self.video(item_id).map(|v| self.outputs(v, None).iter().filter_map(|x| {
+            let state = Self::output_state_name(Self::output_state(v, x));
+            (!state.is_empty()).then(|| (x.seq.clone(), serde_json::Value::String(state.to_owned())))
+        }).collect::<serde_json::Map<_, _>>()).unwrap_or_default();
+        QString::from(serde_json::Value::Object(states).to_string())
     }
+    /// The hash the output file of a job is rendered with, called by the render queue when the job starts. The job is found
+    /// by its id, or by its video if it isn't registered yet (eg. "Stabilize now", which starts it right away)
+    pub fn hash_for_render(&mut self, job_id: u32, url: &str, range_index: Option<usize>) -> Option<String> {
+        let range_index = range_index.map(|x| x as i32).unwrap_or(-1);
+        let item_id = match self.item_id_for_job(job_id) { 0 => self.find_by_url(QString::from(url)), id => id };
+        let v = self.video(item_id)?;
+        let hash = Self::output_hash(&v.settings, range_index);
+        if hash.is_empty() { return None; }
+        if let Some(job) = self.job_mut(job_id) { job.hash = hash.clone(); }
+        Some(hash)
+    }
+    /// The output files were checked or rendered, or the settings changed: the row and the ranges show if they are up to date
     fn update_stabilized_row(&mut self, item_id: u32) {
-        if let Some(v) = self.video(item_id) {
-            let state = self.stabilized_state(v, &self.outputs(v, None));
-            self.patch_row(item_id, |x| x.stabilized_state = state);
-        }
+        if self.video(item_id).is_none() { return; }
+        self.update_job_row(item_id);
+        self.key_states_changed(item_id);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -1956,11 +2021,10 @@ impl MediaLibrary {
         self.items_changed();
     }
 
-    fn new_job(&self, item_id: u32, job_id: u32, seq: String) -> JobState {
+    fn new_job(job_id: u32, seq: String) -> JobState {
         JobState {
             job_id,
             status: "queued".into(),
-            hash: self.settings_hash(item_id).to_string(),
             seq,
             ..Default::default()
         }
@@ -1969,7 +2033,7 @@ impl MediaLibrary {
     pub fn set_item_job(&mut self, item_id: u32, job_id: u32) {
         self.clear_keys(item_id);
         if job_id > 0 {
-            let job = self.new_job(item_id, job_id, String::new());
+            let job = Self::new_job(job_id, String::new());
             if let Some(v) = self.video_mut(item_id) { v.jobs.push(job); }
         }
         self.keys_changed(item_id);
@@ -1980,7 +2044,7 @@ impl MediaLibrary {
         let seq = seq.to_string();
         if job_id == 0 || self.is_library_job(job_id) { return; }
         if self.video(item_id).map_or(true, |v| v.jobs.iter().any(|x| x.seq == seq)) { return; }
-        let job = self.new_job(item_id, job_id, seq);
+        let job = Self::new_job(job_id, seq);
         let Some(v) = self.video_mut(item_id) else { return; };
         v.jobs.push(job);
         self.update_job_row(item_id);
@@ -1988,10 +2052,9 @@ impl MediaLibrary {
     }
     /// The jobs of the video render again (eg. after "Reset status"), with the settings it has now
     pub fn reset_item_job_states(&mut self, item_id: u32) {
-        let hash = self.settings_hash(item_id).to_string();
         let Some(v) = self.video_mut(item_id) else { return; };
         for job in v.jobs.iter_mut() {
-            *job = JobState { job_id: job.job_id, status: "queued".into(), hash: hash.clone(), seq: job.seq.clone(), loading: job.loading, ..Default::default() };
+            *job = JobState { job_id: job.job_id, status: "queued".into(), seq: job.seq.clone(), loading: job.loading, ..Default::default() };
         }
         self.update_job_row(item_id);
         self.items_changed();
@@ -2019,7 +2082,7 @@ impl MediaLibrary {
         let seq = seq.to_string();
         let Some(v) = self.video(item_id) else { return false; };
         if v.jobs.iter().any(|x| x.seq == seq) || !self.available_seqs(v).contains(&seq) { return false; }
-        let job = self.new_job(item_id, 0, seq);
+        let job = Self::new_job(0, seq);
         if let Some(v) = self.video_mut(item_id) { v.jobs.push(job); }
         self.keys_changed(item_id);
         true
@@ -2030,7 +2093,7 @@ impl MediaLibrary {
         let missing = self.available_seqs(v).into_iter().filter(|seq| !v.jobs.iter().any(|x| &x.seq == seq)).collect::<Vec<_>>();
         if missing.is_empty() { return; }
         for seq in missing {
-            let job = self.new_job(item_id, 0, seq);
+            let job = Self::new_job(0, seq);
             if let Some(v) = self.video_mut(item_id) { v.jobs.push(job); }
         }
         self.keys_changed(item_id);
@@ -2081,12 +2144,11 @@ impl MediaLibrary {
         } else if !joined && queued.iter().any(|x| x.is_empty()) {
             add = available.clone();
         }
-        let hash = self.settings_hash(item_id).to_string();
         let Some(v) = self.video_mut(item_id) else { return; };
         let (keep, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut v.jobs).into_iter().partition(|x| available.contains(&x.seq) || (x.job_id > 0 && !x.loading && x.is_busy()));
         v.jobs = keep;
         for seq in add {
-            if !v.jobs.iter().any(|x| x.seq == seq) { v.jobs.push(JobState { status: "queued".into(), hash: hash.clone(), seq, ..Default::default() }); }
+            if !v.jobs.iter().any(|x| x.seq == seq) { v.jobs.push(JobState { status: "queued".into(), seq, ..Default::default() }); }
         }
         for job in gone { Self::retire(v, job); }
         self.keys_changed(item_id);
@@ -2270,6 +2332,58 @@ impl MediaLibrary {
 mod tests {
     use qmetaobject::QString;
     use super::{ MediaLibrary, Video };
+
+    fn hash(settings: serde_json::Value, range_index: i32) -> String {
+        MediaLibrary::output_hash(&Some(settings.to_string()), range_index)
+    }
+    fn hash_settings() -> serde_json::Value {
+        serde_json::json!({
+            "video_info": { "fps": 25.0, "duration_ms": 10000.0, "num_frames": 250 },
+            "stabilization": { "fov": 1.0, "method": "Default" },
+            "output": { "codec": "H.265/HEVC", "bitrate": 100, "output_folder": "file:///a/", "output_filename": "x.mp4" },
+            "background_mode": 0, "background_margin": 20.0,
+            "trim_ranges_ms": [[1000.0, 2000.0], [5000.0, 6000.0]],
+            "trim_range_info": [{ "output_path": "a-001" }, { "output_path": "a-002" }],
+        })
+    }
+    #[test]
+    fn output_hash_covers_what_goes_into_the_file() {
+        let base = hash_settings();
+        let h = hash(base.clone(), 0);
+        assert!(!h.is_empty());
+        // Where the file is and the order of the keys don't change what's in it
+        let mut moved = base.clone();
+        moved["output"]["output_folder"] = "file:///b/".into();
+        moved["output"]["output_filename"] = "y.mp4".into();
+        moved["trim_range_info"][0]["output_path"] = "elsewhere".into();
+        assert_eq!(hash(moved, 0), h);
+        let reordered: serde_json::Value = serde_json::from_str(&base.to_string().replace("\"fov\":1.0,\"method\":\"Default\"", "\"method\":\"Default\",\"fov\":1.0")).unwrap();
+        assert_eq!(hash(reordered, 0), h);
+        // Everything that changes the pixels does
+        for (path, value) in [("/stabilization/fov", serde_json::json!(1.1)), ("/output/bitrate", serde_json::json!(50)), ("/background_mode", serde_json::json!(1))] {
+            let mut changed = base.clone();
+            *changed.pointer_mut(path).unwrap() = value;
+            assert_ne!(hash(changed, 0), h, "{path}");
+        }
+        // The frames of the range: its own bounds, not the ones of the other ranges
+        let mut moved_range = base.clone();
+        moved_range["trim_ranges_ms"][0][1] = 2100.0.into();
+        assert_ne!(hash(moved_range.clone(), 0), h);
+        assert_eq!(hash(moved_range, 1), hash(base.clone(), 1));
+        assert_ne!(hash(base.clone(), 0), hash(base.clone(), 1));
+        // Joined into one file, it's all of them
+        assert_ne!(hash(base.clone(), -1), h);
+        assert_eq!(MediaLibrary::output_hash(&None, 0), "");
+    }
+    #[test]
+    fn a_range_with_its_own_settings_has_its_own_hash() {
+        let base = hash_settings();
+        let mut own = base.clone();
+        own["trim_range_config"] = "separate".into();
+        own["trim_range_info"][1]["stabilization"] = serde_json::json!({ "fov": 2.0, "method": "Default" });
+        assert_eq!(hash(own.clone(), 0), hash(base.clone(), 0));
+        assert_ne!(hash(own, 1), hash(base, 1));
+    }
 
     #[test]
     fn hidden_files_are_not_videos() {

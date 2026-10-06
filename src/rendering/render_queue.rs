@@ -75,9 +75,40 @@ pub struct RenderMetadata {
     pub stabilization_hash: String,
 }
 
-/// Hash of the stabilization settings, written to the rendered file and used to detect outdated renders
-pub fn stabilization_settings_hash(v: &serde_json::Value) -> String {
-    format!("{:08x}", crc32fast::hash(serde_json::to_string(v).unwrap_or_default().as_bytes()))
+/// Hash of the settings an output file is rendered with (see `MediaLibrary::output_hash`), written to the rendered file
+/// and used to detect files whose settings changed since. The same settings always give the same hash: the keys are
+/// sorted and the numbers rounded, so eg. the order of the keys or a value going through JSON doesn't change it
+pub fn settings_hash(v: &serde_json::Value) -> String {
+    fn canonical(v: &serde_json::Value, out: &mut String) {
+        match v {
+            serde_json::Value::Object(obj) => {
+                let mut keys = obj.keys().collect::<Vec<_>>();
+                keys.sort();
+                out.push('{');
+                for k in keys {
+                    out.push_str(&serde_json::to_string(k).unwrap_or_default());
+                    out.push(':');
+                    canonical(&obj[k], out);
+                    out.push(',');
+                }
+                out.push('}');
+            }
+            serde_json::Value::Array(arr) => {
+                out.push('[');
+                for x in arr { canonical(x, out); out.push(','); }
+                out.push(']');
+            }
+            serde_json::Value::Number(n) => {
+                let x = n.as_f64().unwrap_or_default();
+                let x = (x * 1e6).round() / 1e6;
+                out.push_str(&format!("{}", if x == 0.0 { 0.0 } else { x }));
+            }
+            _ => out.push_str(&v.to_string()),
+        }
+    }
+    let mut out = String::new();
+    canonical(v, &mut out);
+    format!("{:08x}", crc32fast::hash(out.as_bytes()))
 }
 pub fn stabilization_hash_from_file(url: &str) -> Option<String> {
     let md = rendering::FfmpegProcessor::get_file_metadata(url).ok()?;
@@ -245,9 +276,14 @@ impl RenderOptions {
     }
 }
 
+/// The hash of the settings a job renders with, by its id, the url of its video and the trim range it renders
+pub type HashProvider = Box<dyn Fn(u32, &str, Option<usize>) -> Option<String>>;
+
 #[derive(Default, QObject)]
 pub struct RenderQueue {
     base: qt_base_class!(trait QObject),
+    /// Set by the media library, which knows the settings of every output file (see `MediaLibrary::hash_for_render`)
+    pub hash_provider: Option<HashProvider>,
 
     pub queue: qt_property!(RefCell<SimpleListModel<RenderQueueItem>>; NOTIFY queue_changed),
     jobs: HashMap<u32, Job>,
@@ -1168,6 +1204,12 @@ impl RenderQueue {
             let mut input_file = stab.input_file.read().clone();
             let filename = filesystem::get_filename(&input_file.url);
             let mut render_options = job.render_options.clone();
+            // The rendered file gets the hash of the settings it's rendered with now
+            if let Some(provider) = &self.hash_provider {
+                if let Some(hash) = provider(job_id, &input_file.url, render_options.trim_range_index) {
+                    render_options.metadata.stabilization_hash = hash;
+                }
+            }
 
             progress((0.0, 0, (total_frame_count as f64 * trim_ratio).round() as usize, false, false));
 

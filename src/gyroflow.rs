@@ -170,6 +170,14 @@ fn entry() {
 
     let ml = RefCell::new(media_library::MediaLibrary::new(ctl.borrow().stabilizer.clone()));
     let mlpinned = unsafe { QObjectPinned::new(&ml) };
+    {
+        // A job that starts rendering asks the media library for the hash of the settings of its output file. Both live
+        // until the end of this function, which runs the app
+        let ml_ptr: *const RefCell<media_library::MediaLibrary> = &ml;
+        rq.borrow_mut().hash_provider = Some(Box::new(move |job_id, url, range_index| {
+            unsafe { &*ml_ptr }.try_borrow_mut().ok()?.hash_for_render(job_id, url, range_index)
+        }));
+    }
 
     let fs = RefCell::new(controller::Filesystem::default());
     let fspinned = unsafe { QObjectPinned::new(&fs) };

@@ -438,9 +438,13 @@ ResizablePanel {
     // Queue state of the keys of the video in the main view (`seq` → status, see `get_key_states`), shown on the timeline
     // and used by the queue button of the bottom bar. They look up their trim ranges by the ids the timeline has
     property var keyStates: ({ });
+    // And whether the output files of the keys exist ("stabilized"), and if their settings changed since ("changed")
+    property var outputStates: ({ });
     function updateKeyStates(): void {
         const states = media_library.current_item > 0? JSON.parse(media_library.get_key_states(media_library.current_item)) : ({ });
         if (JSON.stringify(states) != JSON.stringify(root.keyStates)) root.keyStates = states;
+        const outputs = media_library.current_item > 0? JSON.parse(media_library.get_output_states(media_library.current_item)) : ({ });
+        if (JSON.stringify(outputs) != JSON.stringify(root.outputStates)) root.outputStates = outputs;
     }
     // The job renders its key with the settings the video has now: the ones of its trim range, if it has its own, and the
     // output file of the key. Jobs that started rendering are left as they are, unless `loaded` (it just loaded the video)
@@ -469,7 +473,8 @@ ResizablePanel {
             if (data) render_queue.apply_to_all(data, additionalData, jobIds[i]);
         }
     }
-    // Render settings of the job, with the export settings, the output path and the settings hash of this item
+    // Render settings of the job, with the export settings and the output path of this item. The hash of its settings is
+    // added by the render queue when it starts rendering (see `MediaLibrary::hash_for_render`)
     function jobData(itemId: int): var {
         let ad = JSON.parse(JSON.stringify(window.getAdditionalProjectData()));
         ad.output = ad.output || ({ });
@@ -484,7 +489,6 @@ ResizablePanel {
         }
         ad.output.output_folder   = media_library.get_output_folder(itemId);
         ad.output.output_filename = isLoaded? root.outputFilename(itemId) : media_library.get_output_filename(itemId, "");
-        ad.output.metadata = Object.assign({ }, ad.output.metadata || { }, { stabilization_hash: media_library.settings_hash(itemId) });
         return ad;
     }
     // An item can be edited while it's waiting in the queue, keep its jobs up to date until they start rendering. Which of
@@ -1262,7 +1266,7 @@ ResizablePanel {
                                 : dlg.isRendering?   (job_progress * 100).toFixed(0) + "%"
                                 : dlg.isQueued?      (queue_state == "some"? qsTr("%1/%2 queued").arg(queued_count).arg(key_count) : qsTr("Queued"))
                                 : dlg.isJobDone?     qsTr("Done")
-                                : stabilized_state == 2? qsTr("Changed")
+                                : stabilized_state == 2? qsTr("Settings changed")
                                 : stabilized_state == 1? qsTr("Stabilized") : "";
                         }
                     }
@@ -1280,14 +1284,19 @@ ResizablePanel {
                         width: parent.width - x;
                         height: 12 * dpiScale;
                         anchors.verticalCenter: parent.verticalCenter;
+                        // The queue state of the range, otherwise whether its file exists and is up to date
                         ranges: rangeBar.ranges.map((x, i) => ({
                             start: x[0], end: x[1],
                             color: x[2] == "done"? "#70e574"
                                  : x[2] == "error" || x[2] == "question"? "#ed7676"
                                  : x[2]? styleQueuedColor
+                                 : x[3] == "changed"? "#f6a00b"
+                                 : x[3] == "stabilized"? "#70e574"
                                  : Qt.rgba(styleTextColor.r, styleTextColor.g, styleTextColor.b, 0.35),
                             tooltip: qsTr("Range %1").arg(i + 1) + ": " + (x[2] == "done"? qsTr("Done") : x[2] == "error"? qsTr("Error")
-                                   : x[2] == "rendering" || x[2] == "processing"? qsTr("Rendering") : x[2]? qsTr("Queued") : qsTr("Not queued"))
+                                   : x[2] == "rendering" || x[2] == "processing"? qsTr("Rendering") : x[2]? qsTr("Queued")
+                                   : x[3] == "changed"? qsTr("Stabilized, but its settings changed since")
+                                   : x[3] == "stabilized"? qsTr("Stabilized") : qsTr("Not stabilized"))
                         }));
                     }
                 }
