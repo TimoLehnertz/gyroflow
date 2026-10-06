@@ -634,18 +634,27 @@ ResizablePanel {
         rangeJumpWhenReady.elapsed = 0;
         rangeJumpWhenReady.restart();
     }
+    // As soon as the first frame of the video is shown, not only once its motion data is loaded
+    Connections {
+        target: window.videoArea;
+        function onFirstFrameShown(): void { if (root.pendingRangeJumpItem > 0) rangeJumpWhenReady.check(false); }
+    }
     Timer {
         id: rangeJumpWhenReady;
         interval: 100;
         repeat: true;
         property int elapsed: 0;
         onTriggered: {
-            const id = root.pendingRangeJumpItem;
             elapsed += interval;
+            check(true);
+        }
+        // `loaded`: only once the video is loaded completely (the first frame was shown before, in case that was missed)
+        function check(loaded: bool): void {
+            const id = root.pendingRangeJumpItem;
             if (id != media_library.current_item || elapsed > 60000) { stop(); root.pendingRangeJumpItem = 0; return; }
             const timeline = window.videoArea.timeline;
-            const ready = window.videoArea.vid.loaded && !window.videoArea.videoLoader.active && !window.videoArea.pendingGyroflowData
-                       && media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString()) && timeline.trimRanges.length > 0;
+            const ready = window.videoArea.vid.loaded && media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString()) && timeline.trimRanges.length > 0
+                       && (!loaded || (!window.videoArea.videoLoader.active && !window.videoArea.pendingGyroflowData));
             if (!ready) return;
             stop();
             root.pendingRangeJumpItem = 0;

@@ -33,6 +33,9 @@ Item {
     property bool isCalibrator: false;
 
     property var pendingGyroflowData: null;
+    // The first frame of a newly loaded video is shown, the playhead can be moved from now on (it's at the start until then).
+    // Its trim ranges are already shown, its motion data can still be loading
+    signal firstFrameShown();
     property int pendingQueueJobId: 0;
     property url loadedFileUrl;
 
@@ -872,7 +875,7 @@ Item {
                             Qt.callLater(() => {
                                 // Not `currentFrame++`: until the first frame is shown, it's still the previous video's frame
                                 vid.currentFrame = 1;
-                                Qt.callLater(() => vid.currentFrame = 0);
+                                Qt.callLater(() => { vid.currentFrame = 0; root.firstFrameShown(); });
                                 if (vid.videoWidth) {
                                     stabEnabledBtn.checked = true;
                                     vid.volume = volumeSlider.value / 100.0;
