@@ -60,6 +60,7 @@ Rectangle {
             advanced.parent = paramsTab.inner;
             advancedHr.parent = paramsTab.inner;
             nlePlugins.parent = paramsTab.inner;
+            mobileSettingsBtn.parent = paramsTab.inner;
 
             outputPathLabel.parent = exportTab.inner;
             renderBtnRow   .parent = exportTab.inner;
@@ -94,6 +95,7 @@ Rectangle {
     property alias stab: stab.item;
     property alias exportSettings: exportSettings.item;
     property alias advanced: advanced.item;
+    property alias globalSettings: globalSettings.item;
     property alias renderBtn: renderBtn;
 
     readonly property bool wasModified: window.videoArea.vid.loaded;
@@ -159,8 +161,20 @@ Rectangle {
                     height: children[0].height * 1.5;
                     Image {
                         source: "qrc:/resources/logo" + (style === "dark"? "_white" : "_black") + ".svg"
-                        sourceSize.width: Math.min(300 * dpiScale, parent.width * 0.9);
+                        sourceSize.width: Math.min(300 * dpiScale, parent.width * 0.9 - 2 * settingsBtn.width);
                         anchors.centerIn: parent;
+                    }
+                    LinkButton {
+                        id: settingsBtn;
+                        iconName: "settings";
+                        textColor: styleTextColor;
+                        transparent: true;
+                        leftPadding: 8 * dpiScale;
+                        rightPadding: 8 * dpiScale;
+                        anchors.right: parent.right;
+                        anchors.verticalCenter: parent.verticalCenter;
+                        tooltip: qsTr("Settings");
+                        onClicked: window.globalSettings.show();
                     }
                 }
                 Hr { }
@@ -514,11 +528,26 @@ Rectangle {
             ItemLoader { id: advanced; sourceComponent: Component { Menu.Advanced { } } }
             Hr { id: advancedHr; visible: nlePlugins.active }
             ItemLoader { id: nlePlugins; active: controller.is_nle_installed(); sourceComponent: Component { Menu.NlePlugins { } } }
+            LinkButton {
+                id: mobileSettingsBtn;
+                visible: isMobileLayout;
+                text: qsTr("Settings");
+                iconName: "settings";
+                anchors.horizontalCenter: parent.horizontalCenter;
+                onClicked: window.globalSettings.show();
+            }
         }
     }
 
     Shortcuts {
         videoArea: videoArea;
+    }
+
+    Loader {
+        id: globalSettings;
+        asynchronous: true;
+        anchors.fill: parent;
+        sourceComponent: Component { GlobalSettings { } }
     }
 
     function showNotification(type: int, text: string, textFormat: var, container: var): void {
@@ -733,7 +762,7 @@ Rectangle {
             return qsTr("Your GPU doesn't support H.265/HEVC encoding, try to use H.264/AVC or disable GPU encoding in Export settings.");
         }
         if (text.includes("failed to decode picture") && text.includes("-12909")) {
-            return qsTr("GPU decoder failed to decode this file. Disable GPU decoding in \"Advanced\" and try again.") + "\n\n" + text;
+            return qsTr("GPU decoder failed to decode this file. Disable GPU decoding in \"Settings\" and try again.") + "\n\n" + text;
         }
         if (text.includes("codec not currently supported in container")) {
             return qsTr("Make sure your output extension supports the selected codec. \".mov\" should work in most cases.") + "\n\n" + text;
@@ -804,7 +833,7 @@ Rectangle {
                         if (i > 1000) break;
                     }
 
-                    const suffix = advanced.item.defaultSuffix.text;
+                    const suffix = globalSettings.item.defaultSuffix.text;
                     const newFilename = outputFile.filename.replace(new RegExp(suffix + "(_\\d+)?\\.([a-z0-9]+)$", "i"), suffix + "_" + (i - 1) + ".$2");
                     if (!filesystem.exists_in_folder(folder, newFilename)) {
                         outputFile.setFilename(newFilename);

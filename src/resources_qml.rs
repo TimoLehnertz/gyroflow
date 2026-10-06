@@ -14,6 +14,7 @@ qrc!(pub rsrc_qml,
         "src/ui/RenderQueue.qml",
         "src/ui/Statistics.qml",
         "src/ui/SettingsSelector.qml",
+        "src/ui/GlobalSettings.qml",
         "src/ui/Util.js",
 
         "src/ui/menu/Advanced.qml",

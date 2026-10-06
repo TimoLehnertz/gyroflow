@@ -198,6 +198,7 @@ Item {
     // Exit full screen mode
     Shortcut {
         sequence: "Esc";
+        enabled: !(typeof window !== "undefined" && window.globalSettings && window.globalSettings.opened); // Esc closes the settings
         onActivated: videoArea.fullScreen = 0;
     }
 

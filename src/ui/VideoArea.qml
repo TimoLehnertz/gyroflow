@@ -344,8 +344,8 @@ Item {
                     calibrator_window.lensCalib.previewResolution = 2;
                 }
             } else {
-                if (settings.value("previewResolution", -1) == -1 && window.advanced.previewResolution == 0) {
-                    window.advanced.previewResolution = 2;
+                if (settings.value("previewResolution", -1) == -1 && window.globalSettings.previewResolution == 0) {
+                    window.globalSettings.previewResolution = 2;
                 }
             }
         }
@@ -434,7 +434,7 @@ Item {
         render_queue.editing_job_id = 0;
         controller.load_video(url, vid);
         if (!isCalibrator) {
-            const suffix = window.advanced.defaultSuffix.text;
+            const suffix = window.globalSettings.defaultSuffix.text;
             window.outputFile.setFilename(filesystem.filename_with_suffix(filename, suffix).replace(/%0[0-9]+d/, ""));
 
             const preservedPath = settings.value("preservedOutputPath", "");

@@ -135,7 +135,7 @@ Item {
                     text = getReadableError(qsTr(text).arg(arg));
                     if (text) {
                         // if (text.includes("failed to decode picture"))
-                        //     window.advanced.gpudecode.checked = false;
+                        //     window.globalSettings.gpudecode.checked = false;
                         messageBox(Modal.Error, text, [ { "text": qsTr("Ok"), clicked: window[callback] } ]);
                     }
                 }
@@ -148,7 +148,7 @@ Item {
                     window.videoArea.videoLoader.currentFrame = frame;
                     window.videoArea.videoLoader.totalFrames = total_frames;
                     window.videoArea.videoLoader.additional = "";
-                    window.videoArea.videoLoader.text = window.videoArea.videoLoader.active? (is_conversion? qsTr("Converting to %1 %2...").arg(window.advanced.r3dConvertFormat.currentText) : qsTr("Rendering %1...")) : "";
+                    window.videoArea.videoLoader.text = window.videoArea.videoLoader.active? (is_conversion? qsTr("Converting to %1 %2...").arg(window.globalSettings.r3dConvertFormat.currentText) : qsTr("Rendering %1...")) : "";
                     window.videoArea.videoLoader.progress = window.videoArea.videoLoader.active? progress : -1;
                     window.videoArea.videoLoader.cancelable = true;
                     window.videoArea.videoLoader.startTime = start_time;
