@@ -34,6 +34,8 @@ Item {
     property bool trimActive: trimRanges.length > 0;
     // Playback is restricted to the active trim range
     property bool restrictTrim: false;
+    // Playback stops when the playhead reaches the end of a trim range
+    property bool stopAtRangeEnd: true;
 
     property real durationMs: 0;
     property real orgDurationMs: 0;
@@ -53,9 +55,40 @@ Item {
     readonly property real position: vid.timestamp / root.orgDurationMs;
     onPositionChanged: {
         updateActiveTrimRange();
+        checkRangeEnd();
         if (ma.movingKeyframe && ma.holdingAlt) {
             let [keyframe, timestamp, name, value, id] = ma.movingKeyframe.split(":", 5);
             controller.set_keyframe_timestamp(keyframe, id, root.getTimestampUs());
+        }
+    }
+
+    // Stopping at the end of a trim range: the timestamp of the previous frame while playing, and where playback started,
+    // so playing on from the end of a range where it stopped doesn't stop there again
+    property real lastPlayTs: -1;
+    property real playStartTs: 0;
+    Connections {
+        target: vid;
+        function onPlayingChanged(): void { root.playStartTs = vid.timestamp; root.lastPlayTs = vid.playing? vid.timestamp : -1; }
+    }
+    function checkRangeEnd(): void {
+        const ts = vid.timestamp;
+        const prev = root.lastPlayTs;
+        root.lastPlayTs = vid.playing? ts : -1;
+        if (!root.stopAtRangeEnd || !vid.playing || !root.trimRanges.length || prev < 0 || root.orgDurationMs <= 0) return;
+        const frameMs = 1000 / Math.max(1, vid.frameRate);
+        const minEndMs = root.playStartTs + 1.5 * frameMs;
+        const stopAt = (end) => { vid.pause(); root.setPosition(end); };
+        if (ts > prev && ts - prev < 1000 * Math.max(1, vid.playbackRate)) {
+            // Played over the end of a range, and not seeked over it
+            for (const range of root.trimRanges) {
+                const endMs = range[1] * root.orgDurationMs;
+                if (endMs > prev && endMs <= ts && endMs > minEndMs) return stopAt(range[1]);
+            }
+        } else if (ts < prev && root.restrictTrim && root.activeTrimRange >= 0) {
+            // Restricted to the active range, the player starts it again from its start
+            const range = root.trimRanges[root.activeTrimRange];
+            const endMs = range[1] * root.orgDurationMs;
+            if (ts <= range[0] * root.orgDurationMs + 1000 && prev >= endMs - 1000 * Math.max(1, vid.playbackRate) && endMs > minEndMs) return stopAt(range[1]);
         }
     }
 
@@ -341,7 +374,9 @@ Item {
     Item {
         id: sett;
         property alias timelineChart: chart.viewMode;
-        property alias restrictTrimRange: root.restrictTrim;
+        // A new key, so that it starts off again where it was saved as on before it was off by default
+        property alias restrictToActiveTrimRange: root.restrictTrim;
+        property alias stopAtTrimRangeEnd: root.stopAtRangeEnd;
         Component.onCompleted: settings.init(sett);
         function propChanged() { settings.propChanged(sett); }
     }
@@ -906,6 +941,13 @@ Item {
                         iconName: "loop";
                         text: qsTr("Restrict playback to the active trim range");
                         onTriggered: root.restrictTrim = !root.restrictTrim;
+                    }
+                    Action {
+                        enabled: root.trimActive;
+                        checked: enabled && root.stopAtRangeEnd;
+                        iconName: "pause";
+                        text: qsTr("Stop playback at the end of a trim range");
+                        onTriggered: root.stopAtRangeEnd = !root.stopAtRangeEnd;
                     }
                 }
                 QQC.MenuSeparator { verticalPadding: 5 * dpiScale; }
