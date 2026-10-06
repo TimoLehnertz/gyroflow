@@ -502,19 +502,49 @@ Item {
                 opacity: 0.7;
                 text: qsTr("%1 items in the queue").arg(lv.count);
             }
-            Button {
+            Row {
                 anchors.right: parent.right;
                 anchors.rightMargin: 15 * dpiScale;
                 anchors.verticalCenter: parent.verticalCenter;
-                height: 28 * dpiScale;
-                font.pixelSize: 11 * dpiScale;
-                enabled: lv.count > 0;
-                text: qsTr("Clear the queue");
-                onClicked: {
-                    messageBox(Modal.Warning, qsTr("Are you sure you want to remove all items from the render queue?"), [
-                        { text: qsTr("Yes"), clicked: () => { render_queue.clear(); media_library.clear_job_statuses(); } },
-                        { text: qsTr("No"), accent: true },
-                    ]);
+                spacing: 8 * dpiScale;
+                BasicText {
+                    visible: whenDone.visible;
+                    anchors.verticalCenter: parent.verticalCenter;
+                    font.pixelSize: 11 * dpiScale;
+                    text: qsTr("When done:");
+                }
+                // The render queue keeps the choice, this dialog is created again every time it's shown
+                ComboBox {
+                    id: whenDone;
+                    visible: !isMobile;
+                    anchors.verticalCenter: parent.verticalCenter;
+                    width: 200 * dpiScale;
+                    height: 28 * dpiScale;
+                    font.pixelSize: 11 * dpiScale;
+                    model: [
+                        QT_TRANSLATE_NOOP("Popup", "Do nothing"),
+                        QT_TRANSLATE_NOOP("Popup", "Shut down the computer"),
+                        QT_TRANSLATE_NOOP("Popup", "Restart the computer"),
+                        QT_TRANSLATE_NOOP("Popup", "Sleep"),
+                        QT_TRANSLATE_NOOP("Popup", "Hibernate"),
+                        QT_TRANSLATE_NOOP("Popup", "Logout"),
+                        QT_TRANSLATE_NOOP("Popup", "Close Gyroflow")
+                    ];
+                    Component.onCompleted: currentIndex = render_queue.when_done;
+                    onActivated: render_queue.when_done = currentIndex;
+                }
+                Button {
+                    anchors.verticalCenter: parent.verticalCenter;
+                    height: 28 * dpiScale;
+                    font.pixelSize: 11 * dpiScale;
+                    enabled: lv.count > 0;
+                    text: qsTr("Clear the queue");
+                    onClicked: {
+                        messageBox(Modal.Warning, qsTr("Are you sure you want to remove all items from the render queue?"), [
+                            { text: qsTr("Yes"), clicked: () => { render_queue.clear(); media_library.clear_job_statuses(); } },
+                            { text: qsTr("No"), accent: true },
+                        ]);
+                    }
                 }
             }
         }

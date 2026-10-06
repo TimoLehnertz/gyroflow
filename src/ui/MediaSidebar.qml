@@ -1542,43 +1542,6 @@ ResizablePanel {
                 text: qsTr("Elapsed: %1. Remaining: %2").arg(elapsed).arg(render_queue.status == "active"? remaining : "---");
             }
         }
-
-        Item {
-            width: parent.width;
-            height: 24 * dpiScale;
-            visible: whenDoneBtn.visible;
-            LinkButton {
-                id: whenDoneBtn;
-                visible: !isMobile;
-                anchors.left: parent.left;
-                anchors.verticalCenter: parent.verticalCenter;
-                leftPadding: 2 * dpiScale; rightPadding: 2 * dpiScale;
-                font.pixelSize: 10 * dpiScale;
-                property int currentOption: 0;
-                property var options: [
-                    QT_TRANSLATE_NOOP("Popup", "Do nothing"),
-                    QT_TRANSLATE_NOOP("Popup", "Shut down the computer"),
-                    QT_TRANSLATE_NOOP("Popup", "Restart the computer"),
-                    QT_TRANSLATE_NOOP("Popup", "Sleep"),
-                    QT_TRANSLATE_NOOP("Popup", "Hibernate"),
-                    QT_TRANSLATE_NOOP("Popup", "Logout"),
-                    QT_TRANSLATE_NOOP("Popup", "Close Gyroflow")
-                ];
-                text: qsTr("When done: %1").arg(qsTranslate("Popup", options[currentOption])).trim();
-                onClicked: if (whenDonePopup.visible) { whenDonePopup.close(); } else { whenDonePopup.open(); }
-                onCurrentOptionChanged: render_queue.when_done = currentOption;
-                Popup {
-                    id: whenDonePopup;
-                    model: whenDoneBtn.options;
-                    currentIndex: whenDoneBtn.currentOption;
-                    width: maxItemWidth + 10 * dpiScale;
-                    y: -height;
-                    itemHeight: 25 * dpiScale;
-                    font.pixelSize: 11 * dpiScale;
-                    onClicked: i => whenDoneBtn.currentOption = i;
-                }
-            }
-        }
     }
 
     // -----------------------------------------------------------------------------------------
