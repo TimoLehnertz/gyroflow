@@ -52,7 +52,13 @@ use calibration::LensCalibrator;
 
 lazy_static::lazy_static! {
     static ref THREAD_POOL: rayon::ThreadPool = rayon::ThreadPoolBuilder::new().build().unwrap();
+    // The loads of the video in the main view, see `run_foreground`
+    static ref FOREGROUND_POOL: rayon::ThreadPool = rayon::ThreadPoolBuilder::new().thread_name(|i| format!("gyroflow-foreground-{i}")).build().unwrap();
+    // The videos the render queue loads in the background, see `run_queue_load`
+    static ref QUEUE_LOAD_POOL: rayon::ThreadPool = rayon::ThreadPoolBuilder::new().num_threads(2).thread_name(|i| format!("gyroflow-queue-load-{i}")).build().unwrap();
 }
+/// Loads of the main view that are queued or running (see `run_foreground`)
+static FOREGROUND_LOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Default, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -2255,6 +2261,35 @@ pub fn frame_at_timestamp(timestamp_ms: f64, fps: f64) -> i32 { (timestamp_ms * 
 
 pub fn run_threaded<F>(cb: F) where F: FnOnce() + Send + 'static {
     THREAD_POOL.spawn(cb);
+}
+
+/// Runs a load of the video in the main view (its motion data, lens, project) in a pool of its own. In the shared pool
+/// it waited behind the work of the background (eg. the videos a marker import queues), and showed 0% all that time
+pub fn run_foreground<F>(cb: F) where F: FnOnce() + Send + 'static {
+    struct Running;
+    impl Drop for Running {
+        fn drop(&mut self) { FOREGROUND_LOADS.fetch_sub(1, SeqCst); }
+    }
+    // Counted from now on, also while it waits for a previous load
+    FOREGROUND_LOADS.fetch_add(1, SeqCst);
+    let running = Running;
+    FOREGROUND_POOL.spawn(move || {
+        let _running = running;
+        cb();
+    });
+}
+
+/// Runs the loading of a video of the render queue: two at a time, and not while the main view loads a video. Queueing
+/// many videos at once loaded all of them at the same time, they took every thread and read the disk all at once
+pub fn run_queue_load<F>(cb: F) where F: FnOnce() + Send + 'static {
+    QUEUE_LOAD_POOL.spawn(move || {
+        // A load of the main view that takes very long (or never ends) doesn't hold the queue up forever
+        let started = std::time::Instant::now();
+        while FOREGROUND_LOADS.load(SeqCst) > 0 && started.elapsed() < std::time::Duration::from_secs(60) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        cb();
+    });
 }
 
 /// Drop cached GPU pipelines on every worker thread of the render pool.

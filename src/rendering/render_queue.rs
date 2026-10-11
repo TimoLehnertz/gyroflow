@@ -1563,7 +1563,8 @@ impl RenderQueue {
                         this.added(job_id);
                     });
 
-                    core::run_threaded(move || {
+                    // Two at a time and after the video of the main view, see `run_queue_load`
+                    core::run_queue_load(move || {
                         let fetch_thumb = |video_url: &str, ratio: f64| -> Result<(), rendering::FFmpegError> {
                             let mut fetched = false;
                             if !crate::cli::will_run_in_console() { // Don't fetch thumbs in the CLI

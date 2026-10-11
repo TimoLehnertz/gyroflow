@@ -880,7 +880,7 @@ impl Controller {
 
                 self.loading_gyro_in_progress = true;
                 self.loading_gyro_in_progress_changed();
-                core::run_threaded(move || {
+                core::run_foreground(move || {
                     let _lock = TELEMETRY_LOAD_LOCK.lock();
                     // Replaced by a newer load while it waited for the previous one
                     if current_load_id.load(SeqCst) != load_id { return; }
@@ -1529,7 +1529,7 @@ impl Controller {
 
         let stab = self.stabilizer.clone();
         self.cancel_flag.store(true, SeqCst); // Other operations still running on the previous project
-        core::run_threaded(move || {
+        core::run_foreground(move || {
             let _lock = TELEMETRY_LOAD_LOCK.lock();
             if current_load_id.load(SeqCst) != load_id { return; } // Replaced by a newer load while it waited
             finished(stab.import_gyroflow_file(&url, false, progress, cancel_flag, false));
@@ -1556,7 +1556,7 @@ impl Controller {
 
         let stab = self.stabilizer.clone();
         self.cancel_flag.store(true, SeqCst); // Other operations still running on the previous project
-        core::run_threaded(move || {
+        core::run_foreground(move || {
             let _lock = TELEMETRY_LOAD_LOCK.lock();
             if current_load_id.load(SeqCst) != load_id { return; } // Replaced by a newer load while it waited
             let mut is_preset = false;
