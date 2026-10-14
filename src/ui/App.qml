@@ -357,8 +357,9 @@ Rectangle {
                             renderBtn.directNextJobs = [];
                             renderBtn.directRenderFinished();
                         }
-                        // Hidden: it keeps rendering in the queue, and so do the files of the other trim ranges
+                        // Hidden: it keeps rendering in the queue (paused when the queue is), and so do the files of the other trim ranges
                         function hideDirectRender(): void {
+                            if (renderBtn.directJobId > 0) render_queue.set_job_direct(renderBtn.directJobId, false);
                             renderBtn.directNextJobs = [];
                             renderBtn.directRenderFinished();
                         }
@@ -367,7 +368,7 @@ Rectangle {
                                 const next = renderBtn.directNextJobs.shift();
                                 renderBtn.directJobId = next;
                                 render_queue.main_job_id = next;
-                                render_queue.render_job(next);
+                                render_queue.render_job_direct(next);
                                 return;
                             }
                             renderBtn.directJobId = 0;
@@ -504,7 +505,7 @@ Rectangle {
                                     renderBtn.directNextJobs = jobs.slice(1);
                                     renderBtn.directJobId = jobs[0];
                                     render_queue.main_job_id = jobs[0];
-                                    render_queue.render_job(jobs[0]);
+                                    render_queue.render_job_direct(jobs[0]);
                                 }
                             }, Qt.size(50 * dpiScale * videoArea.vid.parent.ratio, 50 * dpiScale));
                         }

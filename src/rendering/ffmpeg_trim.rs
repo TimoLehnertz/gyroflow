@@ -229,7 +229,7 @@ pub fn render_trim_only<F>(stab: &StabilizationManager, progress: F, input_file:
         written_offset_us += last_ts_us - first_ts_us.unwrap_or_default() + frame_interval_us;
     }
 
-    octx.write_trailer()?;
+    let trailer = octx.write_trailer();
 
     drop(octx);
     drop(out_file);
@@ -241,6 +241,7 @@ pub fn render_trim_only<F>(stab: &StabilizationManager, progress: F, input_file:
         let _ = filesystem::remove_file(&filesystem::get_file_url(folder, &render_filename, false));
         return Ok(());
     }
+    trailer?;
 
     if render_filename != filename {
         let output_url_temp = filesystem::get_file_url(folder, &render_filename, false);
