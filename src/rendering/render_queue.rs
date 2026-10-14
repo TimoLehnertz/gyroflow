@@ -331,6 +331,7 @@ pub struct RenderQueue {
     add_file_deferred: qt_method!(fn(&mut self, url: String, gyro_url: String, additional_data: String) -> u32),
 
     get_job_output_filename: qt_method!(fn(&self, job_id: u32) -> QString),
+    job_output_is: qt_method!(fn(&self, job_id: u32, folder: QString, filename: QString) -> bool),
     get_job_output_folder: qt_method!(fn(&self, job_id: u32) -> QUrl),
     set_job_output_filename: qt_method!(fn(&mut self, job_id: u32, new_filename: QString, start: bool)),
 
@@ -648,6 +649,16 @@ impl RenderQueue {
         }
         QUrl::default()
     }
+    /// Whether the job renders to this file. The urls of the folders are compared in the same encoding (eg. a space is %20
+    /// in one, and a space in the other)
+    pub fn job_output_is(&self, job_id: u32, folder: QString, filename: QString) -> bool {
+        let Some(job) = self.jobs.get(&job_id) else { return true; };
+        let normalize = |url: &str| {
+            let normalized = filesystem::normalize_url(url, true);
+            if normalized.is_empty() { url.trim_end_matches('/').to_owned() } else { normalized }
+        };
+        normalize(&job.render_options.output_folder) == normalize(&folder.to_string()) && job.render_options.output_filename == filename.to_string()
+    }
     pub fn get_job_output_filename(&self, job_id: u32) -> QString {
         let q = self.queue.borrow();
         if let Some(job) = self.jobs.get(&job_id) {
@@ -796,6 +807,7 @@ impl RenderQueue {
     }
     /// The trim range a job renders (-1: all of them, the way `export_trims_separately` says) and its output file
     pub fn set_job_output(&mut self, job_id: u32, range_index: i32, folder: String, filename: String) {
+        if !self.jobs.contains_key(&job_id) { return; }
         self.save_later();
         let Some(job) = self.jobs.get_mut(&job_id) else { return; };
         job.render_options.trim_range_index = if range_index >= 0 { Some(range_index as usize) } else { None };
@@ -1039,16 +1051,18 @@ impl RenderQueue {
         self.status_changed();
     }
 
-    /// Saves the queue once the current event is handled: the settings and output paths applied to its jobs (`apply_to_all`,
-    /// `set_job_output`) don't change the queue itself (`queue_changed`, which saves it), they would be lost when the app quits
-    /// before it does
+    /// Saves the queue soon: the settings and output paths applied to its jobs (`apply_to_all`, `set_job_output`) don't change
+    /// the queue itself (`queue_changed`, which saves it), they would be lost when the app quits
+    /// before it does. Once for all the jobs synced meanwhile (see `MediaSidebar.qml`). The command line doesn't save it, it
+    /// renders its own jobs
     fn save_later(&self) {
+        if crate::cli::will_run_in_console() { return; }
         if self.save_scheduled.replace(true) { return; }
         let save = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, _: ()| {
             this.save_scheduled.set(false);
             this.save_render_queue();
         });
-        save(());
+        qmetaobject::single_shot(std::time::Duration::from_millis(500), move || save(()));
     }
     pub fn save_render_queue(&self) {
         // Keep the not yet restored jobs of previous sessions, until they are restored
