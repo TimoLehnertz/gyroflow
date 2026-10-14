@@ -351,23 +351,28 @@ Rectangle {
                         // The direct render is done, let the queue continue where it was paused
                         // Cancelled: the files of the other trim ranges aren't rendered either, and the cancelled one isn't rendered
                         // again when the queue continues (a stopped job is queued again)
-                        function cancelDirectRender(): void {
-                            if (renderBtn.directJobId > 0) render_queue.remove(renderBtn.directJobId);
+                        function cancelDirectRender(mainJobId: int): void {
+                            // The job of the main view, and the one of the chain (the main view's can be retried, see `onConvert_format`)
+                            if (mainJobId > 0) render_queue.remove(mainJobId);
+                            if (renderBtn.directJobId > 0 && renderBtn.directJobId != mainJobId) render_queue.remove(renderBtn.directJobId);
                             for (const jobId of renderBtn.directNextJobs) render_queue.remove(jobId);
                             renderBtn.directNextJobs = [];
                             renderBtn.directRenderFinished();
                         }
-                        // Hidden: it keeps rendering in the queue, and so do the files of the other trim ranges
-                        function hideDirectRender(): void {
+                        // Hidden: it keeps rendering in the queue (paused when the queue is), and so do the files of the other trim ranges
+                        function hideDirectRender(mainJobId: int): void {
+                            const jobIds = [mainJobId, renderBtn.directJobId].filter(x => x > 0);
                             renderBtn.directNextJobs = [];
+                            // The queue continues first: the hidden ones weren't paused (their timestamps aren't shifted)
                             renderBtn.directRenderFinished();
+                            for (const jobId of jobIds) render_queue.set_job_direct(jobId, false);
                         }
                         function directRenderFinished(): void {
                             if (renderBtn.directNextJobs.length) {
                                 const next = renderBtn.directNextJobs.shift();
                                 renderBtn.directJobId = next;
                                 render_queue.main_job_id = next;
-                                render_queue.render_job(next);
+                                render_queue.render_job_direct(next);
                                 return;
                             }
                             renderBtn.directJobId = 0;
@@ -504,7 +509,7 @@ Rectangle {
                                     renderBtn.directNextJobs = jobs.slice(1);
                                     renderBtn.directJobId = jobs[0];
                                     render_queue.main_job_id = jobs[0];
-                                    render_queue.render_job(jobs[0]);
+                                    render_queue.render_job_direct(jobs[0]);
                                 }
                             }, Qt.size(50 * dpiScale * videoArea.vid.parent.ratio, 50 * dpiScale));
                         }

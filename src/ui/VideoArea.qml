@@ -1390,14 +1390,14 @@ Item {
             background: styleBackground;
             verticalOffset: window.isMobileLayout? -bottomPanel.height / 2 : 0;
             onActiveChanged: { vid.forceRedraw(); vid.fovChanged(); }
-            canHide: render_queue.main_job_id > 0;
+            // The render of "Stabilize now" is in the main window, the calibrator cancels its own operations
+            canHide: !root.isCalibrator && render_queue.main_job_id > 0;
             onCancel: {
-                if (render_queue.main_job_id > 0) {
+                if (!root.isCalibrator && render_queue.main_job_id > 0) {
                     render_queue.cancel_job(render_queue.main_job_id);
                     // The queue was paused so this render could overrule it, let it continue now
-                    if (!root.isCalibrator) window.renderBtn.cancelDirectRender();
-                    // A stopped render doesn't end with its file (see `onRender_progress`), the next operation (eg. a sync) is
-                    // cancelled here again
+                    window.renderBtn.cancelDirectRender(render_queue.main_job_id);
+                    // It was removed from the queue, it doesn't report its end anymore (see `onRender_progress`)
                     render_queue.main_job_id = 0;
                     videoLoader.active = false;
                 } else {
@@ -1405,9 +1405,10 @@ Item {
                 }
             }
             onHide: {
+                const mainJobId = render_queue.main_job_id;
                 render_queue.main_job_id = 0;
                 videoLoader.active = false;
-                if (!root.isCalibrator) window.renderBtn.hideDirectRender();
+                if (!root.isCalibrator) window.renderBtn.hideDirectRender(mainJobId);
             }
         }
         Column {
@@ -1506,8 +1507,9 @@ Item {
                 videoLoader.cancelable = true;
                 videoLoader.startTime = start_time;
 
+                // Ended: also when it failed or was stopped (no frames), the next operation isn't this job
+                if (finished) render_queue.main_job_id = 0;
                 if (total_frames > 0 && finished) {
-                    render_queue.main_job_id = 0;
                     const folder = render_queue.get_job_output_folder(job_id);
                     const filename = render_queue.get_job_output_filename(job_id);
                     let options = [];
@@ -1530,7 +1532,9 @@ Item {
                     accent: f.toLowerCase() == candidate,
                     clicked: () => {
                         render_queue.set_pixel_format(job_id, f);
-                        render_queue.render_job(job_id);
+                        // Shown here again (it was reset when it ended), it's a render of "Stabilize now"
+                        render_queue.main_job_id = job_id;
+                        render_queue.render_job_direct(job_id);
                     }
                 }));
                 buttons.push({
@@ -1538,7 +1542,9 @@ Item {
                     accent: candidate == '',
                     clicked: () => {
                         render_queue.set_pixel_format(job_id, "cpu");
-                        render_queue.render_job(job_id);
+                        // Shown here again (it was reset when it ended), it's a render of "Stabilize now"
+                        render_queue.main_job_id = job_id;
+                        render_queue.render_job_direct(job_id);
                     }
                 });
                 buttons.push({ text: qsTr("Cancel") });

@@ -59,6 +59,10 @@ struct Job {
     render_options: RenderOptions,
     additional_data: String,
     cancel_flag: Arc<AtomicBool>,
+    /// Up while the queue is paused, unless the job is rendered by "Stabilize now" (see `render_job_direct`)
+    pause_flag: Arc<AtomicBool>,
+    /// Rendered by "Stabilize now", which pauses the queue to render it, not the job itself
+    direct: bool,
     project_data: Option<String>,
     stab: Arc<StabilizationManager>,
     /// Settings were applied to the job, but the motion data wasn't processed with them yet. It's done when the job starts rendering
@@ -317,6 +321,8 @@ pub struct RenderQueue {
     stop: qt_method!(fn(&mut self)),
 
     render_job: qt_method!(fn(&mut self, job_id: u32)),
+    render_job_direct: qt_method!(fn(&mut self, job_id: u32)),
+    set_job_direct: qt_method!(fn(&mut self, job_id: u32, direct: bool)),
     cancel_job: qt_method!(fn(&mut self, job_id: u32)),
     reset_job: qt_method!(fn(&mut self, job_id: u32)),
     get_gyroflow_data: qt_method!(fn(&self, job_id: u32) -> QString),
@@ -617,6 +623,8 @@ impl RenderQueue {
             render_options,
             additional_data,
             cancel_flag: Default::default(),
+            pause_flag: Default::default(),
+            direct: false,
             project_data,
             stab: stab.clone(),
             gyro_outdated: Default::default(),
@@ -703,6 +711,8 @@ impl RenderQueue {
             render_options: base.render_options.clone(),
             additional_data: base.additional_data.clone(),
             cancel_flag: Default::default(),
+            pause_flag: Default::default(),
+            direct: false,
             project_data: None,
             stab,
             gyro_outdated,
@@ -760,6 +770,8 @@ impl RenderQueue {
                     render_options: base.render_options.clone(),
                     additional_data: base.additional_data.clone(),
                     cancel_flag: Default::default(),
+                    pause_flag: Default::default(),
+                    direct: false,
                     project_data: None,
                     stab: job_stab,
                     gyro_outdated,
@@ -837,10 +849,13 @@ impl RenderQueue {
     }
 
     pub fn start(&mut self) {
-        let paused = self.pause_flag.load(SeqCst);
+        // Resumed: its renders continue. When none of them is rendering anymore (eg. it was paused for "Stabilize now", and
+        // the paused one was stopped), it's started
+        let paused = self.pause_flag.load(SeqCst) && self.queue.borrow().iter().any(|v| v.total_frames > 0 && v.status == JobStatus::Rendering && !self.jobs.get(&v.job_id).is_some_and(|j| j.direct));
 
         for (_id, job) in self.jobs.iter() {
             job.cancel_flag.store(false, SeqCst);
+            job.pause_flag.store(false, SeqCst);
         }
         self.pause_flag.store(false, SeqCst);
 
@@ -859,7 +874,8 @@ impl RenderQueue {
             for i in 0..q.row_count() as usize {
                 //let mut v = &mut q[i];
                 let mut v = q[i].clone();
-                if v.start_timestamp > 0 && v.current_frame < v.total_frames {
+                // Not "Stabilize now", it wasn't paused
+                if v.start_timestamp > 0 && v.current_frame < v.total_frames && !self.jobs.get(&v.job_id).is_some_and(|j| j.direct) {
                     v.start_timestamp += diff;
                     v.frame_times.clear();
                     //q.data_changed(i);
@@ -903,6 +919,9 @@ impl RenderQueue {
     }
     pub fn pause(&mut self) {
         self.pause_flag.store(true, SeqCst);
+        for (_id, job) in self.jobs.iter() {
+            if !job.direct { job.pause_flag.store(true, SeqCst); }
+        }
         self.paused_timestamp = Some(Self::current_timestamp());
 
         self.status = QString::from("paused");
@@ -911,6 +930,7 @@ impl RenderQueue {
     pub fn stop(&mut self) {
         self.pause_flag.store(false, SeqCst);
         for (_id, job) in self.jobs.iter_mut() {
+            job.pause_flag.store(false, SeqCst);
             Self::cancel(job);
         }
         self.status = QString::from("stopped");
@@ -1006,6 +1026,11 @@ impl RenderQueue {
                 return;
             }
         }
+
+        // Nothing renders anymore: it's not paused either, the next start starts it (see `start`)
+        self.pause_flag.store(false, SeqCst);
+        for (_id, job) in self.jobs.iter() { job.pause_flag.store(false, SeqCst); }
+        self.paused_timestamp = None;
 
         self.status = QString::from("stopped");
         self.status_changed();
@@ -1189,6 +1214,33 @@ impl RenderQueue {
     }
 
     pub fn render_job(&mut self, job_id: u32) {
+        self.render_job_impl(job_id, false);
+    }
+    /// Renders the job for "Stabilize now": the queue is paused for it (see `App.qml`), the job isn't
+    pub fn render_job_direct(&mut self, job_id: u32) {
+        self.render_job_impl(job_id, true);
+    }
+    /// Whether the job renders for "Stabilize now", not paused with the queue. Hidden, it keeps rendering as a job of the
+    /// queue, paused when the queue is
+    pub fn set_job_direct(&mut self, job_id: u32, direct: bool) {
+        let paused = self.pause_flag.load(SeqCst);
+        if let Some(job) = self.jobs.get_mut(&job_id) {
+            job.direct = direct;
+            job.pause_flag.store(paused && !direct, SeqCst);
+        }
+    }
+    fn render_job_impl(&mut self, job_id: u32, direct: bool) {
+        let can_start = self.jobs.get(&job_id).is_some_and(|job| {
+            let q = self.queue.borrow();
+            job.queue_index < q.row_count() as usize && q[job.queue_index].status != JobStatus::Rendering && q[job.queue_index].status != JobStatus::Finished
+        });
+        if can_start {
+            let paused = self.pause_flag.load(SeqCst);
+            if let Some(job) = self.jobs.get_mut(&job_id) {
+                job.direct = direct;
+                job.pause_flag.store(paused && !direct, SeqCst);
+            }
+        }
         if let Some(job) = self.jobs.get(&job_id) {
             {
                 let mut q = self.queue.borrow_mut();
@@ -1252,13 +1304,16 @@ impl RenderQueue {
                     if this.get_pending_count() > 0 && is_queue_active {
                         // Start the next one
                         this.start();
-                    } else {
+                    } else if this.get_active_render_count() == 0 {
                         this.start_timestamp = 0;
                         this.start_frame = 0;
                         this.update_status();
                         if is_queue_active {
                             this.post_render_action();
                         }
+                    } else {
+                        // Others still render (eg. the queue resumed after "Stabilize now", see `App.qml`), it's not done
+                        this.update_status();
                     }
                 }
             });
@@ -1301,8 +1356,10 @@ impl RenderQueue {
                 }
 
                 if this.get_pending_count() > 0 {
-                    // Start the next one
-                    this.start();
+                    // Start the next one, a failed job doesn't start (or resume) a queue that isn't running
+                    if this.status == "active".into() {
+                        this.start();
+                    }
                 } else {
                     this.start_timestamp = 0;
                     this.start_frame = 0;
@@ -1326,8 +1383,10 @@ impl RenderQueue {
                 this.render_progress(job_id, 1.0, 0, 0, true, 0.0, false);
 
                 if this.get_pending_count() > 0 {
-                    // Start the next one
-                    this.start();
+                    // Start the next one, a failed job doesn't start (or resume) a queue that isn't running
+                    if this.status == "active".into() {
+                        this.start();
+                    }
                 } else {
                     this.start_timestamp = 0;
                     this.start_frame = 0;
@@ -1352,8 +1411,7 @@ impl RenderQueue {
 
             job.cancel_flag.store(false, SeqCst);
             let cancel_flag = job.cancel_flag.clone();
-            // "Stabilize now" pauses the queue (see `App.qml`), not itself
-            let pause_flag = if job_id == self.main_job_id { Arc::new(AtomicBool::new(false)) } else { self.pause_flag.clone() };
+            let pause_flag = job.pause_flag.clone();
             let export_project  = self.export_project;
             let export_metadata = self.export_metadata.clone();
             let export_stmap    = self.export_stmap.clone();
@@ -1400,9 +1458,7 @@ impl RenderQueue {
                 }
                 if this.get_active_render_count() == 0 {
                     core::clear_gpu_cache_on_all_workers();
-                    // Nothing is rendering anymore, the next start starts the queue instead of resuming it
-                    this.pause_flag.store(false, SeqCst);
-                    this.paused_timestamp = None;
+                    // Nothing is rendering anymore (`update_status` unpauses it)
                     this.start_timestamp = 0;
                     this.start_frame = 0;
                 }
@@ -1422,8 +1478,8 @@ impl RenderQueue {
                             // It stays to be loaded, the job can be rendered again (the queue only starts jobs that aren't processing)
                             processing3(0.0);
                             return match result {
-                                Err(e) => err(("An error occurred: %1".to_string(), e)),
-                                Ok(_) => stopped(()),
+                                Err(e) if !cancel_flag.load(SeqCst) => err(("An error occurred: %1".to_string(), e)),
+                                _ => stopped(()),
                             };
                         }
                         let size = stab.params.read().size;
