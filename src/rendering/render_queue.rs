@@ -317,8 +317,8 @@ pub struct RenderQueue {
     stop: qt_method!(fn(&mut self)),
 
     render_job: qt_method!(fn(&mut self, job_id: u32)),
-    cancel_job: qt_method!(fn(&self, job_id: u32)),
-    reset_job: qt_method!(fn(&self, job_id: u32)),
+    cancel_job: qt_method!(fn(&mut self, job_id: u32)),
+    reset_job: qt_method!(fn(&mut self, job_id: u32)),
     get_gyroflow_data: qt_method!(fn(&self, job_id: u32) -> QString),
 
     add_file: qt_method!(fn(&mut self, url: String, gyro_url: String, additional_data: String) -> u32),
@@ -910,8 +910,8 @@ impl RenderQueue {
     }
     pub fn stop(&mut self) {
         self.pause_flag.store(false, SeqCst);
-        for (_id, job) in self.jobs.iter() {
-            job.cancel_flag.store(true, SeqCst);
+        for (_id, job) in self.jobs.iter_mut() {
+            Self::cancel(job);
         }
         self.status = QString::from("stopped");
         self.status_changed();
@@ -972,14 +972,21 @@ impl RenderQueue {
         }
     }
 
-    pub fn cancel_job(&self, job_id: u32) {
-        if let Some(job) = self.jobs.get(&job_id) {
-            job.cancel_flag.store(true, SeqCst);
+    /// Cancels what the job is doing, and gives it a new flag for the next time it's rendered: the next start resets the flag,
+    /// and the cancelled one may not have stopped yet (eg. while it loads the motion data, which it would use, and keep for
+    /// the other loads of the video, see `telemetry_cache`)
+    fn cancel(job: &mut Job) {
+        job.cancel_flag.store(true, SeqCst);
+        job.cancel_flag = Arc::new(AtomicBool::new(false));
+    }
+    pub fn cancel_job(&mut self, job_id: u32) {
+        if let Some(job) = self.jobs.get_mut(&job_id) {
+            Self::cancel(job);
         }
     }
-    pub fn reset_job(&self, job_id: u32) {
-        if let Some(job) = self.jobs.get(&job_id) {
-            job.cancel_flag.store(true, SeqCst);
+    pub fn reset_job(&mut self, job_id: u32) {
+        if let Some(job) = self.jobs.get_mut(&job_id) {
+            Self::cancel(job);
         }
         update_model!(self, job_id, itm {
             itm.error_string = QString::default();

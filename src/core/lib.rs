@@ -220,7 +220,7 @@ impl StabilizationManager {
             if joined_video::is_joined(url) {
                 joined_video::parse_telemetry(url, options, size, fps, progress_cb, cancel_flag2)
             } else {
-                GyroSource::parse_telemetry_file(stream, filesize, &url, options, size, fps, progress_cb, cancel_flag2)
+                GyroSource::parse_telemetry_file(stream, filesize, &url, options, size, fps, progress_cb, cancel_flag2).map(|x| (x, true))
             }
         })?;
         // The parsers return what they read until then, but a cancelled load (eg. replaced by the next video) mustn't set any of it
