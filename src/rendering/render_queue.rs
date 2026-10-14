@@ -989,16 +989,19 @@ impl RenderQueue {
             Self::cancel(job);
         }
         update_model!(self, job_id, itm {
-            itm.error_string = QString::default();
-            itm.processing_info = QString::default();
-            itm.current_frame = 0;
-            itm.status = JobStatus::Queued;
+            // A render is queued again once it stopped (see `render_job`), it's not started a second time meanwhile
+            if itm.status != JobStatus::Rendering {
+                itm.error_string = QString::default();
+                itm.processing_info = QString::default();
+                itm.current_frame = 0;
+                itm.status = JobStatus::Queued;
+            }
         });
     }
     pub fn update_status(&mut self) {
         for v in self.queue.borrow().iter() {
             if v.total_frames > 0 && v.status == JobStatus::Rendering {
-                self.status = QString::from("active");
+                self.status = QString::from(if self.pause_flag.load(SeqCst) { "paused" } else { "active" });
                 self.status_changed();
                 return;
             }
@@ -1349,7 +1352,8 @@ impl RenderQueue {
 
             job.cancel_flag.store(false, SeqCst);
             let cancel_flag = job.cancel_flag.clone();
-            let pause_flag = self.pause_flag.clone();
+            // "Stabilize now" pauses the queue (see `App.qml`), not itself
+            let pause_flag = if job_id == self.main_job_id { Arc::new(AtomicBool::new(false)) } else { self.pause_flag.clone() };
             let export_project  = self.export_project;
             let export_metadata = self.export_metadata.clone();
             let export_stmap    = self.export_stmap.clone();
@@ -1371,19 +1375,29 @@ impl RenderQueue {
             // Stopped (while it loaded the motion data, or rendered: its incomplete file is removed): it's queued again, like
             // before it started, and rendered from the start the next time
             let stopped = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, _: ()| {
+                let mut was_rendering = false;
                 update_model!(this, job_id, itm {
-                    if itm.status == JobStatus::Rendering || itm.status == JobStatus::Queued {
+                    // Not when it finished meanwhile (it was stopped after it renamed its file)
+                    if itm.status == JobStatus::Rendering {
+                        was_rendering = true;
                         itm.status = JobStatus::Queued;
+                        itm.error_string = QString::default();
+                        itm.processing_info = QString::default();
                         itm.current_frame = 0;
                         itm.processing_progress = 0.0;
                         itm.start_timestamp = 0;
+                        itm.start_timestamp2 = 0;
+                        itm.start_timestamp_frame = 0;
+                        itm.end_timestamp = 0;
                         itm.frame_times.clear();
                     }
                 });
-                // Ended without a file (which marks the job done, see `MediaLibrary::update_job_progress`), then not processing
-                // anymore (see `MediaLibrary::set_job_processing`)
-                this.render_progress(job_id, 0.0, 0, 0, true, 0.0, false);
-                this.processing_progress(job_id, -1.0);
+                if was_rendering {
+                    // Ended, without a file (it hides the progress of the main view, the job isn't done: no frames, see
+                    // `MediaSidebar`), then not processing anymore (see `MediaLibrary::set_job_processing`)
+                    this.render_progress(job_id, 0.0, 0, 0, true, 0.0, false);
+                    this.processing_progress(job_id, -1.0);
+                }
                 if this.get_active_render_count() == 0 {
                     core::clear_gpu_cache_on_all_workers();
                     // Nothing is rendering anymore, the next start starts the queue instead of resuming it
@@ -1453,7 +1467,7 @@ impl RenderQueue {
                         if optical {
                             if let Err(e) = Self::do_optical_correction(&stab, processing2, cancel_flag.clone(), pause_flag.clone()) {
                                 return if cancel_flag.load(SeqCst) {
-                                    err(("Optical analysis cancelled%1".to_string(), String::new()))
+                                    stopped(())
                                 } else {
                                     err(("An error occured: %1".to_string(), e))
                                 };
@@ -1573,7 +1587,7 @@ impl RenderQueue {
                         if cancel_flag.load(SeqCst) {
                             std::thread::sleep(std::time::Duration::from_secs(2));
                             let _ = filesystem::remove_file(&mov_url);
-                            err(("Conversion cancelled%1".to_string(), "".to_string()));
+                            stopped2(());
                             return;
                         }
                     }
