@@ -66,18 +66,21 @@ fn parse<F: Fn(&str) -> String>(script: &str, resolve: F) -> Vec<Part> {
 }
 
 /// Reads the motion data of every part as if it was loaded alone, and joins it: the timestamps of a part are shifted by
-/// the durations of the parts before it, and the per frame data is appended
-pub fn parse_telemetry<F: Fn(f64)>(url: &str, options: &FileLoadOptions, size: (usize, usize), fps: f64, progress_cb: F, cancel_flag: Arc<AtomicBool>) -> Result<FileMetadata, crate::GyroflowCoreError> {
+/// the durations of the parts before it, and the per frame data is appended. Also returns whether every part has motion
+/// data (a part that couldn't be read has none, the others are still used)
+pub fn parse_telemetry<F: Fn(f64)>(url: &str, options: &FileLoadOptions, size: (usize, usize), fps: f64, progress_cb: F, cancel_flag: Arc<AtomicBool>) -> Result<(FileMetadata, bool), crate::GyroflowCoreError> {
     let parts = read(url)?;
     let total_ms = parts.iter().map(|x| x.duration_ms).sum::<f64>().max(1.0);
     let mut joined: Option<FileMetadata> = None;
     let mut offset_ms = 0.0;
+    let mut complete = true;
     for part in &parts {
         if cancel_flag.load(SeqCst) { break; }
         let mut file = filesystem::open_file(&part.url, false, false)?;
         let filesize = file.size;
         let start = offset_ms / total_ms;
         let md = GyroSource::parse_telemetry_file(file.get_file(), filesize, &part.url, options, size, fps, |p| progress_cb(start + p * part.duration_ms / total_ms), cancel_flag.clone())?;
+        complete &= md.has_motion();
         let frames = (part.duration_ms * fps / 1000.0).round() as usize;
         joined = Some(match joined {
             None => pad_frames(md, frames),
@@ -85,7 +88,7 @@ pub fn parse_telemetry<F: Fn(f64)>(url: &str, options: &FileLoadOptions, size: (
         });
         offset_ms += part.duration_ms;
     }
-    joined.ok_or_else(|| std::io::Error::other(format!("No motion data in {url}")).into())
+    joined.map(|x| (x, complete)).ok_or_else(|| std::io::Error::other(format!("No motion data in {url}")).into())
 }
 
 /// The per frame time offsets are needed for every frame once one part has them, the other per frame data (from Sony

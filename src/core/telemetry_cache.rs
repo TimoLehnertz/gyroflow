@@ -10,13 +10,14 @@
 //! up by everything the parser gets (the file, its size and modification time, the load options, the video size and frame
 //! rate), a change in any of them parses the file again. Only motion data recorded in the video itself is kept: the parser
 //! also reads files next to it (eg. a .gcsv with the same name, the .csv of a RunCam, the parts of a RED clip), which can
-//! change without the video changing. A file that has none isn't kept either, it may have been unreadable at the time.
+//! change without the video changing. A file that has none isn't kept either, it may have been unreadable at the time
+//! (and a joined video with a part that has none).
 //!
 //! Only used by the app (see `set_enabled`), the plugins and the command line load a video once.
 
 use std::collections::HashMap;
 use std::sync::{ Arc, atomic::{ AtomicBool, Ordering::SeqCst } };
-use std::path::{ Path, PathBuf };
+use std::path::PathBuf;
 use std::time::{ Duration, SystemTime };
 use parking_lot::Mutex;
 use crate::gyro_source::{ FileLoadOptions, FileMetadata };
@@ -24,7 +25,12 @@ use crate::{ filesystem, joined_video };
 
 /// Cameras that record the motion data in the video, the beginning of `FileMetadata::detected_source`
 const EMBEDDED_SOURCES: &[&str] = &["DJI", "GoPro", "Sony", "Insta360"];
-/// The files telemetry-parser looks for next to a video without motion data (see `Input::from_stream_with_options`)
+/// The videos of those cameras (and joined videos), the others aren't looked up: a second load of them doesn't wait for the
+/// first one, which wouldn't keep its data
+const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "mxf", "insv", "360", "lrv", "osv", joined_video::EXTENSION];
+/// The files telemetry-parser looks for next to a video without motion data (see `Input::from_stream_with_options`), only
+/// next to these
+const SIDECAR_VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "mkv"];
 const SIDECAR_EXTENSIONS: &[&str] = &["jsonl", "gcsv", "bbl", "bfl", "csv", "JSONL", "GCSV", "BBL", "BFL", "CSV"];
 
 /// The memory the kept data may use (eg. a joined DJI recording of 8 minutes has 30 MB), the least recently used is dropped first
@@ -71,6 +77,11 @@ fn local_path(url: &str) -> Option<PathBuf> {
     if path.is_empty() { None } else { Some(PathBuf::from(path)) }
 }
 
+fn extension(url: &str) -> String {
+    let filename = filesystem::get_filename(url).to_ascii_lowercase();
+    filename.rsplit_once('.').map(|x| x.1.to_owned()).unwrap_or_default()
+}
+
 fn file_info(url: &str) -> Option<(u64, Option<SystemTime>)> {
     let path = local_path(url)?;
     filesystem::start_accessing_url(url, false);
@@ -83,11 +94,13 @@ fn file_info(url: &str) -> Option<(u64, Option<SystemTime>)> {
 
 /// Whether the parser may read the motion data of the video from a file next to it
 fn has_sidecar(url: &str) -> bool {
+    if !SIDECAR_VIDEO_EXTENSIONS.contains(&extension(url).as_str()) { return false; }
     let Some(path) = local_path(url) else { return true; };
-    SIDECAR_EXTENSIONS.iter().any(|ext| Path::new(&path).with_extension(ext).exists())
+    SIDECAR_EXTENSIONS.iter().any(|ext| path.with_extension(ext).exists())
 }
 
 fn key(url: &str, options: &FileLoadOptions, size: (usize, usize), fps: f64) -> Option<Key> {
+    if !VIDEO_EXTENSIONS.contains(&extension(url).as_str()) { return None; }
     let mut files = vec![file_info(url)?];
     if joined_video::is_joined(url) {
         let parts = joined_video::read(url).ok()?;
@@ -110,7 +123,7 @@ fn key(url: &str, options: &FileLoadOptions, size: (usize, usize), fps: f64) -> 
 
 fn estimated_bytes(md: &FileMetadata) -> usize {
     use std::mem::size_of_val;
-    fn vec<T>(v: &[T]) -> usize { std::mem::size_of_val(v) }
+    fn vec<T>(v: &[T]) -> usize { size_of_val(v) }
     // A node of a BTreeMap holds up to 11 entries and is about half full
     fn map<K, V>(v: &std::collections::BTreeMap<K, V>) -> usize { v.len() * (std::mem::size_of::<K>() + std::mem::size_of::<V>()) * 3 / 2 }
     let mut bytes = std::mem::size_of::<FileMetadata>()
@@ -162,13 +175,14 @@ fn insert(cache: &mut Cache, key: Key, md: Arc<FileMetadata>, bytes: usize) {
     cache.entries.insert(key, Entry { md, bytes, last_used });
 }
 
-/// The motion data of the file: the kept one if it was parsed before, otherwise the result of `parse` (kept for the next
-/// load, unless it was cancelled). While another load parses the same file, this waits for it, or until it's cancelled
+/// The motion data of the file: the kept one if it was parsed before, otherwise the result of `parse` (with whether it's
+/// complete, kept for the next load if it is and it wasn't cancelled). While another load parses the same file, this waits
+/// for it, or until it's cancelled
 pub fn get_or_parse<F>(url: &str, options: &FileLoadOptions, size: (usize, usize), fps: f64, cancel_flag: &Arc<AtomicBool>, parse: F) -> Result<FileMetadata, crate::GyroflowCoreError>
-    where F: FnOnce() -> Result<FileMetadata, crate::GyroflowCoreError>
+    where F: FnOnce() -> Result<(FileMetadata, bool), crate::GyroflowCoreError>
 {
-    if !ENABLED.load(SeqCst) { return parse(); }
-    let Some(key) = key(url, options, size, fps) else { return parse(); };
+    if !ENABLED.load(SeqCst) { return parse().map(|x| x.0); }
+    let Some(key) = key(url, options, size, fps) else { return parse().map(|x| x.0); };
     // The copy is made after unlocking, it takes a while for a long video
     let cached = |url: &str, md: Arc<FileMetadata>| {
         ::log::info!("Motion data of {url} taken from the cache");
@@ -183,9 +197,15 @@ pub fn get_or_parse<F>(url: &str, options: &FileLoadOptions, size: (usize, usize
         }
         Loading { arc: cache.loading.entry(key.clone()).or_default().clone(), key: key.clone() }
     };
-    let _guard = loop {
-        if let Some(guard) = loading.arc.try_lock_for(Duration::from_millis(100)) { break guard; }
-        if cancel_flag.load(SeqCst) { return Ok(FileMetadata::default()); }
+    let _guard = match loading.arc.try_lock() {
+        Some(guard) => guard,
+        None => {
+            ::log::info!("Waiting for another load of the motion data of {url}");
+            loop {
+                if let Some(guard) = loading.arc.try_lock_for(Duration::from_millis(100)) { break guard; }
+                if cancel_flag.load(SeqCst) { return Ok(FileMetadata::default()); }
+            }
+        }
     };
     // Parsed by the load it waited for
     let md = take(&mut CACHE.lock(), &key);
@@ -196,10 +216,10 @@ pub fn get_or_parse<F>(url: &str, options: &FileLoadOptions, size: (usize, usize
     let start = std::time::Instant::now();
     let result = parse();
 
-    if let Ok(md) = &result {
-        let embedded = md.detected_source.as_deref().is_some_and(|x| EMBEDDED_SOURCES.iter().any(|y| x == *y || x.starts_with(&format!("{y} "))));
+    if let Ok((md, complete)) = &result {
+        let embedded = md.detected_source.as_deref().is_some_and(|x| EMBEDDED_SOURCES.iter().any(|y| x.strip_prefix(y).is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))));
         // The parsers return what they read until then when it's cancelled
-        if embedded && md.has_motion() && !cancel_flag.load(SeqCst) {
+        if embedded && *complete && md.has_motion() && !cancel_flag.load(SeqCst) {
             let bytes = estimated_bytes(md);
             if bytes <= MAX_BYTES {
                 let md = Arc::new(md.clone());
@@ -208,7 +228,7 @@ pub fn get_or_parse<F>(url: &str, options: &FileLoadOptions, size: (usize, usize
             }
         }
     }
-    result
+    result.map(|x| x.0)
 }
 
 /// The lock of a file being parsed, removed when no load has it anymore
