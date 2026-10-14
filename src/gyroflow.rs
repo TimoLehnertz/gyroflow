@@ -84,6 +84,8 @@ fn entry() {
     if cli::run(&mut open_file, &mut open_preset) {
         return;
     }
+    // Only in the app, where the main view and the render queue load the same videos
+    gyroflow_core::telemetry_cache::set_enabled(true);
 
     if cfg!(compiled_qml) {
         // For some reason on some devices QML detects that debugger is connected and fails to load pre-compiled qml files
