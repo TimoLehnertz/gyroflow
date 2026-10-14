@@ -20,6 +20,7 @@ pub mod filtering;
 pub mod filesystem;
 pub mod gyro_export;
 pub mod joined_video;
+pub mod telemetry_cache;
 pub mod settings;
 
 pub mod gpu;
@@ -215,11 +216,13 @@ impl StabilizationManager {
         };
 
         let cancel_flag2 = cancel_flag.clone();
-        let mut md = if joined_video::is_joined(url) {
-            joined_video::parse_telemetry(url, options, size, fps, progress_cb, cancel_flag2)?
-        } else {
-            GyroSource::parse_telemetry_file(stream, filesize, &url, options, size, fps, progress_cb, cancel_flag2)?
-        };
+        let mut md = telemetry_cache::get_or_parse(url, options, size, fps, &cancel_flag, || {
+            if joined_video::is_joined(url) {
+                joined_video::parse_telemetry(url, options, size, fps, progress_cb, cancel_flag2)
+            } else {
+                GyroSource::parse_telemetry_file(stream, filesize, &url, options, size, fps, progress_cb, cancel_flag2)
+            }
+        })?;
         // The parsers return what they read until then, but a cancelled load (eg. replaced by the next video) mustn't set any of it
         if cancel_flag.load(SeqCst) { return Ok(()); }
         if md.detected_source.as_ref().map(|v| v.starts_with("GoPro ")).unwrap_or_default() {
