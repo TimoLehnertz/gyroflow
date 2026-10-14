@@ -349,8 +349,10 @@ Rectangle {
                         // With several trim ranges exported as separate videos, the queue button is about the active one
                         readonly property bool canChooseRange: exportbar.separateRanges && exportbar.rangeCount > 1 && videoArea.timeline.activeTrimRange >= 0;
                         // The direct render is done, let the queue continue where it was paused
-                        // Cancelled: the files of the other trim ranges aren't rendered either
+                        // Cancelled: the files of the other trim ranges aren't rendered either, and the cancelled one isn't rendered
+                        // again when the queue continues (a stopped job is queued again)
                         function cancelDirectRender(): void {
+                            if (renderBtn.directJobId > 0) render_queue.remove(renderBtn.directJobId);
                             for (const jobId of renderBtn.directNextJobs) render_queue.remove(jobId);
                             renderBtn.directNextJobs = [];
                             renderBtn.directRenderFinished();

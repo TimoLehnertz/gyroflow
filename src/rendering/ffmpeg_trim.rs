@@ -219,7 +219,8 @@ pub fn render_trim_only<F>(stab: &StabilizationManager, progress: F, input_file:
                 let total = render_frame_count.max(frames + 1);
                 progress((frames as f64 / total as f64, frames, total, false, false));
 
-                while pause_flag.load(Relaxed) {
+                // Stopping a paused render stops it right away
+                while pause_flag.load(Relaxed) && !cancel_flag.load(Relaxed) {
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
@@ -234,6 +235,12 @@ pub fn render_trim_only<F>(stab: &StabilizationManager, progress: F, input_file:
     drop(out_file);
 
     let output_url = filesystem::get_file_url(folder, &filename, false);
+
+    // Stopped: the file is incomplete, it's rendered again from the start (see `RenderQueue::render_job`)
+    if cancel_flag.load(Relaxed) {
+        let _ = filesystem::remove_file(&filesystem::get_file_url(folder, &render_filename, false));
+        return Ok(());
+    }
 
     if render_filename != filename {
         let output_url_temp = filesystem::get_file_url(folder, &render_filename, false);
