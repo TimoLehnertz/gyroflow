@@ -403,6 +403,8 @@ pub struct RenderQueue {
 
     paused_timestamp: Option<u64>,
     start_frame: u64,
+    /// See `save_later`
+    save_scheduled: std::cell::Cell<bool>,
 
     stabilizer: Arc<StabilizationManager>,
 
@@ -794,6 +796,7 @@ impl RenderQueue {
     }
     /// The trim range a job renders (-1: all of them, the way `export_trims_separately` says) and its output file
     pub fn set_job_output(&mut self, job_id: u32, range_index: i32, folder: String, filename: String) {
+        self.save_later();
         let Some(job) = self.jobs.get_mut(&job_id) else { return; };
         job.render_options.trim_range_index = if range_index >= 0 { Some(range_index as usize) } else { None };
         if !folder.is_empty() { job.render_options.output_folder = folder; }
@@ -1036,6 +1039,17 @@ impl RenderQueue {
         self.status_changed();
     }
 
+    /// Saves the queue once the current event is handled: the settings and output paths applied to its jobs (`apply_to_all`,
+    /// `set_job_output`) don't change the queue itself (`queue_changed`, which saves it), they would be lost when the app quits
+    /// before it does
+    fn save_later(&self) {
+        if self.save_scheduled.replace(true) { return; }
+        let save = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, _: ()| {
+            this.save_scheduled.set(false);
+            this.save_render_queue();
+        });
+        save(());
+    }
     pub fn save_render_queue(&self) {
         // Keep the not yet restored jobs of previous sessions, until they are restored
         let mut all = self.previous_queue.clone();
@@ -2292,6 +2306,7 @@ impl RenderQueue {
 
     pub fn apply_to_all(&mut self, data: String, additional_data: String, to_job_id: u32) {
         ::log::debug!("Applying preset {}", &data);
+        self.save_later();
         let data_parsed: serde_json::Result<serde_json::Value> = serde_json::from_str(&data);
         let mut new_output_options = None;
         if let Ok(obj) = &data_parsed {

@@ -530,10 +530,19 @@ ResizablePanel {
     // The job renders its key with the settings the video has now: the ones of its trim range, if it has its own, and the
     // output file of the key. Jobs that started rendering are left as they are, unless `loaded` (it just loaded the video)
     function syncJob(itemId: int, jobId: int, loaded: bool): void {
-        if (!loaded && media_library.get_job_status(jobId) != "queued") return;
         const seq = media_library.get_job_seq(jobId);
         const file = JSON.parse(media_library.get_item_outputs(itemId, "")).find(x => x.seq == seq);
         if (!file) return;
+        const status = media_library.get_job_status(jobId);
+        // It asks about its output file (eg. whether to overwrite it), but the output path changed meanwhile (eg. the export
+        // folder, also before a restored job was saved): it's queued again, the new file is checked when the settings are
+        // applied below (and asked about again if it exists too)
+        if (status == "question" && !root.sameOutputPath(jobId, file)) {
+            render_queue.reset_job(jobId);
+            media_library.set_job_error_string(jobId, "");
+        } else if (!loaded && status != "queued") {
+            return;
+        }
         const settings = media_library.get_settings_for_job(jobId);
         let data = settings? JSON.parse(settings) : ({ title: "Gyroflow data file", version: 4 });
         const output = root.jobData(itemId).output;
@@ -544,6 +553,10 @@ ResizablePanel {
         data.output.metadata = output.metadata;
         render_queue.apply_to_all(JSON.stringify(data), window.getAdditionalProjectDataJson(), jobId);
         render_queue.set_job_output(jobId, file.range_index, "", "");
+    }
+    function sameOutputPath(jobId: int, file: var): bool {
+        const folder = (x) => x.toString().replace(/\/+$/, "");
+        return folder(render_queue.get_job_output_folder(jobId)) == folder(file.output_folder) && render_queue.get_job_output_filename(jobId) == file.output_filename;
     }
     // Trim ranges with their own stabilization settings got their own copy of the loaded video, apply their settings to it
     function applyRangeSettings(itemId: int, jobIds: var, outputs: var): void {
