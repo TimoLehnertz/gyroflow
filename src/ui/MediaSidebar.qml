@@ -491,8 +491,9 @@ ResizablePanel {
                     root.syncJob(work.item_id, jobId, true);
                     added = true;
                 } else if (!work.loading) {
-                    // The first job of the video loads it, the other keys wait for it (see onProcessing_done)
-                    const jobId = render_queue.add_file(work.url, "", JSON.stringify(root.jobData(work.item_id)));
+                    // The first job of the video adds it, the other keys wait for it (see onProcessing_done). That only reads the
+                    // video information, its motion data is loaded when one of its jobs starts rendering
+                    const jobId = render_queue.add_file_deferred(work.url, "", JSON.stringify(root.jobData(work.item_id)));
                     root.pendingJobs[jobId] = true;
                     root.ownJobs[jobId] = true;
                     media_library.set_key_job(work.item_id, seq, jobId, true);

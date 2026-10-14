@@ -2447,13 +2447,14 @@ impl MediaLibrary {
         }
         self.update_job_row(item_id);
     }
-    /// Progress of the loading and synchronization phase, before the rendering starts
+    /// Progress of the loading and synchronization phase, before the rendering starts. Negative: it was stopped, the job
+    /// waits in the queue again
     pub fn set_job_processing(&mut self, job_id: u32, progress: f64) {
         let item_id = self.item_id_for_job(job_id);
         let Some(job) = self.job_mut(job_id) else { return; };
         if job.status == "error" || job.status == "question" || job.status == "done" { return; }
-        job.progress = progress;
-        job.status = "processing".into();
+        job.progress = progress.max(0.0);
+        job.status = if progress < 0.0 { "queued".into() } else { "processing".into() };
         self.update_job_row(item_id);
     }
     pub fn set_job_error(&mut self, job_id: u32, err: QString) {

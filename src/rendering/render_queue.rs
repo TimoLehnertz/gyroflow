@@ -65,7 +65,27 @@ struct Job {
     gyro_outdated: Arc<AtomicBool>,
     /// Whether the stabilizer is ready to render (synchronized, smoothing and zooming computed). The jobs of the trim ranges
     /// of one video share their stabilizer and this, so it's prepared once and never by two of them at the same time
-    prepared: Arc<parking_lot::Mutex<bool>>
+    prepared: Arc<parking_lot::Mutex<bool>>,
+    /// The motion data of the video that's only loaded when a job of it starts rendering (see `add_file_deferred`), shared
+    /// like `prepared`
+    deferred: Arc<parking_lot::Mutex<DeferredLoad>>
+}
+/// Marks a saved job whose lens profile is looked up from the motion data of its video when it's added again (see `save_render_queue`)
+const DETECT_LENS_PROFILE: &str = "queue_detect_lens_profile";
+/// The video of a job was added without its motion data (and the lens profile detected from it), they are loaded when one of
+/// its jobs starts rendering. Loading them replaces some of the settings applied to the stabilizer meanwhile (eg. the lens
+/// and the sync points), so those are applied again afterwards, in the same order: the way they are when the motion data
+/// is loaded first
+#[derive(Default, Clone)]
+struct DeferredLoad {
+    pending: bool,
+    /// The file the motion data is in, empty if it's the video itself
+    gyro_url: String,
+    sync_options: serde_json::Value,
+    /// The settings applied since the video was added (the project data and the sync options of `apply_to_all`)
+    applied: Vec<(Vec<u8>, serde_json::Value)>,
+    /// Whether any of them has a lens profile, otherwise the one of the camera is used (it's detected from the motion data)
+    applied_lens: bool,
 }
 
 #[derive(Default, Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -302,6 +322,7 @@ pub struct RenderQueue {
     get_gyroflow_data: qt_method!(fn(&self, job_id: u32) -> QString),
 
     add_file: qt_method!(fn(&mut self, url: String, gyro_url: String, additional_data: String) -> u32),
+    add_file_deferred: qt_method!(fn(&mut self, url: String, gyro_url: String, additional_data: String) -> u32),
 
     get_job_output_filename: qt_method!(fn(&self, job_id: u32) -> QString),
     get_job_output_folder: qt_method!(fn(&self, job_id: u32) -> QUrl),
@@ -459,7 +480,7 @@ impl RenderQueue {
     pub fn set_job_output_filename(&mut self, job_id: u32, new_filename: QString, start: bool) {
         if let Some(job) = self.jobs.get_mut(&job_id) {
             job.render_options.output_filename = new_filename.to_string();
-            job.project_data = Self::get_gyroflow_data_internal(&job.stab, &job.additional_data, &job.render_options);
+            job.project_data = Self::job_project_data(job);
         }
         update_model!(self, job_id, itm {
             itm.output_filename = new_filename;
@@ -599,7 +620,8 @@ impl RenderQueue {
             project_data,
             stab: stab.clone(),
             gyro_outdated: Default::default(),
-            prepared: Default::default()
+            prepared: Default::default(),
+            deferred: Default::default()
         });
         self.update_queue_indices();
 
@@ -670,10 +692,11 @@ impl RenderQueue {
         let input_file = self.queue.borrow().iter().nth(base_index).map(|x| x.input_file.clone()).unwrap_or_default();
         let insert_index = self.queue.borrow().iter().enumerate().filter(|(_, x)| x.input_file == input_file).map(|(i, _)| i + 1).max().unwrap_or(base_index + 1);
         let own_settings = output.get("own_settings").and_then(|x| x.as_bool()).unwrap_or_default();
-        let (stab, gyro_outdated, prepared) = if own_settings {
-            (Arc::new(base.stab.get_cloned()), Arc::new(AtomicBool::new(base.gyro_outdated.load(SeqCst))), Default::default())
+        let (stab, gyro_outdated, prepared, deferred) = if own_settings {
+            let (stab, deferred) = Self::copy_with_deferred(&base.stab, &base.deferred);
+            (stab, Arc::new(AtomicBool::new(base.gyro_outdated.load(SeqCst))), Default::default(), deferred)
         } else {
-            (base.stab.clone(), base.gyro_outdated.clone(), base.prepared.clone())
+            (base.stab.clone(), base.gyro_outdated.clone(), base.prepared.clone(), base.deferred.clone())
         };
         let job = Job {
             queue_index: insert_index,
@@ -683,7 +706,8 @@ impl RenderQueue {
             project_data: None,
             stab,
             gyro_outdated,
-            prepared
+            prepared,
+            deferred
         };
         let Some(mut itm) = self.queue.borrow().iter().nth(base_index).cloned() else { return 0; };
         let new_id = fastrand::u32(1..2147483640);
@@ -725,10 +749,11 @@ impl RenderQueue {
             } else {
                 let new_id = fastrand::u32(1..2147483640);
                 let base = &self.jobs[&job_id];
-                let (job_stab, gyro_outdated, prepared) = if own_settings {
-                    (Arc::new(stab.get_cloned()), Arc::new(AtomicBool::new(base.gyro_outdated.load(SeqCst))), Default::default())
+                let (job_stab, gyro_outdated, prepared, deferred) = if own_settings {
+                    let (job_stab, deferred) = Self::copy_with_deferred(&stab, &base.deferred);
+                    (job_stab, Arc::new(AtomicBool::new(base.gyro_outdated.load(SeqCst))), Default::default(), deferred)
                 } else {
-                    (stab.clone(), base.gyro_outdated.clone(), base.prepared.clone())
+                    (stab.clone(), base.gyro_outdated.clone(), base.prepared.clone(), base.deferred.clone())
                 };
                 let job = Job {
                     queue_index: base_index + n,
@@ -738,7 +763,8 @@ impl RenderQueue {
                     project_data: None,
                     stab: job_stab,
                     gyro_outdated,
-                    prepared
+                    prepared,
+                    deferred
                 };
                 self.jobs.insert(new_id, job);
                 let mut itm = base_item.clone();
@@ -760,7 +786,7 @@ impl RenderQueue {
         job.render_options.trim_range_index = if range_index >= 0 { Some(range_index as usize) } else { None };
         if !folder.is_empty() { job.render_options.output_folder = folder; }
         if !filename.is_empty() { job.render_options.output_filename = filename; }
-        job.project_data = Self::get_gyroflow_data_internal(&job.stab, &job.additional_data, &job.render_options);
+        job.project_data = Self::job_project_data(job);
 
         let params = job.stab.params.read();
         let ratio = match job.render_options.trim_range_index.and_then(|i| params.trim_ranges.get(i)) {
@@ -1043,6 +1069,107 @@ impl RenderQueue {
         None
     }
 
+    /// A copy of the stabilizer of a job, with whether its motion data is loaded yet. The state is taken first and held: a job of
+    /// it that finishes loading meanwhile can't make the copy look loaded while it's from before the load
+    fn copy_with_deferred(stab: &StabilizationManager, deferred: &parking_lot::Mutex<DeferredLoad>) -> (Arc<StabilizationManager>, Arc<parking_lot::Mutex<DeferredLoad>>) {
+        let deferred = deferred.lock();
+        let stab = Arc::new(stab.get_cloned());
+        (stab, Arc::new(parking_lot::Mutex::new(deferred.clone())))
+    }
+    /// `additional_data` with the info of the trim ranges in `data`, if it has it
+    fn with_range_info(additional_data: &str, data: &str) -> String {
+        let (Ok(serde_json::Value::Object(mut additional)), Ok(serde_json::Value::Object(data))) = (serde_json::from_str::<serde_json::Value>(additional_data), serde_json::from_str::<serde_json::Value>(data)) else {
+            return additional_data.to_owned();
+        };
+        for k in ["trim_range_info", "trim_range_config"] {
+            if let Some(v) = data.get(k) { additional.insert(k.into(), v.clone()); }
+        }
+        serde_json::Value::Object(additional).to_string()
+    }
+    /// The project of the job: it's loaded into the main view to edit the job, and saved with the queue
+    fn job_project_data(job: &Job) -> Option<String> {
+        let deferred = job.deferred.lock();
+        if deferred.pending {
+            Self::deferred_project_data(&job.stab, &deferred, &job.additional_data, &job.render_options)
+        } else {
+            drop(deferred);
+            Self::get_gyroflow_data_internal(&job.stab, &job.additional_data, &job.render_options)
+        }
+    }
+    /// The project of a job whose video was added without its motion data (see `DeferredLoad`). The stabilizer has default values
+    /// for what loading the motion data sets (eg. the frame readout time, the lens profile), and a project with them would set
+    /// them. It's the settings applied to it instead, so the project is loaded the way the job loads the video when it's rendered:
+    /// the motion data first, then these settings. Without a lens profile in them, the one of the camera is looked up (see `add_file`)
+    fn deferred_project_data(stab: &StabilizationManager, deferred: &DeferredLoad, additional_data: &str, render_options: &RenderOptions) -> Option<String> {
+        let exported = stab.export_gyroflow_data(core::GyroflowProjectType::Simple, "{}", None).ok().and_then(|x| serde_json::from_str::<serde_json::Value>(&x).ok())?;
+        let mut obj = serde_json::json!({
+            "title": "Gyroflow data file",
+            "version": exported.get("version").cloned().unwrap_or(serde_json::Value::from(4)),
+            "app_version": exported.get("app_version").cloned().unwrap_or_default(),
+            "videofile": exported.get("videofile").cloned().unwrap_or_default(),
+            "video_info": exported.get("video_info").cloned().unwrap_or_default(),
+            "gyro_source": { "filepath": exported.get("gyro_source").and_then(|x| x.get("filepath")).cloned().unwrap_or_default() },
+        });
+        if let Some(v) = exported.get("videofile_bookmark") { obj["videofile_bookmark"] = v.clone(); }
+        if let Some(v) = exported.get("gyro_source").and_then(|x| x.get("filepath_bookmark")) { obj["gyro_source"]["filepath_bookmark"] = v.clone(); }
+        for (data, _) in &deferred.applied {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(data) {
+                Self::merge_settings(&mut obj, &v);
+            }
+        }
+        if !deferred.applied_lens {
+            obj[DETECT_LENS_PROFILE] = serde_json::Value::Bool(true);
+        }
+        // Like `get_gyroflow_data_internal`
+        if let Ok(mut additional) = serde_json::from_str::<serde_json::Value>(additional_data) {
+            if additional.is_object() {
+                if let Ok(output) = serde_json::to_value(render_options) {
+                    additional["output"] = output;
+                }
+                core::util::merge_json(&mut obj, &additional);
+            }
+        }
+        Some(obj.to_string())
+    }
+    /// Merges settings applied after `dst` into it, the way importing them one after another sets them: the fields of the groups
+    /// one by one (the smoothing parameters by their name), everything else as a whole
+    fn merge_settings(dst: &mut serde_json::Value, src: &serde_json::Value) {
+        let (serde_json::Value::Object(dst), serde_json::Value::Object(src)) = (dst, src) else { return; };
+        for (k, v) in src {
+            // The video is the job's, and the trim ranges' info is in its additional data (see `apply_to_all`)
+            if ["videofile", "videofile_bookmark", "trim_range_info", "trim_range_config"].contains(&k.as_str()) { continue; }
+            match (dst.get_mut(k), v) {
+                (Some(serde_json::Value::Object(group)), serde_json::Value::Object(fields)) if ["stabilization", "gyro_source", "output", "video_info", "synchronization"].contains(&k.as_str()) => {
+                    if k == "stabilization" {
+                        // The smoothing parameters are set on the method that's selected: another one starts from its own
+                        if fields.get("method").is_some_and(|m| group.get("method") != Some(m)) {
+                            group.remove("smoothing_params");
+                        }
+                    }
+                    for (fk, fv) in fields {
+                        // The horizon lock is only set from both of them together
+                        if k == "stabilization" && (fk == "horizon_lock_amount" || fk == "horizon_lock_roll") && !(fields.contains_key("horizon_lock_amount") && fields.contains_key("horizon_lock_roll")) {
+                            continue;
+                        }
+                        match (group.get_mut(fk), fv) {
+                            (Some(serde_json::Value::Array(params)), serde_json::Value::Array(new_params)) if k == "stabilization" && fk == "smoothing_params" => {
+                                for p in new_params {
+                                    let name = p.get("name");
+                                    match params.iter_mut().find(|x| name.is_some() && x.get("name") == name) {
+                                        Some(existing) => *existing = p.clone(),
+                                        None => params.push(p.clone()),
+                                    }
+                                }
+                            }
+                            _ => { group.insert(fk.clone(), fv.clone()); }
+                        }
+                    }
+                }
+                _ => { dst.insert(k.clone(), v.clone()); }
+            }
+        }
+    }
+
     pub fn get_gyroflow_data(&self, job_id: u32) -> QString {
         if let Some(job) = self.jobs.get(&job_id) {
             job.project_data.clone().map(QString::from).unwrap_or_default()
@@ -1230,12 +1357,70 @@ impl RenderQueue {
             }
 
             let processing2 = processing.clone();
+            let processing3 = processing.clone();
             let gyro_outdated = job.gyro_outdated.clone();
             let prepared = job.prepared.clone();
+            let deferred = job.deferred.clone();
+            // Stopped while it loaded the motion data: it's queued again, like before it started
+            let load_cancelled = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, _: ()| {
+                update_model!(this, job_id, itm {
+                    if itm.status == JobStatus::Rendering {
+                        itm.status = JobStatus::Queued;
+                        itm.current_frame = 0;
+                        itm.processing_progress = 0.0;
+                    }
+                });
+                // Not processing anymore (see `MediaLibrary::set_job_processing`)
+                this.processing_progress(job_id, -1.0);
+                this.update_status();
+            });
             core::run_threaded(move || {
                 {
                     // Held while preparing, so the other jobs of the same video wait for it instead of preparing it as well
                     let mut prepared = prepared.lock();
+                    let pending = { let d = deferred.lock(); d.pending.then(|| (d.gyro_url.clone(), d.sync_options.clone())) };
+                    if let Some((gyro_url, sync_options)) = pending {
+                        // The motion data of a video that was added without it (see `DeferredLoad`), then the settings applied
+                        // to it since, again
+                        let result = Self::load_motion_data(&stab, &input_file.url, &gyro_url, |p| processing3(p * 0.99), cancel_flag.clone());
+                        if result.is_err() || cancel_flag.load(SeqCst) {
+                            // It stays to be loaded, the job can be rendered again (the queue only starts jobs that aren't processing)
+                            processing3(0.0);
+                            return match result {
+                                Err(e) => err(("An error occurred: %1".to_string(), e)),
+                                Ok(_) => load_cancelled(()),
+                            };
+                        }
+                        let size = stab.params.read().size;
+                        stab.set_size(size.0, size.1);
+                        stab.set_output_size(render_options.output_width, render_options.output_height);
+                        Self::update_sync_settings(&stab, &sync_options);
+                        let mut replayed = 0;
+                        loop {
+                            // Settings applied while it loaded are applied after the ones before them
+                            let next = {
+                                let mut d = deferred.lock();
+                                if replayed >= d.applied.len() {
+                                    d.pending = false;
+                                    d.applied.clear();
+                                    break;
+                                }
+                                d.applied[replayed..].to_vec()
+                            };
+                            replayed += next.len();
+                            for (data, sync_options) in next {
+                                let mut is_preset = false;
+                                if let Err(e) = stab.import_gyroflow_data(&data, false, None, |_|(), Arc::new(AtomicBool::new(false)), &mut is_preset, false) {
+                                    ::log::error!("Failed to apply the settings again: {:?}", e);
+                                }
+                                stab.set_output_size(render_options.output_width, render_options.output_height);
+                                stab.init_size();
+                                Self::update_sync_settings(&stab, &sync_options);
+                            }
+                        }
+                        processing3(1.0);
+                        gyro_outdated.store(true, SeqCst);
+                    }
                     if gyro_outdated.swap(false, SeqCst) {
                         stab.recompute_gyro();
                         *prepared = false;
@@ -1466,9 +1651,22 @@ impl RenderQueue {
     }
 
     pub fn add_file(&mut self, url: String, gyro_url: String, additional_data: String) -> u32 {
+        self.add_file_impl(url, gyro_url, additional_data, false)
+    }
+    /// Adds a video like `add_file`, but its motion data is only loaded when one of its jobs starts rendering (see
+    /// `DeferredLoad`). It's in the queue right away, also while the main view loads a video
+    pub fn add_file_deferred(&mut self, url: String, gyro_url: String, additional_data: String) -> u32 {
+        self.add_file_impl(url, gyro_url, additional_data, true)
+    }
+    fn add_file_impl(&mut self, url: String, gyro_url: String, additional_data: String, defer_motion: bool) -> u32 {
         let job_id = fastrand::u32(1..2147483640);
 
         let is_gf_data = url.starts_with('{');
+        // A saved job (see `restore_render_queue`) has the info of its own trim ranges (their output paths and ids), not the
+        // one of the video in the main view it's added from
+        let additional_data = if is_gf_data { Self::with_range_info(&additional_data, &url) } else { additional_data };
+        // Projects and saved jobs are loaded the way they always were
+        let defer_motion = defer_motion && !is_gf_data && !filesystem::get_filename(&url).ends_with(".gyroflow");
 
         let err = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, (msg, arg): (String, String)| {
             ::log::warn!("[add_file]: {}", arg);
@@ -1552,8 +1750,16 @@ impl RenderQueue {
                     let stab = Arc::new(stab);
 
                     let stab2 = stab.clone();
+                    let deferred = Arc::new(parking_lot::Mutex::new(DeferredLoad::default()));
+                    let deferred2 = deferred.clone();
                     let loaded = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, render_options: RenderOptions| {
                         this.add_internal(job_id, stab2.clone(), render_options, additional_data2.clone(), QString::default());
+                        if let Some(job) = this.jobs.get_mut(&job_id) {
+                            job.deferred = deferred2.clone();
+                            job.project_data = Self::job_project_data(job);
+                            // The queue was saved when the job was added, with the project data from before
+                            this.queue_changed();
+                        }
                     });
                     let thumb_fetched = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, thumb: QString| {
                         update_model!(this, job_id, itm { itm.thumbnail_url = thumb; });
@@ -1563,8 +1769,7 @@ impl RenderQueue {
                         this.added(job_id);
                     });
 
-                    // Two at a time and after the video of the main view, see `run_queue_load`
-                    core::run_queue_load(move || {
+                    let load = move || {
                         let fetch_thumb = |video_url: &str, ratio: f64| -> Result<(), rendering::FFmpegError> {
                             let mut fetched = false;
                             if !crate::cli::will_run_in_console() { // Don't fetch thumbs in the CLI
@@ -1614,6 +1819,20 @@ impl RenderQueue {
 
                             match result {
                                 Ok(obj) => {
+                                    // A job saved before the motion data of its video was loaded, its lens profile wasn't looked up
+                                    // yet (see `save_render_queue`): it's looked up now, and the settings of the job are applied again,
+                                    // the way they are applied after it when the video is added
+                                    if is_gf_data && obj.get(DETECT_LENS_PROFILE).and_then(|x| x.as_bool()) == Some(true) {
+                                        if let Err(e) = Self::autoload_lens(&stab) {
+                                            err(("An error occurred: %1".to_string(), e));
+                                            processing_failed(());
+                                            return;
+                                        }
+                                        let mut is_preset = false;
+                                        if let Err(e) = stab.import_gyroflow_data(url.as_bytes(), false, None, |_|(), Arc::new(AtomicBool::new(false)), &mut is_preset, false) {
+                                            ::log::error!("Failed to apply the settings of the job again: {:?}", e);
+                                        }
+                                    }
                                     if let Some(out) = obj.get("output") {
                                         if let Ok(mut render_options2) = serde_json::from_value(out.clone()) as serde_json::Result<RenderOptions> {
                                             render_options2.update_from_json(out);
@@ -1670,50 +1889,24 @@ impl RenderQueue {
 
                                 stab.input_file.write().url = url.clone();
 
-                                let is_main_video = gyro_url.is_empty();
-                                let gyro_url = if !gyro_url.is_empty() { &gyro_url } else { &url };
-                                {
-                                    if let Ok(mut file) = filesystem::open_file(&gyro_url, false, false) {
-                                        let filesize = file.size;
-                                        let _ = stab.load_gyro_data(file.get_file(), filesize, &gyro_url, is_main_video, &Default::default(), |_|(), Arc::new(AtomicBool::new(false)));
-                                    }
-                                }
-
-                                let camera_id = stab.camera_id.read();
-
-                                let has_builtin_profile = {
-                                    let gyro = stab.gyro.read();
-                                    let file_metadata = gyro.file_metadata.read();
-                                    file_metadata.lens_profile.as_ref().map(|y| y.is_object()).unwrap_or_default()
-                                };
-
-                                let id_str = camera_id.as_ref().map(|v| v.get_identifier_for_autoload()).unwrap_or_default();
-                                if !id_str.is_empty() && !has_builtin_profile {
-                                    let db = stab.lens_profile_db.read();
-                                    if db.contains_id(&id_str) {
-                                        match stab.load_lens_profile(&id_str) {
-                                            Ok(_) => {
-                                                let (fr, frd) = { let lens = stab.lens.read(); (lens.frame_readout_time, lens.frame_readout_direction) };
-                                                if let Some(fr) = fr {
-                                                    let mut params = stab.params.write();
-                                                    params.frame_readout_time = fr.abs();
-                                                    params.frame_readout_direction = frd.unwrap_or(if fr < 0.0 { ReadoutDirection::BottomToTop } else { ReadoutDirection::TopToBottom });
-                                                }
-                                            }
-                                            Err(e) => {
-                                                err(("An error occurred: %1".to_string(), e.to_string()));
-                                                processing_failed(());
-                                                return;
-                                            }
-                                        }
-                                    }
+                                if defer_motion {
+                                    // Loaded when a job of the video starts rendering. Where it's loaded from is known already (a saved
+                                    // job has it, see `save_render_queue`)
+                                    stab.gyro.write().file_url = if gyro_url.is_empty() { url.clone() } else { gyro_url.clone() };
+                                    *deferred.lock() = DeferredLoad { pending: true, gyro_url: gyro_url.clone(), sync_options: sync_options.clone(), ..Default::default() };
+                                } else if let Err(e) = Self::load_motion_data(&stab, &url, &gyro_url, |_| (), Arc::new(AtomicBool::new(false))) {
+                                    err(("An error occurred: %1".to_string(), e));
+                                    processing_failed(());
+                                    return;
                                 }
                                 // Without an output size, the video is rendered in its own size ("Original"), not in the output size of the lens profile
 
                                 stab.set_size(video_size.0, video_size.1);
                                 stab.set_output_size(render_options.output_width, render_options.output_height);
 
-                                stab.recompute_blocking();
+                                if !defer_motion {
+                                    stab.recompute_blocking();
+                                }
 
                                 // println!("{}", stab.export_gyroflow_data(true, serde_json::to_string(&render_options).unwrap_or_default()));
 
@@ -1743,7 +1936,14 @@ impl RenderQueue {
                             err(("An error occurred: %1".to_string(), "Unable to read the video file.".to_string()));
                             processing_failed(());
                         }
-                    });
+                    };
+                    if defer_motion {
+                        // Only the video information and the thumbnail, the motion data is loaded when it's rendered
+                        core::run_queue_add(load);
+                    } else {
+                        // Two at a time and after the video of the main view, see `run_queue_load`
+                        core::run_queue_load(load);
+                    }
                     processing_started = true;
                 }
             }
@@ -1755,6 +1955,41 @@ impl RenderQueue {
         }
 
         job_id
+    }
+
+    /// Loads the motion data of the video (from `gyro_url` if it's not empty, otherwise from the video itself) and the lens
+    /// profile of its camera
+    fn load_motion_data<F: Fn(f64)>(stab: &StabilizationManager, url: &str, gyro_url: &str, progress_cb: F, cancel_flag: Arc<AtomicBool>) -> Result<(), String> {
+        let is_main_video = gyro_url.is_empty();
+        let gyro_url = if !gyro_url.is_empty() { gyro_url } else { url };
+        if let Ok(mut file) = filesystem::open_file(gyro_url, false, false) {
+            let filesize = file.size;
+            let _ = stab.load_gyro_data(file.get_file(), filesize, gyro_url, is_main_video, &Default::default(), progress_cb, cancel_flag);
+        }
+        Self::autoload_lens(stab)
+    }
+    /// The lens profile of the camera the motion data was recorded with, unless the file has one built in (which the motion
+    /// data loaded already)
+    fn autoload_lens(stab: &StabilizationManager) -> Result<(), String> {
+        let has_builtin_profile = {
+            let gyro = stab.gyro.read();
+            let file_metadata = gyro.file_metadata.read();
+            file_metadata.lens_profile.as_ref().map(|y| y.is_object()).unwrap_or_default()
+        };
+        let id_str = stab.camera_id.read().as_ref().map(|v| v.get_identifier_for_autoload()).unwrap_or_default();
+        if !id_str.is_empty() && !has_builtin_profile {
+            let found = stab.lens_profile_db.read().contains_id(&id_str);
+            if found {
+                stab.load_lens_profile(&id_str).map_err(|e| e.to_string())?;
+                let (fr, frd) = { let lens = stab.lens.read(); (lens.frame_readout_time, lens.frame_readout_direction) };
+                if let Some(fr) = fr {
+                    let mut params = stab.params.write();
+                    params.frame_readout_time = fr.abs();
+                    params.frame_readout_direction = frd.unwrap_or(if fr < 0.0 { ReadoutDirection::BottomToTop } else { ReadoutDirection::TopToBottom });
+                }
+            }
+        }
+        Ok(())
     }
 
     fn do_autosync<F: Fn(f64) + Send + Sync + Clone + 'static, F2: Fn((String, String)) + Send + Sync + Clone + 'static>(stab: Arc<StabilizationManager>, processing_cb: F, input_file: &gyroflow_core::InputFile, err: F2, proc_height: i32) {
@@ -1982,19 +2217,22 @@ impl RenderQueue {
         {
             let status = |job: &Job| if job.queue_index < q.row_count() as usize { Some(q[job.queue_index].status.clone()) } else { None };
             let rendering = self.jobs.values().filter(|job| status(job) == Some(JobStatus::Rendering)).map(|job| Arc::as_ptr(&job.stab) as usize).collect::<std::collections::HashSet<_>>();
-            let mut detached: HashMap<usize, (Arc<StabilizationManager>, Arc<AtomicBool>, Arc<parking_lot::Mutex<bool>>)> = HashMap::new();
+            let mut detached: HashMap<usize, (Arc<StabilizationManager>, Arc<AtomicBool>, Arc<parking_lot::Mutex<bool>>, Arc<parking_lot::Mutex<DeferredLoad>>)> = HashMap::new();
             for (job_id, job) in self.jobs.iter() {
                 let ptr = Arc::as_ptr(&job.stab) as usize;
                 if (to_job_id == 0 || *job_id == to_job_id) && status(job) == Some(JobStatus::Queued) && rendering.contains(&ptr) && !detached.contains_key(&ptr) {
-                    detached.insert(ptr, (Arc::new(job.stab.get_cloned()), Arc::new(AtomicBool::new(true)), Default::default()));
+                    // A copy that's taken while the rendering job still loads the motion data loads it again itself
+                    let (stab, deferred) = Self::copy_with_deferred(&job.stab, &job.deferred);
+                    detached.insert(ptr, (stab, Arc::new(AtomicBool::new(true)), Default::default(), deferred));
                 }
             }
             for job in self.jobs.values_mut() {
                 if status(job) != Some(JobStatus::Queued) { continue; }
-                if let Some((stab, gyro_outdated, prepared)) = detached.get(&(Arc::as_ptr(&job.stab) as usize)) {
+                if let Some((stab, gyro_outdated, prepared, deferred)) = detached.get(&(Arc::as_ptr(&job.stab) as usize)) {
                     job.stab = stab.clone();
                     job.gyro_outdated = gyro_outdated.clone();
                     job.prepared = prepared.clone();
+                    job.deferred = deferred.clone();
                 }
             }
         }
@@ -2035,6 +2273,19 @@ impl RenderQueue {
                     // Only store the settings here. Processing the motion data and computing the smoothing and zooming
                     // happens when the job starts rendering, so applying settings to a long queue doesn't stall the UI
                     let mut is_preset = false;
+                    {
+                        // Applied again once the motion data is loaded (see `DeferredLoad`)
+                        let mut deferred = job.deferred.lock();
+                        if deferred.pending {
+                            // Applying the same settings again makes them the last ones, which is all the first time did
+                            let entry = (data_vec.clone(), sync_options.clone());
+                            deferred.applied.retain(|x| x != &entry);
+                            deferred.applied.push(entry);
+                            if data_parsed.as_ref().is_ok_and(|x| x.get("calibration_data").is_some()) {
+                                deferred.applied_lens = true;
+                            }
+                        }
+                    }
                     if let Err(e) = job.stab.import_gyroflow_data(&data_vec, false, None, |_|(), Arc::new(AtomicBool::new(false)), &mut is_preset, false) {
                         ::log::error!("Failed to update queue stab data: {:?}", e);
                     }
@@ -2044,7 +2295,18 @@ impl RenderQueue {
                     job.stab.init_size();
 
                     Self::update_sync_settings(&job.stab, &sync_options);
-                    job.project_data = Self::get_gyroflow_data_internal(&job.stab, &job.additional_data, &job.render_options);
+                    // The trim ranges of the job's video belong to the settings (and with them their output paths), not to the
+                    // video in the main view the job was added from
+                    if let Ok(obj) = &data_parsed {
+                        if let Ok(serde_json::Value::Object(mut additional)) = serde_json::from_str::<serde_json::Value>(&job.additional_data) {
+                            let mut changed = false;
+                            for k in ["trim_range_info", "trim_range_config"] {
+                                if let Some(v) = obj.get(k) { additional.insert(k.into(), v.clone()); changed = true; }
+                            }
+                            if changed { job.additional_data = serde_json::Value::Object(additional).to_string(); }
+                        }
+                    }
+                    job.project_data = Self::job_project_data(job);
                     processing_done(job_id);
 
                     q.change_line(job.queue_index, itm);

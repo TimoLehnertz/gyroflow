@@ -56,6 +56,8 @@ lazy_static::lazy_static! {
     static ref FOREGROUND_POOL: rayon::ThreadPool = rayon::ThreadPoolBuilder::new().thread_name(|i| format!("gyroflow-foreground-{i}")).build().unwrap();
     // The videos the render queue loads in the background, see `run_queue_load`
     static ref QUEUE_LOAD_POOL: rayon::ThreadPool = rayon::ThreadPoolBuilder::new().num_threads(2).thread_name(|i| format!("gyroflow-queue-load-{i}")).build().unwrap();
+    // The videos added to the render queue without their motion data, see `run_queue_add`
+    static ref QUEUE_ADD_POOL: rayon::ThreadPool = rayon::ThreadPoolBuilder::new().num_threads(2).thread_name(|i| format!("gyroflow-queue-add-{i}")).build().unwrap();
 }
 /// Loads of the main view that are queued or running (see `run_foreground`)
 static FOREGROUND_LOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -2290,6 +2292,12 @@ pub fn run_queue_load<F>(cb: F) where F: FnOnce() + Send + 'static {
         }
         cb();
     });
+}
+
+/// Adds a video to the render queue without its motion data (it's loaded when the video is rendered): only its information
+/// and a thumbnail are read, two at a time. It doesn't wait for the main view like `run_queue_load`, it's quick
+pub fn run_queue_add<F>(cb: F) where F: FnOnce() + Send + 'static {
+    QUEUE_ADD_POOL.spawn(cb);
 }
 
 /// Drop cached GPU pipelines on every worker thread of the render pool.
