@@ -205,6 +205,8 @@ pub struct MediaLibrary {
     get_timeline_markers: qt_method!(fn(&self, item_id: u32) -> QString),
 
     save_settings: qt_method!(fn(&mut self, item_id: u32, data: QString)),
+    save_trim_ranges: qt_method!(fn(&mut self, item_id: u32, ranges_ms: QString, range_info: QString) -> bool),
+    set_range_output_path: qt_method!(fn(&mut self, item_id: u32, uid: QString, path: QString)),
     get_project_data: qt_method!(fn(&self, item_id: u32) -> QString),
     get_settings_for_job: qt_method!(fn(&self, job_id: u32) -> QString),
     get_range_settings: qt_method!(fn(&self, item_id: u32, range_index: i32) -> QString),
@@ -1545,6 +1547,62 @@ impl MediaLibrary {
             });
         }
 
+        self.store_settings(item_id, data);
+    }
+
+    /// Saves only the trim ranges (`trim_ranges_ms`) and their info (`trim_range_info`, eg. their output paths) of the item,
+    /// while the other settings in the main view aren't the ones of the item yet (its motion data is still loading). Only
+    /// for an item that has settings already. Returns whether they changed
+    pub fn save_trim_ranges(&mut self, item_id: u32, ranges_ms: QString, range_info: QString) -> bool {
+        let (Ok(serde_json::Value::Array(ranges)), Ok(serde_json::Value::Array(info))) = (
+            serde_json::from_str::<serde_json::Value>(&ranges_ms.to_string()),
+            serde_json::from_str::<serde_json::Value>(&range_info.to_string()),
+        ) else { return false; };
+        if ranges.len() != info.len() { return false; }
+        let Some(mut obj) = self.video(item_id).and_then(|v| v.settings.as_ref()).and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok()).filter(|x| x.is_object()) else { return false; };
+        let before = obj.clone();
+        // The ranges are converted from the timeline, ranges that are the same up to rounding stay as they are
+        let old_ranges = obj.get("trim_ranges_ms").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+        let bounds = |r: &serde_json::Value| Some((r.get(0)?.as_f64()?, r.get(1)?.as_f64()?));
+        let Some(ranges) = ranges.iter().map(|r| {
+            let new = bounds(r)?;
+            let old = old_ranges.iter().find(|old| bounds(old).is_some_and(|old| (old.0 - new.0).abs() < 0.5 && (old.1 - new.1).abs() < 0.5));
+            Some(old.cloned().unwrap_or_else(|| serde_json::json!([new.0, new.1])))
+        }).collect::<Option<Vec<_>>>() else { return false; };
+        if let serde_json::Value::Object(ref mut o) = obj {
+            o.insert("trim_ranges_ms".into(), serde_json::Value::Array(ranges));
+            o.insert("trim_range_info".into(), serde_json::Value::Array(info));
+            o.remove("trim_ranges");
+        }
+        if let Some(base) = self.video(item_id).map(|v| self.output_path_or_default(&v.url, &v.output_path)) {
+            Self::assign_range_paths(&mut obj, &base);
+        }
+        if obj == before { return false; }
+        self.store_settings(item_id, obj);
+        true
+    }
+
+    /// Sets the output path of the trim range with this id (`uid` in `trim_range_info`), eg. one that was typed for it
+    /// while another video was opened. An empty path gives it the default one again
+    pub fn set_range_output_path(&mut self, item_id: u32, uid: QString, path: QString) {
+        let (uid, path) = (uid.to_string(), path.to_string());
+        if uid.is_empty() { return; }
+        let Some(mut obj) = self.video(item_id).and_then(|v| v.settings.as_ref()).and_then(|x| serde_json::from_str::<serde_json::Value>(x).ok()).filter(|x| x.is_object()) else { return; };
+        let Some(info) = obj.get_mut("trim_range_info").and_then(|x| x.as_array_mut()).and_then(|x| x.iter_mut().find(|x| x.get("uid").and_then(|x| x.as_str()) == Some(uid.as_str()))) else { return; };
+        let Some(info) = info.as_object_mut() else { return; };
+        if path.trim().is_empty() {
+            info.remove("output_path");
+        } else {
+            info.insert("output_path".into(), serde_json::Value::String(path));
+        }
+        if let Some(base) = self.video(item_id).map(|v| self.output_path_or_default(&v.url, &v.output_path)) {
+            Self::assign_range_paths(&mut obj, &base);
+        }
+        self.store_settings(item_id, obj);
+    }
+
+    /// Stores the settings of the item, with an output path for each of its trim ranges, and updates what depends on them
+    fn store_settings(&mut self, item_id: u32, mut data: serde_json::Value) {
         if let Some(base) = self.video(item_id).map(|v| self.output_path_or_default(&v.url, &v.output_path)) {
             Self::assign_range_paths(&mut data, &base);
         }
@@ -2623,6 +2681,56 @@ mod tests {
         assert_eq!(lib.range_index_of_seq(1, &uids[0]), -2);
         assert_eq!(lib.range_index_of_seq(1, ""), -1);
         assert_eq!(lib.get_seq_of_range(1, 0).to_string(), uids[1]);
+    }
+
+    #[test]
+    fn trim_ranges_are_saved_without_the_other_settings() {
+        let (mut lib, uids) = library_with_ranges(1, true);
+        let mut obj: serde_json::Value = serde_json::from_str(lib.standalone[0].settings.as_ref().unwrap()).unwrap();
+        obj["stabilization"] = serde_json::json!({ "smoothing_params": [{ "name": "smoothness", "value": 0.7 }] });
+        lib.standalone[0].settings = Some(obj.to_string());
+        let path0 = MediaLibrary::range_path(&obj["trim_range_info"][0]);
+
+        // The first range is the same up to rounding, the second one was added and named while the motion data loaded
+        let ranges = serde_json::json!([[0.3, 999.8], [5000.0, 6000.0]]).to_string();
+        let info = serde_json::json!([{ "uid": uids[0], "output_path": path0 }, { "uid": "00000000000000aa", "output_path": "runs/MY_RANGE" }]).to_string();
+        assert!(lib.save_trim_ranges(1, ranges.clone().into(), info.clone().into()));
+        let saved: serde_json::Value = serde_json::from_str(lib.standalone[0].settings.as_ref().unwrap()).unwrap();
+        assert_eq!(saved["stabilization"], obj["stabilization"], "the other settings stay");
+        assert_eq!(saved["trim_ranges_ms"], serde_json::json!([[0.0, 1000.0], [5000.0, 6000.0]]), "a range that didn't move keeps its values");
+        let outputs: serde_json::Value = serde_json::from_str(&lib.get_item_outputs(1, "".into()).to_string()).unwrap();
+        assert_eq!(outputs[1]["seq"], "00000000000000aa");
+        assert_eq!(outputs[1]["output_filename"], "MY_RANGE.mp4");
+        // The new range can be queued by its id right away
+        assert!(lib.enqueue(1, QString::from("00000000000000aa")));
+        // Nothing changed since
+        assert!(!lib.save_trim_ranges(1, ranges.into(), info.into()));
+        // Mismatched or invalid data is ignored
+        assert!(!lib.save_trim_ranges(1, "[[0, 1000]]".into(), "[]".into()));
+        assert!(!lib.save_trim_ranges(1, "{".into(), "[]".into()));
+
+        // A video without settings gets them once it's loaded, not only with its trim ranges
+        lib.standalone.push(Video { id: 2, url: "file:///videos/C0002.MP4".into(), ..Default::default() });
+        assert!(!lib.save_trim_ranges(2, "[[0, 1000]]".into(), "[{}]".into()));
+        assert!(lib.standalone[1].settings.is_none());
+    }
+
+    #[test]
+    fn the_output_path_of_a_range_is_set_by_its_id() {
+        let (mut lib, uids) = library_with_ranges(2, true);
+        lib.set_range_output_path(1, QString::from(uids[1].as_str()), "finals/heat 2".into());
+        let outputs: serde_json::Value = serde_json::from_str(&lib.get_item_outputs(1, "".into()).to_string()).unwrap();
+        assert_eq!(outputs[0]["output_filename"], "C0001_stabilized-001.mp4");
+        assert_eq!(outputs[1]["output_filename"], "heat 2.mp4");
+        assert!(outputs[1]["output_folder"].as_str().unwrap().ends_with("/finals/"));
+        // An emptied path is the default one again
+        lib.set_range_output_path(1, QString::from(uids[1].as_str()), "".into());
+        let outputs: serde_json::Value = serde_json::from_str(&lib.get_item_outputs(1, "".into()).to_string()).unwrap();
+        assert_eq!(outputs[1]["output_filename"], "C0001_stabilized-002.mp4");
+        // An unknown id changes nothing
+        let before = lib.standalone[0].settings.clone();
+        lib.set_range_output_path(1, "unknown".into(), "x".into());
+        assert_eq!(lib.standalone[0].settings, before);
     }
 
     fn library_with_ranges(ranges: usize, separate: bool) -> (MediaLibrary, Vec<String>) {

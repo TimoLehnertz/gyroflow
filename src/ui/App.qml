@@ -330,14 +330,16 @@ Rectangle {
                         readonly property string activeRangeState: mediaPanel.keyStates[rangeUid(activeRange)] || "";
                         readonly property bool activeRangeQueued: activeRangeState.length > 0;
                         readonly property int queuedRangeCount: videoArea.timeline.trimRanges.filter((x, i) => !!mediaPanel.keyStates[rangeUid(i)]).length;
+                        // "Stabilize now" renders with the settings of the main view, which are the ones of the video once its motion data is loaded
+                        readonly property bool canStabilizeNow: canExport && window.videoArea.settingsLoaded();
                         // "Stabilize now": the active trim range when they are exported as separate videos (the one the
                         // output path in the bottom bar is of), otherwise the whole video. The destination is picked in a
                         // file dialog, starting with that output path, and stays the output path of the range or video
                         function stabilizeNow(): void {
-                            if (!renderBtn.canExport) return;
+                            if (!renderBtn.canStabilizeNow) return;
                             outputFile.commit();
                             outputFile.chooseFile(function(_) {
-                                if (!renderBtn.canExport) return;
+                                if (!renderBtn.canStabilizeNow) return;
                                 renderBtn.directRange = mediaPanel.activeRange();
                                 // The file was picked in the dialog, which asks itself whether to replace an existing one
                                 // (a folder picked when sandboxed doesn't, so it's asked when rendering)
@@ -387,7 +389,10 @@ Rectangle {
                                 ]);
                                 return;
                             }
-                            if (window.stabilizationEnabled && !controller.lens_loaded && !allowLens) {
+                            // While the motion data of a video of the media list loads, the main view doesn't show its lens and sync points yet.
+                            // It's queued with the settings the list has for it
+                            const queuesFromList = renderBtn.pendingAction == "queue" && render_queue.editing_job_id <= 0 && !window.videoArea.settingsLoaded();
+                            if (window.stabilizationEnabled && !controller.lens_loaded && !allowLens && !queuesFromList) {
                                 messageBox(Modal.Warning, qsTr("Lens profile is not loaded, your result will be incorrect. Are you sure you want to render this file?"), [
                                     { text: qsTr("Yes"), clicked: () => { allowLens = true; renderBtn.render(); }},
                                     { text: qsTr("No"), accent: true },
@@ -395,7 +400,7 @@ Rectangle {
                                 return;
                             }
                             const usesQuats = ((motionData.item.hasQuaternions && motionData.item.integrationMethod === 0) || motionData.item.hasAccurateTimestamps) && motionData.item.filename == vidInfo.item.filename;
-                            if (window.stabilizationEnabled && !usesQuats && controller.offsets_model.rowCount() == 0 && !allowSync) {
+                            if (window.stabilizationEnabled && !usesQuats && controller.offsets_model.rowCount() == 0 && !allowSync && !queuesFromList) {
                                 messageBox(Modal.Warning, qsTr("There are no sync points present, your result will be incorrect. Are you sure you want to render this file?"), [
                                     { text: qsTr("Yes"), clicked: () => { allowSync = true; renderBtn.render(); }},
                                     { text: qsTr("No"), accent: true },
@@ -469,9 +474,16 @@ Rectangle {
 
                                 if (renderBtn.pendingAction == "queue") {
                                     // The media list is the single source of truth for the queue, so instead of creating
-                                    // a job here, queue the loaded item there. Saving an edited job still goes directly.
-                                    if (render_queue.editing_job_id > 0 || mediaPanel.queueLoadedFile(renderBtn.queueRange) <= 0) {
+                                    // a job here, queue the loaded item there. Saving an edited job still goes directly,
+                                    // and so does a video that's not in the list.
+                                    const queued = render_queue.editing_job_id > 0? 0 : mediaPanel.queueLoadedFile(renderBtn.queueRange);
+                                    if (queued == 0) {
                                         render_queue.add(window.getAdditionalProjectDataJson(), controller.image_to_b64(result.image));
+                                    }
+                                    if (queued < 0) {
+                                        // Nothing was queued, don't say it was
+                                        messageBox(Modal.Warning, qsTr("It couldn't be added to the render queue. Try again once the motion data of the video is loaded."), [ { text: qsTr("Ok") } ]);
+                                        return;
                                     }
                                     renderBtn.addQueueDelayed = true;
                                     delayAddQueue.start();
@@ -603,7 +615,7 @@ Rectangle {
                         icon.width: 14 * dpiScale;
                         icon.height: 14 * dpiScale;
                         iconName: "video";
-                        enabled: renderBtn.canExport;
+                        enabled: renderBtn.canStabilizeNow;
                         tooltip: exportbar.separateRanges && exportbar.rangeCount > 0
                                  ? qsTr("Choose where to save the active range, and render it right away, before everything else in the render queue. The queue is resumed afterwards.")
                                  : qsTr("Choose where to save this video, and render it right away, before everything else in the render queue. The queue is resumed afterwards.");

@@ -44,6 +44,8 @@ TextField {
     onTextChanged: if (!preventChange) edited = true;
     onActiveFocusChanged: if (activeFocus && !edited) textBeforeEdit = text;
     onEditingFinished: commit();
+    // Escape with typed text reverts it, the shortcut of the main view for the same key (eg. leaving full screen) doesn't get it
+    Keys.onShortcutOverride: (event) => { if (event.key === Qt.Key_Escape && edited) event.accepted = true; }
     Keys.onEscapePressed: (event) => {
         if (!edited) { event.accepted = false; return; }
         preventChange = true;
@@ -64,14 +66,15 @@ TextField {
         }
     }
 
-    // Shows `path` while the actual output is `folder` + `fname`. An empty path keeps the current text.
-    function setResolvedPath(folder: url, fname: string, path: string): void {
+    // Shows `path` while the actual output is `folder` + `fname`. An empty path keeps the current text, unless `replaceText`
+    // (then the text is never the one of another range or video)
+    function setResolvedPath(folder: url, fname: string, path: string, replaceText: bool): void {
         preventChange = true;
         folderUrl = folder;
         filename = fname;
         fullFileUrl = "";
         // Don't type over what the user is editing
-        if (path && !edited) { text = path; textBeforeEdit = path; }
+        if ((path || replaceText) && !edited) { text = path; textBeforeEdit = path; }
         preventChange = false;
     }
     // A path picked in one of the dialogs, shown as it is and reported to the owner of the path

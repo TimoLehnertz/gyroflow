@@ -33,6 +33,28 @@ Item {
     property bool isCalibrator: false;
 
     property var pendingGyroflowData: null;
+    // The settings whose trim ranges are shown while the motion data of the video loads (see `fileLoaded`). The ranges can
+    // be edited meanwhile, so the ones in the timeline are kept when these settings are applied (`keepTrimRanges`)
+    property var earlyTrimRangesData: null;
+    property bool keepTrimRanges: false;
+    // Settings are being applied to the main view, until `gyroflow_file_loaded`
+    property bool importingSettings: false;
+    // Whether the main view shows all settings of its video. While the video or its motion data loads, or settings are being
+    // applied, the panels still show the ones of the previous video (the trim ranges can already be its own, see below)
+    function settingsLoaded(): bool {
+        return vid.loaded && !videoLoader.active && !controller.loading_gyro_in_progress && !root.pendingGyroflowData && !root.importingSettings;
+    }
+    // Whether the trim ranges in the timeline are the ones of the loaded video, which stay when its settings are applied
+    function trimRangesLoaded(): bool {
+        if (!vid.loaded) return false;
+        if (root.importingSettings) return root.keepTrimRanges;
+        return !root.pendingGyroflowData || root.pendingGyroflowData === root.earlyTrimRangesData;
+    }
+    // The trim ranges in ms, the way they are saved (`trim_ranges_ms`)
+    function trimRangesMs(): var {
+        const duration = controller.get_org_duration_ms() || vid.duration;
+        return timeline.trimRanges.map(x => [x[0] * duration, x[1] * duration]);
+    }
     // The first frame of a newly loaded video is shown, the playhead can be moved from now on (it's at the start until then).
     // Its trim ranges are already shown, its motion data can still be loading
     signal firstFrameShown();
@@ -77,7 +99,7 @@ Item {
     function showActiveRangeSettings(): void {
         if (!root.separateRangeSettings) { root.displayedRangeInfo = null; return; }
         const i = timeline.activeTrimRange;
-        if (i < 0 || !vid.loaded) return;
+        if (i < 0 || i >= timeline.trimRanges.length || !vid.loaded) return;
         const info = timeline.trimRangeInfo(i);
         if (info === root.displayedRangeInfo) return;
         root.storeDisplayedRangeSettings();
@@ -195,6 +217,9 @@ Item {
         }
 
         controller.set_prevent_recompute(true);
+        // The trim ranges shown while the motion data loaded could have been edited meanwhile, they stay as they are now
+        root.keepTrimRanges = obj === root.earlyTrimRangesData;
+        root.importingSettings = true;
         if (obj.toString() != '[object Object]') {
             // obj is url
             controller.import_gyroflow_file(obj);
@@ -217,6 +242,10 @@ Item {
     Connections {
         target: controller;
         function onGyroflow_file_loaded(obj: var): void {
+            const keepTrimRanges = root.keepTrimRanges;
+            if (keepTrimRanges) root.earlyTrimRangesData = null;
+            root.keepTrimRanges = false;
+            root.importingSettings = false;
             if (obj) {
                 let duration_ms = videoArea.vid.duration;
                 const info = obj.video_info || { };
@@ -243,7 +272,12 @@ Item {
                     root.separateRangeSettings = obj.trim_range_config == "separate";
                     root.displayedRangeInfo = null;
                 }
-                root.applyTrimRanges(obj, duration_ms);
+                if (keepTrimRanges) {
+                    // The stabilizer got the ranges of the settings, it gets the ones of the timeline again
+                    timeline.setTrimRanges(timeline.trimRanges.slice());
+                } else {
+                    root.applyTrimRanges(obj, duration_ms);
+                }
                 window.motionData.loadGyroflow(obj);
                 window.stab.loadGyroflow(obj);
                 window.advanced.loadGyroflow(obj);
@@ -328,6 +362,9 @@ Item {
         }
         function onTelemetry_loaded(is_main_video: bool, filename: string, camera: string, additional_data: var): void {
             console.log("Telemetry additional data:", JSON.stringify(additional_data));
+            // A telemetry load replaces an import of settings that was still running, which then never reports being loaded
+            root.importingSettings = false;
+            root.keepTrimRanges = false;
             if (is_main_video) {
                 root.detectedCamera = camera;
                 vidInfo.updateEntry("Detected camera", camera || "---");
@@ -535,6 +572,9 @@ Item {
         render_queue.editing_job_id = 0;
         root.separateRangeSettings = false;
         root.displayedRangeInfo = null;
+        root.earlyTrimRangesData = null;
+        root.keepTrimRanges = false;
+        root.importingSettings = false;
         controller.load_video(url, vid);
         if (!isCalibrator) {
             // The output path of a video in the media library is managed there
@@ -818,6 +858,7 @@ Item {
                             // The video plays while the gyro data loads, and the settings are only applied once it's loaded.
                             // Its trim ranges are shown right away, the timeline would show the whole video until then
                             if (pending.toString() == '[object Object]' && !pending.project_file) {
+                                root.earlyTrimRangesData = pending;
                                 root.applyTrimRanges(pending, (pending.video_info || { }).duration_ms || vid.duration);
                             }
                             Qt.callLater(root.loadGyroflowData, pending, root.pendingQueueJobId);
@@ -1331,7 +1372,7 @@ Item {
                 }
                 onRestrictTrimChanged: {
                     if (restrictTrim) {
-                        const range = timeline.activeTrimRange >= 0? timeline.trimRanges[timeline.activeTrimRange] : [0.0, 1.0];
+                        const range = timeline.trimRanges[timeline.activeTrimRange] || [0.0, 1.0];
                         vid.setPlaybackRange(range[0] * vid.duration, range[1] * vid.duration);
                     } else if (prevRestrictTrim != restrictTrim) {
                         vid.setPlaybackRange(0, -1);

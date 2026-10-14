@@ -94,7 +94,7 @@ Item {
                 const endMs = range[1] * root.orgDurationMs;
                 if (endMs > prev && endMs <= next && Math.abs(endMs - root.stoppedAtEndMs) > frameMs / 2) return stopAt(range[1], endMs);
             }
-        } else if (step < 0 && root.restrictTrim && root.activeTrimRange >= 0) {
+        } else if (step < 0 && root.restrictTrim && root.activeTrimRange >= 0 && root.activeTrimRange < root.trimRanges.length) {
             // Restricted to the active range, the player started it again from its start
             const range = root.trimRanges[root.activeTrimRange];
             const endMs = range[1] * root.orgDurationMs;
@@ -145,8 +145,16 @@ Item {
             const info = trimRangeInfo(i);
             if (!info.uid) info.uid = (Date.now() * 4096 + Math.floor(Math.random() * 4096)).toString(16).padStart(16, "0").slice(-16);
         }
-        root.trimRangesChanged();
+        // Before the ranges are reported as changed: the handlers look up the active range in them
         root.updateActiveTrimRange();
+        root.trimRangesChanged();
+    }
+    // Replaces all trim ranges. The handlers of their change look up the active range in them, an index past the end made
+    // the bottom bar stop showing and saving output paths. One that doesn't exist anymore is none until they are cleaned up
+    // (an index in the new ranges would be looked up in the old ones by the handlers of the active range)
+    function replaceTrimRanges(ranges: var): void {
+        if (activeTrimRange >= ranges.length) activeTrimRange = -1;
+        trimRanges = ranges;
     }
 
     function closestTrimRange(pos: real, isStart: bool): int {
@@ -169,7 +177,7 @@ Item {
             trimRanges[i][0] = v;
             if (trimRanges[i][1] <= v) trimRanges[i][1] = v + 0.01;
         } else {
-            trimRanges = [[v, 1.0]];
+            replaceTrimRanges([[v, 1.0]]);
         }
         Qt.callLater(root.cleanupTrimRanges);
     }
@@ -179,7 +187,7 @@ Item {
             trimRanges[i][1] = v;
             if (trimRanges[i][0] >= v) trimRanges[i][0] = v - 0.01;
         } else {
-            trimRanges = [[0.0, v]];
+            replaceTrimRanges([[0.0, v]]);
         }
         Qt.callLater(root.cleanupTrimRanges);
     }
@@ -224,7 +232,7 @@ Item {
                 return;
             }
         }
-        trimRanges = ranges;
+        replaceTrimRanges(ranges);
         Qt.callLater(root.cleanupTrimRanges);
     }
     // Each trim range is [start, end, info], info has the output path of the range when they are exported as separate videos.
@@ -255,7 +263,7 @@ Item {
     }
 
     function resetTrim(): void {
-        trimRanges = prevTrimRanges;
+        replaceTrimRanges(prevTrimRanges);
         prevTrimRanges = [];
         Qt.callLater(root.cleanupTrimRanges);
     }

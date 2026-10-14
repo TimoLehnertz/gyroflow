@@ -82,8 +82,9 @@ ResizablePanel {
     Timer {
         id: rangesSaveTimer;
         interval: 300;
-        // Not while the settings of an item are still being applied to the main view
-        onTriggered: if (!window.videoArea.pendingGyroflowData) root.saveCurrentSettings();
+        // While the main view is busy (eg. it recomputes after a trim range was added, or the motion data loads) only the trim
+        // ranges can be saved, everything else is saved once it's done
+        onTriggered: if (!root.saveCurrentSettings()) rangesSaveTimer.restart();
     }
     // So are all other settings: the list shows if the output files are outdated by them (see `get_output_states`).
     // Stabilization, lens, background, keyframes and synchronization changes are recomputed, export options aren't, so
@@ -149,13 +150,33 @@ ResizablePanel {
     // --------------------------------------- Actions -----------------------------------------
     // -----------------------------------------------------------------------------------------
 
-    function saveCurrentSettings(): void {
+    // Returns false if the main view is busy with the item, then only its trim ranges were saved (or nothing, while they
+    // aren't loaded either) and it has to be saved again later
+    function saveCurrentSettings(): bool {
         const id = media_library.current_item;
+        const videoArea = window.videoArea;
         // The main view can show another video than the current item (eg. while a new one is loading), its settings don't belong to this item
-        if (id > 0 && window.videoArea.vid.loaded && !window.videoArea.videoLoader.active && !controller.loading_gyro_in_progress && media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString())) {
-            media_library.save_settings(id, controller.export_gyroflow_data("Simple", window.getAdditionalProjectData()));
-            root.markQueuedJobOutdated(id);
+        if (id <= 0 || !videoArea.vid.loaded || !media_library.is_item_url(id, videoArea.loadedFileUrl.toString())) return true;
+        if (!videoArea.settingsLoaded()) {
+            // While its motion data loads, the panels still show the settings of the previous video, but the trim ranges are
+            // the ones of this video already, and they can be edited. They are saved, so they can be queued and aren't lost
+            if (videoArea.trimRangesLoaded() && media_library.save_trim_ranges(id, JSON.stringify(videoArea.trimRangesMs()), JSON.stringify(videoArea.timeline.getTrimRangeInfo()))) {
+                root.markQueuedJobOutdated(id);
+            }
+            return false;
         }
+        let data = controller.export_gyroflow_data("Simple", window.getAdditionalProjectData());
+        // The stabilizer drops the trim ranges when the first one is the whole video (it renders the same), but each range has its
+        // own output path, which only follows the ranges of the timeline if they are all saved
+        const ranges = videoArea.timeline.trimRanges;
+        if (ranges.length > 0 && ranges[0][0] === 0 && ranges[0][1] === 1) {
+            let obj = JSON.parse(data);
+            obj.trim_ranges_ms = videoArea.trimRangesMs();
+            data = JSON.stringify(obj);
+        }
+        media_library.save_settings(id, data);
+        root.markQueuedJobOutdated(id);
+        return true;
     }
 
     function loadItem(itemId: int): void {
@@ -199,24 +220,36 @@ ResizablePanel {
     function activeRange(): int {
         const timeline = window.videoArea.timeline;
         const separate = window.exportSettings && window.exportSettings.exportTrimsSeparately.checked;
-        return separate && timeline.trimRanges.length > 0? timeline.activeTrimRange : -1;
+        return separate && timeline.trimRanges.length > 0? Math.min(timeline.activeTrimRange, timeline.trimRanges.length - 1) : -1;
     }
     function currentOutputPath(itemId: int): string {
         const range = root.activeRange();
         if (range >= 0) return (window.videoArea.timeline.trimRanges[range][2] || { }).output_path || "";
         return media_library.get_output_path(itemId);
     }
+    // What the output path in the bottom bar is of: the item, and the id of the trim range (empty for the whole video)
+    function outputTarget(): var {
+        const range = root.activeRange();
+        const info = range >= 0? (window.videoArea.timeline.trimRanges[range][2] || { }) : null;
+        return { item: media_library.current_item, range: range, uid: info? (info.uid || "") : "" };
+    }
+    // The target of the path that's being typed. It's applied to that range or video, even if another one is shown meanwhile
+    property var editTarget: null;
+    function isOutputTarget(a: var, b: var): bool { return a.item == b.item && (a.range >= 0) == (b.range >= 0) && (a.uid? a.uid == b.uid : a.range == b.range); }
+    // Once the typed path is applied or reverted (the path picked in a dialog right after typing goes to the same target)
+    function clearEditTarget(): void { if (!window.outputFile || !window.outputFile.edited) root.editTarget = null; }
     // Shows the output path, the folder and filename it resolves to are what's rendered
     function showOutputPath(itemId: int, path: string, updateText: bool): void {
         const resolved = media_library.resolve_output_path(itemId, path, root.outputExtension(itemId));
-        window.outputFile.setResolvedPath(resolved[0], resolved[1], updateText? path : "");
+        window.outputFile.setResolvedPath(resolved[0], resolved[1], updateText? path : "", updateText);
     }
     // Every trim range of the loaded video has its own output path: the ones that don't have one yet
     // get the path of the video with the next free number (clip_stabilized-001, -002, ...)
     function assignRangePaths(): void {
         const id = media_library.current_item;
         const timeline = window.videoArea.timeline;
-        if (id <= 0 || !window.videoArea.vid.loaded || window.videoArea.videoLoader.active || controller.loading_gyro_in_progress) return;
+        // Also while the motion data loads: the ranges can be added and named already
+        if (id <= 0 || !window.videoArea.trimRangesLoaded()) return;
         if (!media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString())) return;
         const base = media_library.get_output_path(id);
         const used = timeline.trimRanges.map(x => (x[2] || { }).output_path).filter(x => x);
@@ -235,35 +268,58 @@ ResizablePanel {
     }
     function updateOutputFile(): void {
         const id = media_library.current_item;
-        // Don't type over the field while the user is editing it
-        if (!window.outputFile || root.updatingOutput) return;
+        if (!window.outputFile) return;
+        // A path that's being typed for another range or video (eg. the playhead moved into the next range) is applied to that one first
+        if (window.outputFile.edited && root.editTarget && !root.isOutputTarget(root.editTarget, root.outputTarget())) window.outputFile.commit();
+        if (root.updatingOutput) return;
         root.updatingOutput = true;
-        if (id > 0) root.showOutputPath(id, root.currentOutputPath(id), true);
-        window.outputFile.pathMode = id > 0;
-        root.updatingOutput = false;
-    }
-    // The output path can also be changed in the bottom bar, store it in the library then
-    function pushOutputToItem(path: string): void {
-        const id = media_library.current_item;
-        if (root.updatingOutput || id <= 0) return;
-        root.updatingOutput = true;
-        const range = root.activeRange();
-        if (range >= 0) {
-            // It's part of the settings of the video, like the trim range itself
-            window.videoArea.timeline.setTrimRangeOutputPath(range, path);
-            // An emptied path gets the default one of the range again
-            root.assignRangePaths();
-            root.saveCurrentSettings();
-        } else {
-            media_library.set_output_path(id, path);
-            root.updateQueuedJob(id);
+        // Always reset, an exception would stop showing (and storing) output paths for the rest of the session
+        try {
+            // Doesn't type over the field while the user is editing it
+            if (id > 0) root.showOutputPath(id, root.currentOutputPath(id), true);
+            window.outputFile.pathMode = id > 0;
+        } finally {
+            root.updatingOutput = false;
         }
-        root.updatingOutput = false;
+    }
+    // The output path can also be changed in the bottom bar, store it in the library then. It's the one of the range or
+    // video it was typed for
+    function pushOutputToItem(path: string): void {
+        const target = root.editTarget || root.outputTarget();
+        root.editTarget = null;
+        if (root.updatingOutput || target.item <= 0) return;
+        root.updatingOutput = true;
+        try {
+            const timeline = window.videoArea.timeline;
+            const index = target.uid? timeline.trimRanges.findIndex(x => (x[2] || { }).uid === target.uid) : target.range;
+            const shown = target.item == media_library.current_item && index >= 0 && index < timeline.trimRanges.length && window.videoArea.trimRangesLoaded()
+                       && media_library.is_item_url(target.item, window.videoArea.loadedFileUrl.toString());
+            if (target.range >= 0 && shown) {
+                // It's part of the settings of the video, like the trim range itself
+                timeline.setTrimRangeOutputPath(index, path);
+                // An emptied path gets the default one of the range again
+                root.assignRangePaths();
+                root.saveCurrentSettings();
+            } else if (target.range >= 0) {
+                // The video isn't shown anymore
+                media_library.set_range_output_path(target.item, target.uid, path);
+                root.markQueuedJobOutdated(target.item);
+            } else {
+                media_library.set_output_path(target.item, path);
+                root.updateQueuedJob(target.item);
+            }
+        } finally {
+            root.updatingOutput = false;
+        }
         // Show the path as it's stored now
         root.updateOutputFile();
     }
     Connections {
         target: window.outputFile;
+        function onEditedChanged(): void {
+            if (window.outputFile.edited) root.editTarget = root.outputTarget();
+            else Qt.callLater(root.clearEditTarget);
+        }
         function onPathEdited(path: string): void { root.pushOutputToItem(path); }
         function onResolveRequested(): void {
             const id = media_library.current_item;
@@ -502,7 +558,8 @@ ResizablePanel {
     function jobData(itemId: int): var {
         let ad = JSON.parse(JSON.stringify(window.getAdditionalProjectData()));
         ad.output = ad.output || ({ });
-        const isLoaded = media_library.current_item == itemId && window.videoArea.vid.loaded && !window.videoArea.videoLoader.active;
+        // While its motion data loads, the export settings in the main view are still the ones of the previous video
+        const isLoaded = media_library.current_item == itemId && window.videoArea.settingsLoaded();
         const saved = isLoaded? "" : media_library.get_output_settings(itemId);
         if (saved) {
             ad.output = JSON.parse(saved);
@@ -581,22 +638,32 @@ ResizablePanel {
         return itemId;
     }
     // The "Add to render queue" button of the bottom bar queues the loaded item through the same path
-    // the sidebar uses, so there's only one way a job is created. Returns the queued item id, or 0.
-    // `range` >= 0 queues only that trim range (with the trim ranges exported as separate videos), -1 all of them
+    // the sidebar uses, so there's only one way a job is created. Returns the queued item id, 0 if it's not a video of the
+    // list, or -1 if it couldn't be queued. `range` >= 0 queues only that trim range (with the trim ranges exported as separate
+    // videos), -1 all of them
     function queueLoadedFile(range: int): int {
         const itemId = root.loadedItem();
         if (itemId <= 0) return 0;
-        // The settings of the main view are the ones of this item
+        // The settings of the main view are the ones of this item (while its motion data loads, its trim ranges are)
         root.saveCurrentSettings();
         if (range >= 0) {
-            root.enqueue(itemId, media_library.get_seq_of_range(itemId, range));
+            const seq = root.loadedRangeSeq(itemId, range);
+            root.enqueue(itemId, seq);
+            if (!JSON.parse(media_library.get_key_states(itemId)).hasOwnProperty(seq)) return -1;
         } else {
             // The keys that aren't queued yet
             media_library.enqueue_all(itemId);
+            if (!media_library.is_item_queued(itemId)) return -1;
         }
         const index = media_library.get_item_index(itemId);
         if (index >= 0) lv.positionViewAtIndex(index, ListView.Contain);
         return itemId;
+    }
+    // The queue key of a trim range of the loaded video: the id the timeline has for it, the media list knows it by that
+    // id once its settings are saved
+    function loadedRangeSeq(itemId: int, range: int): string {
+        const info = (window.videoArea.timeline.trimRanges[range] || [])[2] || { };
+        return info.uid || media_library.get_seq_of_range(itemId, range);
     }
     // The output files of the video loaded in the main view, with its current settings: one per trim range
     // if they are exported as separate videos, only the one of `onlyRange` if it's >= 0. Empty if it's not a video of the library
@@ -732,8 +799,7 @@ ResizablePanel {
             elapsed += interval;
             // Another video was opened meanwhile, or it doesn't load
             if (id != media_library.current_item || elapsed > 120000) { stop(); root.pendingStabilizeItem = 0; return; }
-            const ready = window.renderBtn.canExport && !controller.loading_gyro_in_progress && !window.videoArea.pendingGyroflowData
-                       && media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString());
+            const ready = window.renderBtn.canStabilizeNow && media_library.is_item_url(id, window.videoArea.loadedFileUrl.toString());
             if (!ready) return;
             stop();
             root.pendingStabilizeItem = 0;
@@ -754,7 +820,7 @@ ResizablePanel {
     }
     function unqueueLoadedRange(range: int): void {
         const itemId = root.loadedItem();
-        if (itemId > 0) root.dequeue(itemId, media_library.get_seq_of_range(itemId, range));
+        if (itemId > 0) root.dequeue(itemId, root.loadedRangeSeq(itemId, range));
     }
 
     // The render queue itself is managed in its own modal, opened from here or from the bottom bar
