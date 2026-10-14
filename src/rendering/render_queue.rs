@@ -1027,6 +1027,11 @@ impl RenderQueue {
             }
         }
 
+        // Nothing renders anymore: it's not paused either, the next start starts it (see `start`)
+        self.pause_flag.store(false, SeqCst);
+        for (_id, job) in self.jobs.iter() { job.pause_flag.store(false, SeqCst); }
+        self.paused_timestamp = None;
+
         self.status = QString::from("stopped");
         self.status_changed();
     }
@@ -1215,7 +1220,8 @@ impl RenderQueue {
     pub fn render_job_direct(&mut self, job_id: u32) {
         self.render_job_impl(job_id, true);
     }
-    /// The job of "Stabilize now" is hidden: it keeps rendering as a job of the queue, paused when the queue is
+    /// Whether the job renders for "Stabilize now", not paused with the queue. Hidden, it keeps rendering as a job of the
+    /// queue, paused when the queue is
     pub fn set_job_direct(&mut self, job_id: u32, direct: bool) {
         let paused = self.pause_flag.load(SeqCst);
         if let Some(job) = self.jobs.get_mut(&job_id) {
@@ -1298,13 +1304,16 @@ impl RenderQueue {
                     if this.get_pending_count() > 0 && is_queue_active {
                         // Start the next one
                         this.start();
-                    } else {
+                    } else if this.get_active_render_count() == 0 {
                         this.start_timestamp = 0;
                         this.start_frame = 0;
                         this.update_status();
                         if is_queue_active {
                             this.post_render_action();
                         }
+                    } else {
+                        // Others still render (eg. the queue resumed after "Stabilize now", see `App.qml`), it's not done
+                        this.update_status();
                     }
                 }
             });
@@ -1449,10 +1458,7 @@ impl RenderQueue {
                 }
                 if this.get_active_render_count() == 0 {
                     core::clear_gpu_cache_on_all_workers();
-                    // Nothing is rendering anymore, the next start starts the queue instead of resuming it
-                    this.pause_flag.store(false, SeqCst);
-                    for (_id, job) in this.jobs.iter() { job.pause_flag.store(false, SeqCst); }
-                    this.paused_timestamp = None;
+                    // Nothing is rendering anymore (`update_status` unpauses it)
                     this.start_timestamp = 0;
                     this.start_frame = 0;
                 }

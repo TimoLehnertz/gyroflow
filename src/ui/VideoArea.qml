@@ -1396,7 +1396,7 @@ Item {
                 if (!root.isCalibrator && render_queue.main_job_id > 0) {
                     render_queue.cancel_job(render_queue.main_job_id);
                     // The queue was paused so this render could overrule it, let it continue now
-                    window.renderBtn.cancelDirectRender();
+                    window.renderBtn.cancelDirectRender(render_queue.main_job_id);
                     // It was removed from the queue, it doesn't report its end anymore (see `onRender_progress`)
                     render_queue.main_job_id = 0;
                     videoLoader.active = false;
@@ -1405,9 +1405,10 @@ Item {
                 }
             }
             onHide: {
+                const mainJobId = render_queue.main_job_id;
                 render_queue.main_job_id = 0;
                 videoLoader.active = false;
-                if (!root.isCalibrator) window.renderBtn.hideDirectRender();
+                if (!root.isCalibrator) window.renderBtn.hideDirectRender(mainJobId);
             }
         }
         Column {
@@ -1531,9 +1532,9 @@ Item {
                     accent: f.toLowerCase() == candidate,
                     clicked: () => {
                         render_queue.set_pixel_format(job_id, f);
-                        // Shown here again (it was reset when it ended)
+                        // Shown here again (it was reset when it ended), it's a render of "Stabilize now"
                         render_queue.main_job_id = job_id;
-                        render_queue.render_job(job_id);
+                        render_queue.render_job_direct(job_id);
                     }
                 }));
                 buttons.push({
@@ -1541,9 +1542,9 @@ Item {
                     accent: candidate == '',
                     clicked: () => {
                         render_queue.set_pixel_format(job_id, "cpu");
-                        // Shown here again (it was reset when it ended)
+                        // Shown here again (it was reset when it ended), it's a render of "Stabilize now"
                         render_queue.main_job_id = job_id;
-                        render_queue.render_job(job_id);
+                        render_queue.render_job_direct(job_id);
                     }
                 });
                 buttons.push({ text: qsTr("Cancel") });
