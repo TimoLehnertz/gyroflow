@@ -454,7 +454,8 @@ impl<'a> FfmpegProcessor<'a> {
                                 if encoding_status == Status::Finish {
                                     encoding_video = false;
                                 }
-                                while pause_flag.load(Relaxed) {
+                                // Stopping a paused render stops it right away
+                                while pause_flag.load(Relaxed) && !cancel_flag.load(Relaxed) {
                                     std::thread::sleep(std::time::Duration::from_millis(100));
                                 }
                             },

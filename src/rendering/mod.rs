@@ -792,11 +792,20 @@ pub fn render<F, F2, F3>(stab: Arc<StabilizationManager>, progress: F, input_fil
     if cfg!(not(any(target_os = "android", target_os = "ios"))) && !is_sequence {
         render_filename = format!("{filename}.tmp");
     }
-    proc.render(folder, &render_filename, (output_width as u32, output_height as u32), if render_options.bitrate > 0.0 { Some(render_options.bitrate) } else { None }, cancel_flag, pause_flag)?;
+    proc.render(folder, &render_filename, (output_width as u32, output_height as u32), if render_options.bitrate > 0.0 { Some(render_options.bitrate) } else { None }, cancel_flag.clone(), pause_flag)?;
 
     drop(proc);
 
     let output_url = gyroflow_core::filesystem::get_file_url(folder, &filename, false);
+
+    // Stopped: the file is incomplete, it's rendered again from the start (see `RenderQueue::render_job`). The frames of an
+    // image sequence rendered until then are kept
+    if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        if !is_sequence {
+            let _ = gyroflow_core::filesystem::remove_file(&gyroflow_core::filesystem::get_file_url(folder, &render_filename, false));
+        }
+        return Ok(());
+    }
 
     if render_filename != filename {
         let output_url_temp = gyroflow_core::filesystem::get_file_url(folder, &render_filename, false);

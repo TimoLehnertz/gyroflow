@@ -1368,19 +1368,33 @@ impl RenderQueue {
             let gyro_outdated = job.gyro_outdated.clone();
             let prepared = job.prepared.clone();
             let deferred = job.deferred.clone();
-            // Stopped while it loaded the motion data: it's queued again, like before it started
-            let load_cancelled = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, _: ()| {
+            // Stopped (while it loaded the motion data, or rendered: its incomplete file is removed): it's queued again, like
+            // before it started, and rendered from the start the next time
+            let stopped = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, _: ()| {
                 update_model!(this, job_id, itm {
-                    if itm.status == JobStatus::Rendering {
+                    if itm.status == JobStatus::Rendering || itm.status == JobStatus::Queued {
                         itm.status = JobStatus::Queued;
                         itm.current_frame = 0;
                         itm.processing_progress = 0.0;
+                        itm.start_timestamp = 0;
+                        itm.frame_times.clear();
                     }
                 });
-                // Not processing anymore (see `MediaLibrary::set_job_processing`)
+                // Ended without a file (which marks the job done, see `MediaLibrary::update_job_progress`), then not processing
+                // anymore (see `MediaLibrary::set_job_processing`)
+                this.render_progress(job_id, 0.0, 0, 0, true, 0.0, false);
                 this.processing_progress(job_id, -1.0);
+                if this.get_active_render_count() == 0 {
+                    core::clear_gpu_cache_on_all_workers();
+                    // Nothing is rendering anymore, the next start starts the queue instead of resuming it
+                    this.pause_flag.store(false, SeqCst);
+                    this.paused_timestamp = None;
+                    this.start_timestamp = 0;
+                    this.start_frame = 0;
+                }
                 this.update_status();
             });
+            let stopped2 = stopped.clone();
             core::run_threaded(move || {
                 {
                     // Held while preparing, so the other jobs of the same video wait for it instead of preparing it as well
@@ -1395,7 +1409,7 @@ impl RenderQueue {
                             processing3(0.0);
                             return match result {
                                 Err(e) => err(("An error occurred: %1".to_string(), e)),
-                                Ok(_) => load_cancelled(()),
+                                Ok(_) => stopped(()),
                             };
                         }
                         let size = stab.params.read().size;
@@ -1588,6 +1602,7 @@ impl RenderQueue {
                     if cancel_flag.load(SeqCst) { break; }
                     if render_options.disable_stabilization {
                         if let Err(e) = rendering::render_trim_only(&stab, progress.clone(), &input_file, &render_options, range, cancel_flag.clone(), pause_flag.clone()) {
+                            if cancel_flag.load(SeqCst) { break 'ranges; }
                             err(("An error occurred: %1".to_string(), e.to_string()));
                             break 'ranges;
                         }
@@ -1596,6 +1611,8 @@ impl RenderQueue {
                     let mut i = 0;
                     loop {
                         let result = rendering::render(stab.clone(), progress.clone(), &input_file, &render_options, i, range, cancel_flag.clone(), pause_flag.clone(), encoder_initialized.clone(), processing_info.clone());
+                        // Stopped, not failed (the encoder may fail when it's stopped)
+                        if result.is_err() && cancel_flag.load(SeqCst) { break 'ranges; }
                         if let Err(e) = result {
                             if let rendering::FFmpegError::PixelFormatNotSupported((fmt, supported, candidate)) = e {
                                 let candidate = if let Some(c) = candidate { format!("{c:?}").to_ascii_lowercase().to_string() } else { String::new() };
@@ -1634,6 +1651,9 @@ impl RenderQueue {
                     }
                 }
                 stab.gpu_decoding.store(original_gpu_decode, SeqCst);
+                if cancel_flag.load(SeqCst) {
+                    stopped2(());
+                }
             });
         }
     }
